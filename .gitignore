@@ -1,0 +1,22 @@
+# OrchDesk
+node_modules/
+dist/
+lib/
+*.log
+.DS_Store
+
+# dsh vendor（引用仓库，单独 git 管理，不纳入 OrchDesk 提交）
+references/
+
+# 构建产物
+*.tsbuildinfo
+-out/
+
+# 本地数据目录（运行时生成）
+.orchdesk-home/
+.dsh-home/
+# WorkBuddy 会话临时缓存（skill 检查临时文件、chrome profile 等）
+.workbuddy/tmp/
+# 开发期 profile 的 node_modules（含指向 packages/bundle/desktop 的软链）
+.dsh-home/profiles/node_modules/
+.dsh-home/profiles/*/node_modules/

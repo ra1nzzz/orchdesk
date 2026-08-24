@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "types": ["node", "electron"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "ES2022"
+  },
+  "include": ["main.ts", "preload.ts", "guanji.ts", "hub.ts"]
+}

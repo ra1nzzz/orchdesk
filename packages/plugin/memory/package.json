@@ -1,0 +1,25 @@
+{
+  "name": "@orchdesk/dsh-memory",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 智能层 · 上下文转储召回 + 四域分层记忆（T-P4-1/T-P4-2，FR-10）。本地 TF-IDF 起步，不调云端 embedding；四域物理隔离；晋升流 fail-closed。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}

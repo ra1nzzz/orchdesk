@@ -1,0 +1,27 @@
+{
+  "name": "@orchdesk/dsh-compensation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 补偿层（T-P5-1，FR-12，论文 §6.1）：外发操作发送前二次确认（withhold）+ 发送后撤回/补偿动作 + 审计；三类高危默认 CONFIRM 不可绕过，fail-closed。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}

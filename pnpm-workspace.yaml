@@ -1,0 +1,35 @@
+# OrchDesk pnpm workspace
+#
+# 拓扑决策（P0，见 docs/30-开发/build.md §3 工程拓扑）：
+# OrchDesk 不 fork deepseek-harness，而是把它作为「vendor 底座」引用。
+# dsh 是 pnpm monorepo，其包以 workspace:^ 互相引用。OrchDesk 的新包
+# （dsh-desktop bundle / apps/desktop）需引用 dsh 的包。两种方案待定，
+# 在 references/deepseek-harness 完成 install + build:lib 后敲定：
+#
+#   方案 A（超级 workspace，推荐）：本文件追加 globs 把 dsh 的包纳入，
+#     packages:
+#       - 'packages/*/*'
+#       - 'apps/*'
+#       - 'references/deepseek-harness/packages/*/*'
+#       - 'references/deepseek-harness/vendor/*'
+#       - 'references/deepseek-harness/native/landlock-run/packages/*'
+#       - 'references/deepseek-harness/apps/*'
+#     由 OrchDesk 根的 pnpm-lock 统一解析 dsh 全部依赖。
+#
+#   方案 B（file: 引用 dsh 构建产物）：OrchDesk 包直接
+#     dependencies: { "@deepseek-ai/dsh-base": "file:references/deepseek-harness/packages/bundle/base" }
+#     要求 dsh 先 build:lib 产出 lib/。
+#
+# 当前仅声明 OrchDesk 自有包；dsh 引用方案选定后放开注释。
+
+packages:
+  - 'packages/*/*'
+  - 'apps/*'
+
+allowBuilds:
+  electron-winstaller: set this to true or false
+
+# pnpm 11：允许执行构建脚本的依赖（默认拦截 postinstall）。
+# electron 的 postinstall 负责下载 Electron 二进制，必须放行。
+onlyBuiltDependencies:
+  - electron

@@ -1,0 +1,26 @@
+{
+  "name": "@orchdesk/dsh-intent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 意图识别插件：监听 agent/pre-step，在 prompt 到达模型前做 F1-F4 初筛与 4-gate 校验（ACT/CONFIRM/BLOCK，fail-closed）。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}

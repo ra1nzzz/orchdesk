@@ -1,0 +1,42 @@
+{
+  "name": "@orchdesk/dsh-desktop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 桌面壳 bundle：叠在 dsh-base 之上的桌面扩展层（Electron 主进程桥接 + 桌面壳插件）",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@orchdesk/dsh-intent": "workspace:*",
+    "@orchdesk/dsh-trace": "workspace:*",
+    "@orchdesk/dsh-brain": "workspace:*",
+    "@orchdesk/dsh-multi": "workspace:*",
+    "@orchdesk/dsh-authz": "workspace:*",
+    "@orchdesk/dsh-memory": "workspace:*",
+    "@orchdesk/dsh-prompt": "workspace:*",
+    "@orchdesk/dsh-compensation": "workspace:*",
+    "@orchdesk/dsh-evolution": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "devDependencies": {}
+}

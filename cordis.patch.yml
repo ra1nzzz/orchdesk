@@ -1,0 +1,15 @@
+# OrchDesk 对 dsh 的补丁层约定（vendor baseline）
+#
+# 基线 commit: deepseek-ai/deepseek-harness @ 99f6f02 （2026-08-17 锁定）
+# 锁定依据: docs/70-决策/ADR-0001-base-deepseek-harness.md
+#
+# 规则（防漂移，见 docs/30-开发/PLAN.md T-P0-1）：
+#   1. 禁止直接改 references/deepseek-harness 源码；自定义改动一律走此补丁层。
+#   2. 基线升级须经 ADR（docs/30-开发/workflow.md §4）并回归验证。
+#   3. patch 按 id 覆盖（last-write-wins）；profile 的 dsh.profile.bundles
+#      叠加顺序：dsh-base → dsh-desktop（OrchDesk）→ 用户/profile patch。
+#
+# 当前为初始空 patch（仅占位）。OrchDesk 的实际桌面壳 patch 在
+# packages/bundle/desktop/cordis.patch.yml。
+
+- insert: []

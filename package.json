@@ -1,0 +1,22 @@
+{
+  "name": "orchdesk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OrchDesk — 本地优先的多 Agent 编排桌面工作台（底座 deepseek-harness / Cordis）",
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build:dsh": "pnpm --filter @deepseek-ai/dsh-root run build",
+    "desktop": "pnpm --filter @orchdesk/desktop run start",
+    "build:desktop": "pnpm --filter @orchdesk/desktop run build",
+    "lint": "pnpm -r run lint --if-present",
+    "typecheck": "pnpm -r run typecheck --if-present",
+    "test": "pnpm -r run test --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,73 @@
+# OrchDesk 桌面壳 bundle patch：叠在 dsh-base 之上的桌面扩展层。
+#
+# 叠加顺序（profile 的 dsh.profile.bundles）：
+#   dsh-base → dsh-desktop（本文件）→ 用户/profile patch
+#
+# 规则（见根 cordis.patch.yml 与 PLAN T-P0-2）：
+#   - patch 按 id 覆盖（last-write-wins），本层不得重复 dsh-base 已声明的 row id，
+#     除非有意覆盖其 config。
+#   - 平台条件用 `disabled: !!js <表达式>`，不要写死 true/false。
+#   - 不要挂载 dsh-fs-local（dsh-fs-sandbox 已注册 ctx.fs，重复注册 load 失败）。
+#
+# P2（T-P2-2~T-P2-5）已 insert 4 内置插件 rows：意图识别 / TRACE / 脑手解耦 /
+# 多Agent编排。OrchClaw Hub 按 T-P2-6 延后，暂不加 row（仅渲染层占位卡片标「延后」）。
+# 桌面壳桥接插件（T-P1-1）仍由主进程 apps/desktop 以独立方式接入，本 patch
+# 只声明业务插件 rows。
+#
+# 规则（不变）：patch 按 id 覆盖（last-write-wins），本层不得重复 dsh-base 已声明
+# 的 row id；平台条件用 `disabled: !!js <表达式>`；不挂载 dsh 已注册的同名 service。
+
+- insert:
+    - id: orchdesk-intent
+      name: '@orchdesk/dsh-intent'
+      config:
+        riskThreshold: 0.7
+        defaultFallback: BLOCK
+        localModel: qwen3:14b
+        auditLog: true
+    - id: orchdesk-trace
+      name: '@orchdesk/dsh-trace'
+      config:
+        repoUrl: ''
+        maskEnabled: true
+        cacheDir: .orchdesk/trace-cache
+    - id: orchdesk-brain
+      name: '@orchdesk/dsh-brain'
+      config:
+        maxConcurrentSubagents: 3
+        isolationEnabled: true
+    - id: orchdesk-multi
+      name: '@orchdesk/dsh-multi'
+      config:
+        presets:
+          - 全栈开发团
+          - 写作团
+    - id: orchdesk-authz
+      name: '@orchdesk/dsh-authz'
+      config:
+        defaultMode: default
+        approvalTimeoutMs: 120000
+    - id: orchdesk-memory
+      name: '@orchdesk/dsh-memory'
+      config:
+        dumpThreshold: 0.8
+        recallTopK: 5
+        maxContextTokens: 128000
+        keepRecent: 6
+        maxEntriesPerDomain: 200
+        dataRoot: .orchdesk/memory
+    - id: orchdesk-prompt
+      name: '@orchdesk/dsh-prompt'
+      config:
+        defaultPriority: 100
+        dataRoot: .orchdesk/prompt
+    - id: orchdesk-compensation
+      name: '@orchdesk/dsh-compensation'
+      config:
+        auditLog: true
+        failClosedUnknown: true
+    - id: orchdesk-evolution
+      name: '@orchdesk/dsh-evolution'
+      config:
+        auditLog: true
+        requireConfirm: true

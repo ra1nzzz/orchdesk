@@ -1,0 +1,25 @@
+{
+  "name": "@orchdesk/dsh-authz",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 授权插件（T-P3-2）：三模式（default/trusted/paranoid）映射到 dsh sandbox/mode + approval/policy；L0-L4 分级；审批应答方（fail-closed）；审计日志聚合。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}

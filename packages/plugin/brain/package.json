@@ -1,0 +1,26 @@
+{
+  "name": "@orchdesk/dsh-brain",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 脑手解耦插件：主会话（CEO）理解/回收/沉淀，SubAgent（Worker）执行/反馈/即用即走，上下文隔离零残留。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}

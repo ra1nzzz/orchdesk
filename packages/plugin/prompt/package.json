@@ -1,0 +1,25 @@
+{
+  "name": "@orchdesk/dsh-prompt",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 智能层 · 系统提示词库（T-P4-3，FR-11）。与技能解耦；分类；{skill:xxx} 引用语法；按 Agent 绑定与优先级合并（冲突显式标记）。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}

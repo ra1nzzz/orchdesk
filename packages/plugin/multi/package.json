@@ -1,0 +1,26 @@
+{
+  "name": "@orchdesk/dsh-multi",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 多Agent编排插件：8 专家 + 3 团（类 WorkBuddy 专家团模型），CEO→Director→Worker 层级后台执行，视觉弱化。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}

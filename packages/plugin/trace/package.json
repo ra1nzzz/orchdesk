@@ -1,0 +1,26 @@
+{
+  "name": "@orchdesk/dsh-trace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk TRACE 插件：在 Agent Loop 前后记录语用意图用户反馈，脱敏后遥测上传至用户配置的公开 GitHub 仓库。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}

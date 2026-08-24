@@ -1,0 +1,25 @@
+{
+  "name": "@orchdesk/dsh-evolution",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OrchDesk 自进化创造模式（T-P5-2，FR-13）：Agent 运行时自建/卸载临时插件（信任级=Shell、仅驻内存、重启即失）；自生成插件须经静态分析与授权门控（默认 CONFIRM + 沙箱内运行），fail-closed。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {}
+}
