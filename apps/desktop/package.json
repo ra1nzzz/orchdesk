@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "description": "OrchDesk 桌面壳（Electron 主进程 + 渲染层桥接）",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/orchdesk/orchdesk.git"
+  },
   "main": "dist/main.js",
   "scripts": {
     "start": "pnpm run build:main && electron .",
@@ -28,24 +32,16 @@
       "renderer/**/*",
       "package.json"
     ],
-    "win": [
-      {
-        "target": [
-          "nsis",
-          "portable"
-        ],
-        "arch": [
-          "x64"
-        ]
-      }
-    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
-    },
-    "publish": [
-      "github"
-    ]
+    }
   }
 }

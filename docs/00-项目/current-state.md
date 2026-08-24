@@ -11,7 +11,7 @@ updated: 2026-08-24
 
 ## 阶段
 
-**P0（底座打通）已完成 ✓；P1（桌面壳 + 会话优先 UI MVP）代码与环境就绪，但实跑验证被运行时级阻断；P2（5 内置插件落地）主体已收口；P3（安全底座）代码与文档就绪，运行期验证受同款门控；P4（智能层）代码与文档就绪，运行期验证受同款门控；P5（补偿层 + 自进化）代码/文档/运行验证就绪（node 直驱真实插件逻辑 verify 20/0），GUI 外发警示条·补偿审计·临时插件管理 UI 已接线，GUI 渲染受无显示器门控；P6（生态与发布）代码与配置就绪（观雅集客户端复用 guanji SKILL API 约定 + OrchClaw Hub 配对客户端凭据经 safeStorage 加密 + electron-builder nsis/portable 配置 + 更新前数据快照），运行期受同源门控（TOKEN/网络/远程 Hub/显示器）。** 渲染工程（4 列布局 / 侧栏项目分组 / 会话菜单 / composer / 模型多选 + 思维滑竿）已从 v0.6 原型提升为真实 Electron 渲染层；bridge 接通本地运行时（会话持久化 + 模型回合 seam），主进程与 preload 编译通过（tsc EXIT=0）；Electron 二进制已下载完成（36.9.5，202MB，exe 可执行、version 探测 exit 0），包内 `electron` bin 已就位。但经「执行启动预览」指令实拉验证：早期「本机无法链接 Electron 内置 `electron` 模块」的诊断**已结案（BUG-W02 resolved，2026-08-24）**——根因是误用 `node` 跑主进程，正确启动方式是 `electron .`（Electron 二进制注入其运行时）；Electron 现可安装/可运行。**本机唯一 GUI 门控为 headless 无显示器**（`DISPLAY` 空、`NO_XVFB`），GUI 预览须转移到有显示器的机器执行 `pnpm --filter @orchdesk/desktop start`。真实模型闭环（T-P1-5）与 P3 授权/沙箱运行期验证为被门控的 seam（需可运行 Electron/dsh 的机器）。
+**P0（底座打通）已完成 ✓；P1（桌面壳 + 会话优先 UI MVP）代码与环境就绪，但实跑验证被运行时级阻断；P2（5 内置插件落地）主体已收口；P3（安全底座）代码与文档就绪，运行期验证受同款门控；P4（智能层）代码与文档就绪，运行期验证受同款门控；P5（补偿层 + 自进化）代码/文档/运行验证就绪（node 直驱真实插件逻辑 verify 20/0），GUI 外发警示条·补偿审计·临时插件管理 UI 已接线，GUI 渲染受无显示器门控；P6（生态与发布）代码与配置就绪（观雅集客户端复用 guanji SKILL API 约定 + OrchClaw Hub 配对客户端凭据经 safeStorage 加密 + electron-builder nsis/portable 配置 + 更新前数据快照），运行期受同源门控（TOKEN/网络/远程 Hub/显示器）。** 渲染工程（4 列布局 / 侧栏项目分组 / 会话菜单 / composer / 模型多选 + 思维滑竿）已从 v0.6 原型提升为真实 Electron 渲染层；bridge 接通本地运行时（会话持久化 + 模型回合 seam），主进程与 preload 编译通过（tsc EXIT=0）；Electron 二进制已下载完成（36.9.5，202MB，exe 可执行、version 探测 exit 0），包内 `electron` bin 已就位。但经「执行启动预览」指令实拉验证：**本 agent 宿主环境（WorkBuddy CLI）无法启动任何 Electron GUI**（BUG-W02 open）——直接运行 `electron.exe` 本体（unset `ELECTRON_RUN_AS_NODE`、NODE_OPTIONS 仅 CA、无沙箱）复现 `process._linkedBinding('electron')` → "No such binding was linked"，叠加 WorkBuddy CLI 默认 `ELECTRON_RUN_AS_NODE=1`（强制 Node 模式）；`require('electron')` 解析到 npm 包返回 exe 路径，主进程启动即崩。2026-08-24 早间「误用 node」结案为**误判，已推翻**。electron-builder 打包产物完整（nsis Setup + portable + win-unpacked，asar 校验通过），GUI 实跑须在**正常 Windows 桌面**（无 WorkBuddy 注入）执行 `pnpm --filter @orchdesk/desktop start` 或直接运行产物 exe。真实模型闭环（T-P1-5）与 P3 授权/沙箱运行期验证为被门控的 seam。
 
 ## 已完成（2026-08-17 ~ 2026-08-18）
 
@@ -42,10 +42,10 @@ updated: 2026-08-24
 | 桌面壳桥接（T-P1-1 收敛） | `apps/desktop/main.ts` 实现 `orchdesk:load-sessions` / `persist-sessions` / `run-agent-turn` 三个 IPC；`preload.ts` 经 contextBridge 暴露同名白名单；渲染进程 `window.orchdesk` 调用。`nodeIntegration:false` 红线保持 |
 | 会话 CRUD 真实落盘 | 新建 / 重命名 / 分支 / 归档会话经桥写入 `userData/orchdesk-sessions.json`，可重启回放（SessionEvent 日志的落盘形态） |
 | 主进程 + preload 编译 | `tsc -p apps/desktop/tsconfig.json` 产出 `dist/main.js` + `dist/preload.js`，EXIT=0 |
-| Electron 运行时 | `apps/desktop` 依赖 `electron 36.9.5` 已装入工程；二进制已下载完成（202MB，exe 可执行、`electron --version` exit 0）；包内 `.bin/electron` 已就位。启动方式为 `electron .`（`package.json` `main: dist/main.js`；`start` = `pnpm run build:main && electron .`）。**早期「无法链接内置模块」诊断已结案（BUG-W02 resolved，2026-08-24）**：系误用 `node` 跑主进程所致（`node` 下 `require('electron')` 自然解析到 npm 包返回 exe 路径，属预期）；本机**唯一 GUI 门控为 headless 无显示器**（`DISPLAY` 空、`NO_XVFB`） |
+| Electron 运行时 | `apps/desktop` 依赖 `electron 36.9.5` 已装入工程；二进制已下载完成（202MB，exe 可执行、version 探测 exit 0）；包内 `.bin/electron` 已就位。启动方式为 `electron .`（`package.json` `main: dist/main.js`；`start` = `pnpm run build:main && electron .`）。**宿主环境阻断（BUG-W02 open）**：本 agent 环境（WorkBuddy CLI）下 Electron 核心 binding 未链接（`_linkedBinding('electron')` → No such binding；`require('electron')` 返回 npm 包 exe 路径；`ELECTRON_RUN_AS_NODE=1` 叠加），任何 Electron GUI 无法在此启动；2026-08-24 早间「误用 node」结案已推翻 |
 | T-P1-5 端到端骨架 | 发送消息 → 桥 `run-agent-turn` → 落盘 SessionEvent；真实 LLM 调用为 seam（`ORCHDESK_MODEL_PROVIDER` 分支待接 `dsh ctx.agents.followup` / Ollama） |
 
-> **P1 验证门控（已收敛为「无显示器」单一因素）**：本机 headless 无显示器（`DISPLAY` 空、`NO_XVFB`），GUI 无法在此渲染；「无法链接 Electron 内置模块」为误诊（BUG-W02 已结案：误用 `node` 跑主进程，正确启动是 `electron .`）。GUI 预览须转移到**可运行 Electron 且有显示器的机器**执行 `pnpm --filter @orchdesk/desktop start`（先 `tsc` 再 `electron .`）。真实模型回复需 API Key 或本地 Ollama，且须在可运行 Electron 的环境验证。
+> **P1 验证门控（宿主环境 Electron 阻断，BUG-W02 open）**：本 agent 环境（WorkBuddy CLI）下 Electron 核心 binding 未链接（`_linkedBinding('electron')` → "No such binding was linked"，`ELECTRON_RUN_AS_NODE=1` 叠加，`electron.exe` 本体复现），任何 Electron GUI 无法在此启动；2026-08-24 早间「误用 node」结案为误判已推翻。GUI 实跑须在**正常 Windows 桌面**执行 `pnpm --filter @orchdesk/desktop start`（先 `tsc` 再 `electron .`）。真实模型回复需 API Key 或本地 Ollama，且须在可运行 Electron 的环境验证。
 
 ## 进行中（P2 启动 · 2026-08-18 晚）
 
@@ -65,7 +65,7 @@ P1 收尾 + 「执行启动预览」环境级阻断诊断落档后，按「清�
 | **T-P2-4 脑手解耦 SubAgent 生命周期真实实现完成** | `packages/plugin/brain/src/index.ts` 由骨架升级：SubAgent 状态机 `W-xxx`（`dispatched`→`executing`→`disposed`）；`dispatchSubAgent` 经 dsh 原生 `ctx.agents.create`（`meta.origin:'subagent'`+`delegationDepth:1`，Cordis isolate）；`disposeSubAgent` 经 `AgentHandle.dispose()`（即用即走、零残留）；`maxConcurrentSubagents` 并发背压；`promoteWorkerOutput` Director 过滤晋升主会话记忆 fail-closed（FR-10）；`subscribe` 回调供桥消费 inline 芯片事件；`inject:['agents']`；`tsc --noEmit`/emit EXIT=0 |
 | **T-P2-5 多 Agent 编排专家团真实逻辑完成** | `packages/plugin/multi/src/index.ts` 由骨架升级：8 专家+3 团数据来自插件（`EXPERTS`/`TEAMS`，不硬编码主程序）；`getCatalog()` 供渲染层 `@` modal/插件页；`composeTeam()` 经 dsh 原生 `ctx.agents.create` 建 CEO→Director(`delegationDepth:1`)→Worker(`delegationDepth:2`) 三层后台闭环、`finally` 中 `dispose()` 即用即走；`getDelegationTree()` 委派树可查询（视觉弱化）；`inject:['agents']`；`tsc --noEmit`/emit EXIT=0 |
 
-> **P2 构建/运行门控（与 P1 同源）**：插件包 `peerDependencies` 已通过**本地软链 shim** 完成类型检查与构建（无需方案 A/B 重装；正式的 committed 嵌入仍走 build.md §3 方案 A/B）。本机 headless 无显示器（BUG-W02 已结案，Electron 可运行），GUI 运行期验证须转移到有显示器的机器。骨架未接入真实模型/上传前默认放行/缓存，不误拦截正常请求。真正运行时插件开关（T-P1 渲染层 toggle 接真实 Cordis 效应）需 dsh 控制通道，列为待架构设计的后续任务。
+> **P2 构建/运行门控（与 P1 同源）**：插件包 `peerDependencies` 已通过**本地软链 shim** 完成类型检查与构建（无需方案 A/B 重装；正式的 committed 嵌入仍走 build.md §3 方案 A/B）。GUI 运行期验证受宿主环境 Electron 阻断（BUG-W02 open），须在正常 Windows 桌面执行。骨架未接入真实模型/上传前默认放行/缓存，不误拦截正常请求。真正运行时插件开关（T-P1 渲染层 toggle 接真实 Cordis 效应）需 dsh 控制通道，列为待架构设计的后续任务。
 
 ## 进行中（P3 · 2026-08-19）
 
@@ -81,7 +81,7 @@ P2 收口后，按 PLAN 路线图启动 P3（安全底座）。收敛发现：ds
 | **T-P3-2 渲染层接线** | `app.js`：composer 授权芯片接真实 AuthzMode、设置页授权分组补三模式单选+L0-L4+审计日志、审批弹窗 modal+监听；`styles.css` 补样式；`app.js` 语法 OK |
 | **T-P3-2 三模式语义收敛** | OrchDesk 三模式不含 danger-full-access（最松也是 workspace-write+ask），比旧"FULL ACCESS"概念更安全；paranoid=read-only+never 最严。从更严切更松模式需二次确认 |
 
-> **P3 运行门控（与 P1/P2 同源）**：本机 headless 无显示器（BUG-W02 已结案，Electron 可运行），故「GUI 审批弹窗闭环 / dsh approval/request 真实应答 / win32 ACL 越界写拦截」等运行期验收须转移到有显示器的机器。代码逻辑与类型已就绪（authz 插件 tsc EXIT=0 + 主进程/preload tsc EXIT=0 + app.js 语法 OK）。
+> **P3 运行门控（与 P1/P2 同源）**：GUI 运行期验证受宿主环境 Electron 阻断（BUG-W02 open，本 agent 环境无法启动 Electron），故「GUI 审批弹窗闭环 / dsh approval/request 真实应答 / win32 ACL 越界写拦截」等运行期验收须在正常 Windows 桌面执行。代码逻辑与类型已就绪（authz 插件 tsc EXIT=0 + 主进程/preload tsc EXIT=0 + app.js 语法 OK）。
 
 ## 进行中（P4 · 2026-08-23）
 
@@ -96,7 +96,7 @@ P3 收口后，按 PLAN 路线图启动 P4（智能层）。收敛发现：dsh *
 | **渲染层提示词管理 UI 接线** | `app.js`：设置页「系统提示词」分组 + 侧栏「提示词」导航 + `PROMPT_CAT_LABELS` 常量 + `openPromptEditor` + `prompt-new/edit/save/delete` case + `listPrompts/mergePrompts/savePrompt/deletePrompt` 桥 mock（占位环境乐观本地更新，真实 IPC 待接 dsh ctx）；`styles.css` 补 `.prompt-list/.pl-item/.mb-row`；`app.js` 语法 OK |
 | **全栈 tsc 校验通过** | memory/prompt 插件 tsc EXIT=0；desktop 主进程/preload/渲染层 tsc EXIT=0；`node --check app.js` OK |
 
-> **P4 运行门控（与 P1/P2/P3 同源）**：本机 headless 无显示器（BUG-W02 已结案，Electron 可运行），故「长会话 80% 阈值触发转储 / 语义召回注入 / 记忆四域隔离落盘 / 提示词合并冲突标记」等运行期验收须转移到有显示器的机器。记忆/提示词服务的真实 IPC 桥接（preload→主进程→dsh `ctx.memory`/`ctx.promptLib`）为与 P1 同源的 seam（任务卡 #46 接真实桥），当前渲染层经 bridge mock + 乐观本地更新保证 UI 可演示。代码逻辑与类型已就绪。
+> **P4 运行门控（与 P1/P2/P3 同源）**：GUI 运行期验证受宿主环境 Electron 阻断（BUG-W02 open），故「长会话 80% 阈值触发转储 / 语义召回注入 / 记忆四域隔离落盘 / 提示词合并冲突标记」等运行期验收须在正常 Windows 桌面执行。记忆/提示词服务的真实 IPC 桥接（preload→主进程→dsh `ctx.memory`/`ctx.promptLib`）为与 P1 同源的 seam（任务卡 #46 接真实桥），当前渲染层经 bridge mock + 乐观本地更新保证 UI 可演示。代码逻辑与类型已就绪。
 
 ## 进行中（P5 · 2026-08-24）
 
@@ -111,7 +111,7 @@ P4 收口后，按 PLAN 路线图启动 P5（补偿层 + 自进化）。收敛�
 | **渲染层 UI 接线（T-P5-1/2）** | `app.js`：composer 外发「不可撤销」警示条（实时 `bridge.withhold`）+ 设置页「补偿层审计」分区（补偿动作按钮 `comp-record`）+ 插件页「临时插件」面板（视觉弱化，`tp-new/create/dispose`）；bridge 补 `withhold/compensate/getCompensationAudit/createTempPlugin/listTempPlugins/disposeTempPlugin` mock（占位环境乐观本地状态）；`styles.css` 补 `.outbound-warn/.temp-plug-card/.tp-item`；`app.js` 语法 OK |
 | **P5 运行验证（绕开 GUI，node 直驱真实插件逻辑）** | `scripts/verify-p5.mjs`：加载真实编译 `lib/index.js` + mock ctx（`effect`/`on`/`provide`/可挂 `approval`），覆盖补偿层 classify/withhold/补偿/审计 + `agent/pre-step` withhold 门控（allow→放行/deny→拦截/none→fail-closed）+ 自进化静态门控/授权门控/仅驻内存/卸载。**通过 20 / 失败 0** |
 
-> **P5 运行门控（与 P1–P4 同源，但已部分解除）**：Electron 现已可安装/运行（BUG-W02 真相为「误用 `node` 跑主进程」，正确启动是 `electron .`）；但**本机无显示器**（`DISPLAY` 空、`NO_XVFB`），GUI 仍无法在此渲染。故 P5 采用「node 下加载真实编译插件 + mock ctx 直驱 `apply()`」验证真实业务逻辑（分类/withhold/补偿/静态门控/授权门控/fail-closed），绕开 GUI；渲染层 UI 经 bridge mock + 乐观本地更新保证可演示。真实 dsh approval/request 应答与沙箱执行验证须转移到可正常运行 Electron/dsh 的机器。
+> **P5 运行门控（与 P1–P4 同源）**：本 agent 环境无法启动任何 Electron GUI（BUG-W02 open：binding 未链接 + `ELECTRON_RUN_AS_NODE=1`）。故 P5 采用「node 下加载真实编译插件 + mock ctx 直驱 `apply()`」验证真实业务逻辑（分类/withhold/补偿/静态门控/授权门控/fail-closed），绕开 GUI；渲染层 UI 经 bridge mock + 乐观本地更新保证可演示。真实 dsh approval/request 应答与沙箱执行验证须在正常 Windows 桌面环境执行。
 
 ## 进行中（P6 · 2026-08-24）
 
@@ -156,6 +156,6 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 
 ## 下一步
 
-- **P1–P6 全部代码与配置已就绪**：六阶段（底座/桌面壳/内置插件/安全底座/智能层/补偿自进化/生态发布）的插件、桥接、渲染 UI、打包配置均落地并通过 tsc 编译（EXIT=0）+ app.js 语法检查 + 插件真实逻辑 node 直驱验证（verify-p5 23/23）+ 知识库审计 0 issues。剩余动作是**运行期验证**（与 P1 同源门控）：① Electron 二进制已就绪（36.9.5），启动方式 `electron .`（BUG-W02 已结案）；GUI 渲染须在**有显示器**的机器执行 `pnpm --filter @orchdesk/desktop start`（先 `tsc` 再 `electron .`）实跑；② 真实模型闭环需在 `main.ts:runAgentTurn` 接入 `dsh ctx.agents.followup` 或本地 Ollama（配置 API Key / `ORCHDESK_MODEL_PROVIDER`）；③ 观雅集真实列表/安装/发布需用户配置 TOKEN + 网络；④ OrchClaw Hub 端到端联调需可达远程 Hub；⑤ 产出可安装 Windows 包需在 Windows + 签名环境执行 `pnpm --filter @orchdesk/desktop build`。
-- **本机门控（单一因素）**：本机 headless 无显示器（`DISPLAY` 空、`NO_XVFB`）；Electron 可安装/可运行（BUG-W02 结案），故以上 GUI / 联调 / 打包验证无法在本机完成，须换环境。代码正确性已通过 tsc 编译（EXIT=0）+ app.js 语法检查 + verify-p5（真实插件逻辑）+ 知识库 audit 0 issues。
+- **P1–P6 全部代码与配置已就绪**：六阶段（底座/桌面壳/内置插件/安全底座/智能层/补偿自进化/生态发布）的插件、桥接、渲染 UI、打包配置均落地并通过 tsc 编译（EXIT=0）+ app.js 语法检查 + 插件真实逻辑 node 直驱验证（verify-p5 23/23）+ 知识库审计 0 issues。**打包已产出**：electron-builder 成功生成 nsis Setup（`release/OrchDesk Setup 0.0.0.exe`，84MB）+ portable（`release/OrchDesk 0.0.0.exe`）+ `latest.yml` + `win-unpacked/`（asar 结构校验完整）。剩余动作是**运行期验证**（与 P1 同源门控）：① 本 agent 环境 Electron 阻断（BUG-W02 open：binding 未链接 + `ELECTRON_RUN_AS_NODE=1`），GUI 实跑须在**正常 Windows 桌面**直接双击产物 exe 或执行 `pnpm --filter @orchdesk/desktop start`；② 真实模型闭环需在 `main.ts:runAgentTurn` 接入 `dsh ctx.agents.followup` 或本地 Ollama（配置 API Key / `ORCHDESK_MODEL_PROVIDER`）；③ 观雅集真实列表/安装/发布需用户配置 TOKEN + 网络；④ OrchClaw Hub 端到端联调需可达远程 Hub；⑤ 正式发布分发需补 `publish`/`repository` 真实仓库信息后走 GitHub Releases。
+- **本机门控**：本 agent 宿主环境（WorkBuddy CLI）无法启动任何 Electron GUI（BUG-W02 open，2026-08-24 早间「误用 node」结案已推翻）；打包/联调/发布实跑须在正常 Windows 桌面 + 网络/远程环境完成。代码正确性已通过 tsc 编译（EXIT=0）+ app.js 语法检查 + verify-p5（真实插件逻辑）+ asar 结构校验 + 知识库 audit 0 issues。
 - 铁律：每个 Phase 端到端可用，不重演 OrchStar「后端先行、UI 荒废」。P6 为路线图收口阶段，生态（观雅集/Hub）与发布（electron-builder/更新前快照）均按 PLAN 落地、不任务漂移。
