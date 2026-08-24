@@ -1,17 +1,18 @@
 {
   "name": "@orchdesk/desktop",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "OrchDesk 桌面壳（Electron 主进程 + 渲染层桥接）",
   "repository": {
     "type": "git",
-    "url": "https://github.com/orchdesk/orchdesk.git"
+    "url": "https://github.com/ra1nzzz/orchdesk.git"
   },
   "main": "dist/main.js",
   "scripts": {
     "start": "pnpm run build:main && electron .",
     "build:main": "tsc -p tsconfig.json",
-    "build": "pnpm run build:main && electron-builder"
+    "build": "pnpm run build:main && electron-builder",
+    "dist": "pnpm run build:main && electron-builder --publish always"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -42,6 +43,13 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ra1nzzz",
+        "repo": "orchdesk"
+      }
+    ]
   }
 }

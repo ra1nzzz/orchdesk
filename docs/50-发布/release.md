@@ -22,21 +22,29 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
 
 > 注：pnpm 包装层会触发 safe-delete 失败（BUG-W01），直接用 electron-builder 二进制；沙箱内 NODE_OPTIONS 的 safe-delete shim 会阻断 electron-builder 内部清理（`NODE_OPTIONS="--use-system-ca"` 绕过 shim，保留系统 CA 供下载工具）。
 
-产物（`apps/desktop/release/`，v0.0.0，win32 x64）：
+产物（`apps/desktop/release/`，v0.1.0，win32 x64，含应用图标 `build/icon.ico`）：
 
 | 产物 | 大小 | 说明 |
 |---|---|---|
-| `OrchDesk Setup 0.0.0.exe` | 84MB | nsis 安装包（可选安装目录/桌面快捷方式） |
-| `OrchDesk 0.0.0.exe` | 84MB | portable 免安装版 |
-| `OrchDesk Setup 0.0.0.exe.blockmap` | 89KB | 差分更新块图 |
+| `OrchDesk Setup 0.1.0.exe` | 84MB | nsis 安装包（可选安装目录/桌面快捷方式） |
+| `OrchDesk 0.1.0.exe` | 84MB | portable 免安装版 |
+| `OrchDesk Setup 0.1.0.exe.blockmap` | 89KB | 差分更新块图 |
 | `latest.yml` | 344B | 更新信息（electron-updater 用） |
 | `win-unpacked/OrchDesk.exe` | — | 解包版（调试用） |
 
 ## 打包配置要点（electron-builder 26）
 
 - `build.win` 为**对象**（非数组）；`arch` 须置于每个 `target` 对象内（`{target, arch}`），WindowsConfiguration 无顶层 `arch`。
-- 无 `publish` 配置（本地打包不发布）；发布 GitHub Releases 时补 `publish: [{provider: github, owner, repo}]` + `repository`。
-- 图标未设置（默认 Electron 图标）；正式发布前补 `buildResources/build/icon.ico`。
+- **publish/repository**：`repository` 指向 `github.com/ra1nzzz/orchdesk`；`publish` = github provider（owner ra1nzzz / repo orchdesk）。本地构建用 `--publish never`（publish 配置存在时无参数构建会触发 GitHub 网络操作卡住）；发布用 `--publish always`（需 GH_TOKEN）。
+- 图标：`build/icon.ico`（16–256 多尺寸，ImageGen 生成 PNG 后 PIL 转换），electron-builder 自动使用 buildResources。
+- 签名：electron-builder 检测 `CSC_LINK`（证书路径）+ `CSC_KEY_PASSWORD` 环境变量自动签名；无证书时跳过（SmartScreen 提示未知发布者属正常）。
+
+## 发布记录（2026-08-24）
+
+- **v0.1.0 已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.1.0
+- 资产：`OrchDesk-Setup-0.1.0.exe`（nsis）+ `OrchDesk-0.1.0.exe`（portable）+ `latest.yml`（自动更新信息）。
+- 仓库 `ra1nzzz/orchdesk`（PUBLIC）仅用于产物分发（README-only，源码未推送）。
+- 上传经验：本环境代理（127.0.0.1:7897）对 84MB 大文件不稳（ECONNRESET/TLS timeout），**清空代理环境变量直连**（`env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY gh release upload ...`）稳定成功；electron-builder 自身 `--publish always` 上传易断，推荐 gh/curl 补传；上传 URL 用 **REST 数字 release id**（GraphQL Node ID 会 404）。
 
 ## 版本策略
 
