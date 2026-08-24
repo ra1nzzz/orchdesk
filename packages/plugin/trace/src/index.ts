@@ -314,5 +314,13 @@ export function apply(ctx: Context, config: TraceConfig): void {
 
   // Loop 结束的用户反馈由渲染层经桥 → recordFeedback 触发（见上）。
   // dsh 生命周期结束时（fiber dispose）可调用 flush() 确保未发记录落网。
+  // 低流量兜底：batchSize 不满足时 scheduleFlush 直接返回，需定时器保证最终上送
+  // （30s 间隔，仅在有 pending 时实际发送，避免空轮询）。
+  const flushTimer = setInterval(() => {
+    if (pending.length > 0 || retryQueue.length > 0) void scheduleFlush();
+  }, 30_000);
+  ctx.effect(() => {
+    return () => clearInterval(flushTimer);
+  }, 'orchdesk-trace.flush-timer()');
   void ctx;
 }

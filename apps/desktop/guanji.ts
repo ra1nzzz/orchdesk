@@ -1,7 +1,7 @@
 /// <reference types="electron" />
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { app } from 'electron';
+import { app, safeStorage } from 'electron';
 
 // ============================================================================
 // 观雅集技能市场客户端（T-P6-1）
@@ -88,8 +88,13 @@ function readToken(): string | null {
   try {
     const file = configFile();
     if (fs.existsSync(file)) {
-      const cfg = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      return typeof cfg.token === 'string' && cfg.token ? cfg.token : null;
+      const cfg = JSON.parse(fs.readFileSync(file, 'utf-8')) as { enc?: string; token?: string };
+      if (typeof cfg.enc === 'string' && cfg.enc) {
+        // 加密格式（safeStorage）：无加密后端时无法解密，视为未配置（不降级明文）。
+        if (!safeStorage.isEncryptionAvailable()) return null;
+        return safeStorage.decryptString(Buffer.from(cfg.enc, 'base64'));
+      }
+      if (typeof cfg.token === 'string' && cfg.token) return cfg.token; // 旧明文格式兼容（首启迁移后不再写）
     }
   } catch {
     /* 配置损坏视为未配置 */
@@ -97,11 +102,20 @@ function readToken(): string | null {
   return null;
 }
 
-function   writeToken(token: string): void {
-    const file = configFile();
-    fs.writeFileSync(file, JSON.stringify({ token }), 'utf-8');
-    // userData 仅当前用户可读；桌面环境不再放宽权限。
+/** 写 TOKEN：一律经 safeStorage 加密（与 hub 凭据同策略）；无加密后端拒绝明文落盘。 */
+function writeToken(token: string): { ok: boolean; reason?: string } {
+  if (!safeStorage.isEncryptionAvailable()) {
+    return { ok: false, reason: '系统加密后端不可用（safeStorage），拒绝明文存储 TOKEN' };
   }
+  try {
+    const file = configFile();
+    const enc = safeStorage.encryptString(token).toString('base64');
+    fs.writeFileSync(file, JSON.stringify({ enc }), 'utf-8');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `TOKEN 加密写入失败：${(err as Error).message}` };
+  }
+}
 
 export class GuanjiClient {
   private baseUrl: string;
@@ -129,10 +143,9 @@ export class GuanjiClient {
   }
 
   /** 用户配置 TOKEN（来自登录后 GET /api/auth/token 的结果；不硬编码）。 */
-  setToken(token: string): { ok: boolean } {
-    if (!token || !token.trim()) return { ok: false };
-    writeToken(token.trim());
-    return { ok: true };
+  setToken(token: string): { ok: boolean; reason?: string } {
+    if (!token || !token.trim()) return { ok: false, reason: 'TOKEN 为空' };
+    return writeToken(token.trim());
   }
 
   /** 拉取观雅集真实技能列表（最近上新 + 精品推送合并去重）。 */
@@ -164,20 +177,23 @@ export class GuanjiClient {
 
   /**
    * 安装前能力审查（PLAN 红线：不得跳过）。
-   * - 无需授权（auth=0 且无高危能力）→ allowed
-   * - 需授权但未配置 token → needs-auth
-   * - 已配置 token 视为已授权 → allowed
+   * - 无高危能力（auth=0）→ allowed
+   * - 高危能力（auth=1）：必须**用户显式授权**（authorized=true，渲染层确认弹窗）；
+   *   配置了 TOKEN 不等于已授权——L3/L4 强制授权不可凭 token 绕过。
    */
-  capabilityReview(skill: GuanjiSkill): 'allowed' | 'needs-auth' | 'denied' {
-    if (skill.auth === 1 && readToken() === null) return 'needs-auth';
+  capabilityReview(skill: GuanjiSkill, authorized = false): 'allowed' | 'needs-auth' | 'denied' {
+    if (skill.auth === 1 && !authorized) return 'needs-auth';
     return 'allowed';
   }
 
   /** 下载 .skill 包到本地 skills 目录（userData/skills/<slug>.skill）。 */
-  async installSkill(skill: GuanjiSkill): Promise<InstallResult> {
-    const review = this.capabilityReview(skill);
+  async installSkill(skill: GuanjiSkill, authorized = false): Promise<InstallResult> {
+    const review = this.capabilityReview(skill, authorized);
     if (review === 'needs-auth') {
-      return { ok: false, review, reason: '该技能需授权，请先在观雅集登录并配置 TOKEN' };
+      return { ok: false, review, reason: '该技能含 L3/L4 高危能力，需在确认弹窗中显式授权后安装' };
+    }
+    if (review === 'denied') {
+      return { ok: false, review, reason: '能力审查未通过，拒绝安装' };
     }
     const token = readToken();
     const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
@@ -204,6 +220,13 @@ export class GuanjiClient {
   async publishSkill(input: PublishInput): Promise<PublishResult> {
     const token = readToken();
     if (!token) return { ok: false, reason: '请先登录观雅集并配置 TOKEN' };
+    // 路径白名单：仅允许发布 userData/skills 目录内的 .skill 包（防任意文件外传）。
+    const skillsDir = path.resolve(app.getPath('userData'), 'skills');
+    const resolved = path.resolve(input.filePath);
+    if (!resolved.startsWith(skillsDir + path.sep) || !resolved.endsWith('.skill')) {
+      return { ok: false, reason: '发布文件必须位于 skills 目录内且为 .skill 包' };
+    }
+    if (!fs.existsSync(resolved)) return { ok: false, reason: '发布文件不存在' };
     try {
       // 1) 获取上传凭证
       const prep = await fetch(`${this.baseUrl}/api/upload/prepare`, {

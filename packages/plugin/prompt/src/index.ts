@@ -166,19 +166,28 @@ export function apply(ctx: Context, config: PromptConfig): void {
 
   async function resolveBody(doc: PromptDoc): Promise<string> {
     if (!resolver) return doc.body; // 未注入 resolver 时原样保留引用标记
-    return doc.body.replace(SKILL_REF, (_full, kind: string, ref: string) => {
-      if (kind !== 'skill') return _full;
-      try {
-        const r = resolver!(ref);
-        if (r instanceof Promise) {
-          // 同步替换无法直接 await；此处返回占位，host 应在 pre-resolve 阶段处理异步。
-          return `«skill:${ref}»`;
+    // 分段重建：对每个 skill 引用 await resolver（支持异步 resolver），
+    // 非 skill 引用（prompt）原样保留；失败标记 unresolved，不吞异常。
+    const out: string[] = [];
+    let last = 0;
+    for (const m of doc.body.matchAll(SKILL_REF)) {
+      const idx = m.index ?? 0;
+      out.push(doc.body.slice(last, idx));
+      const kind = m[1] ?? '';
+      const ref = m[2] ?? '';
+      if (kind !== 'skill') {
+        out.push(m[0]);
+      } else {
+        try {
+          out.push(await resolver!(ref));
+        } catch {
+          out.push(`«skill:${ref}:unresolved»`);
         }
-        return r;
-      } catch {
-        return `«skill:${ref}:unresolved»`;
       }
-    });
+      last = idx + m[0].length;
+    }
+    out.push(doc.body.slice(last));
+    return out.join('');
   }
 
   const api: PromptService = {

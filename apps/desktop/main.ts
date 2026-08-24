@@ -195,6 +195,61 @@ ipcMain.on('orchdesk:authz-submit-decision', (_e, id: string, outcome: string) =
 });
 
 // ---------------------------------------------------------------------------
+// T-P4/T-P5 智能层 + 补偿 + 自进化桥（dsh 服务 seam：ctx.memory / ctx.promptLib /
+// ctx.compensation / ctx.evolution）
+// 说明：这些服务运行在 dsh in-process ctx（P1-5 runProfile 接入后经 ctx.get 获取，
+// 见 runAgentTurn 注释）。当前 dsh ctx 未接入 → 返回与渲染层浏览器预览一致的静态
+// 占位值 + warn 日志（不伪造 dsh 数据、不静默）；接入点即 P1-5 runProfile seam。
+// ---------------------------------------------------------------------------
+function dshBridgeStub(channel: string): void {
+  console.warn(`[orchdesk] dsh 服务桥接 ${channel} 未接入（P1-5 runProfile seam），返回静态占位。`);
+}
+ipcMain.handle('orchdesk:memory-stats', () => {
+  dshBridgeStub('memory');
+  return { usageRatio: 0.41, dumps: 2, recallHits: 1, domainCounts: { global: 0, project: 1, director: 0, worker: 0 } };
+});
+ipcMain.handle('orchdesk:prompt-list', () => {
+  dshBridgeStub('prompt');
+  return [];
+});
+ipcMain.handle('orchdesk:prompt-merge', () => {
+  dshBridgeStub('prompt');
+  return { ok: true, conflicts: [] };
+});
+ipcMain.handle('orchdesk:prompt-save', () => {
+  dshBridgeStub('prompt');
+  return { ok: true };
+});
+ipcMain.handle('orchdesk:prompt-delete', () => {
+  dshBridgeStub('prompt');
+  return { ok: true };
+});
+ipcMain.handle('orchdesk:comp-withhold', () => {
+  dshBridgeStub('compensation');
+  return { needsConfirm: false, category: 'other', reason: 'dsh 桥未接入（占位）', warning: '' };
+});
+ipcMain.handle('orchdesk:comp-compensate', () => {
+  dshBridgeStub('compensation');
+  return { id: `stub-${Date.now().toString(36)}`, category: 'other', action: 'dsh 桥未接入（占位）', ts: Date.now() };
+});
+ipcMain.handle('orchdesk:comp-audit', () => {
+  dshBridgeStub('compensation');
+  return [];
+});
+ipcMain.handle('orchdesk:evol-create', () => {
+  dshBridgeStub('evolution');
+  return { ok: false, reason: 'dsh 桥未接入（P1-5 seam）' };
+});
+ipcMain.handle('orchdesk:evol-list', () => {
+  dshBridgeStub('evolution');
+  return [];
+});
+ipcMain.handle('orchdesk:evol-dispose', () => {
+  dshBridgeStub('evolution');
+  return { ok: false, reason: 'dsh 桥未接入（P1-5 seam）' };
+});
+
+// ---------------------------------------------------------------------------
 // T-P6-1 观雅集技能市场桥（复用 guanji SKILL API 约定；TOKEN 由用户配置）
 // ---------------------------------------------------------------------------
 ipcMain.handle('orchdesk:guanji-token-status', async () => guanjiClient.tokenStatus());
@@ -202,8 +257,8 @@ ipcMain.handle('orchdesk:guanji-set-token', async (_e, token: string) => guanjiC
 ipcMain.handle('orchdesk:guanji-list', async () => {
   try { return await guanjiClient.listSkills(); } catch { return []; }
 });
-ipcMain.handle('orchdesk:guanji-install', async (_e, skill: { slug: string; name: string; description: string; caps: string[]; auth: 0 | 1 }) => {
-  return guanjiClient.installSkill(skill);
+ipcMain.handle('orchdesk:guanji-install', async (_e, skill: { slug: string; name: string; description: string; caps: string[]; auth: 0 | 1 }, authorized = false) => {
+  return guanjiClient.installSkill(skill, authorized === true);
 });
 ipcMain.handle('orchdesk:guanji-publish', async (_e, input: { slug: string; alias?: string; filePath: string }) => {
   return guanjiClient.publishSkill(input);
@@ -264,6 +319,10 @@ app.whenReady().then(() => {
   loadStore();
   createWindow();
   createTray();
+  // T-P3-2 授权桥 seam：真实 dsh ctx（P1-5 runProfile）接入后，把这里的占位 ctx 换成
+  // 真实 in-process ctx（ctx.get('authz') 返回 AuthzService）。当前阶段调用以确保
+  // seam 可见性：ctx 未就绪 → 打印 warn，不静默。
+  initAuthzBridge({ get: () => undefined });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

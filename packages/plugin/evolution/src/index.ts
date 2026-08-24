@@ -16,6 +16,7 @@
 //   本插件只管理生命周期 + 静态分析门控 + 授权门控，不自行 eval 用户代码。
 
 import type { Context } from '@deepseek-ai/cordis';
+import type { Agent } from '@deepseek-ai/dsh-agent';
 import z from '@deepseek-ai/schemastery';
 
 export const name = 'orchdesk-evolution';
@@ -68,8 +69,10 @@ export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unava
 // 命中即拒绝（即便在沙箱内也过危险）：直接进程操控 / 任意代码执行 / 自杀。
 const HARD_DENY: { pattern: RegExp; label: string }[] = [
   { pattern: /(child_process|\bexec(?:Sync)?\s*\(|\bspawn\s*\(|\bexecFile\s*\()/i, label: 'subprocess-exec' },
-  { pattern: /(\beval\s*\(|\bnew\s+Function\s*\(|setTimeout\s*\(\s*['"`][^'"`]*\bexec\b)/i, label: 'arbitrary-eval' },
-  { pattern: /(\bprocess\.exit\b|\bprocess\.kill\b|\bprocess\.abort\b)/i, label: 'process-kill' },
+  { pattern: /(\beval\s*\(|\(\s*0\s*,\s*eval\s*\)|\bnew\s+Function\s*\(|setTimeout\s*\(\s*['"`][^'"`]*\bexec\b)/i, label: 'arbitrary-eval' },
+  { pattern: /(\bprocess\.exit\b|\bprocess\.kill\b|\bprocess\.abort\b|\bprocess\s*\[\s*['"`](?:exit|kill|abort|_linkedBinding)['"`]\s*\])/i, label: 'process-kill' },
+  { pattern: /((?:globalThis|global|window)\s*\[\s*['"`](?:process|require|eval)['"`]\s*\])/i, label: 'global-escape' },
+  { pattern: /\.constructor\s*\(\s*['"`]/i, label: 'prototype-escape' },
   { pattern: /(\brequire\s*\(\s*['"`](?!(\.\.?\/|\.)|safe-)[^'"`]*['"`]\s*\))/i, label: 'unsafe-require' },
   { pattern: /(\bimport\s*\(|from\s+['"`]https?:\/\/)/i, label: 'remote-import' },
   { pattern: /\bvm\.(runInThisContext|runInNewContext|createContext)\s*\(/i, label: 'vm-escape' },
@@ -140,7 +143,7 @@ export interface EvolutionService {
   requireGate(spec: TempPluginSpec): GateResult;
   /** 创建临时插件：先静态分析（fail-closed），通过后再授权门控（默认 CONFIRM）。
    *  成功则仅驻内存（status=active），不写磁盘、不持久化。 */
-  createTempPlugin(spec: TempPluginSpec, opts?: { sessionId?: string; signal?: AbortSignal }): Promise<CreateResult>;
+  createTempPlugin(spec: TempPluginSpec, opts?: { sessionId?: string; signal?: AbortSignal; agent?: Agent }): Promise<CreateResult>;
   /** 卸载临时插件（从内存移除；重启自动消失）。 */
   disposeTempPlugin(id: string): boolean;
   /** 列出当前驻内存的临时插件。 */
@@ -182,7 +185,7 @@ export function apply(ctx: Context, config: EvolutionConfig): void {
 
   async function createTempPlugin(
     spec: TempPluginSpec,
-    opts?: { sessionId?: string; signal?: AbortSignal },
+    opts?: { sessionId?: string; signal?: AbortSignal; agent?: Agent },
   ): Promise<CreateResult> {
     // 1) 静态分析门控（fail-closed）
     const gate = staticGate(spec);
@@ -193,22 +196,27 @@ export function apply(ctx: Context, config: EvolutionConfig): void {
       return { ok: false, reason: gate.reason };
     }
 
-    // 2) 授权门控（默认 CONFIRM）；fail-closed：无通道/未授权 → 不加载。
+    // 2) 授权门控（默认 CONFIRM）；fail-closed：无通道 / 未授权 / 缺 agent 句柄 → 不加载。
+    //    dsh ApprovalService.request(req) 契约：req 必含 agent（路由+审计），signal 置于 req.signal。
     let outcome: ApprovalOutcome = 'unavailable';
     if (config.requireConfirm) {
-      const approval = (ctx as unknown as { approval?: { request?: (req: unknown, signal?: AbortSignal) => Promise<ApprovalOutcome> } }).approval;
-      if (approval && typeof approval.request === 'function') {
+      const approval = (ctx as unknown as {
+        approval?: { request?: (req: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }) => Promise<ApprovalOutcome> };
+      }).approval;
+      if (approval && typeof approval.request === 'function' && opts?.agent) {
         try {
-          outcome = await approval.request(
-            { toolName: `evolution:create:${spec.name}`, reason: '自生成临时插件需授权门控（默认 CONFIRM + 沙箱内运行）', sessionId: opts?.sessionId },
-            opts?.signal,
-          );
+          outcome = await approval.request({
+            agent: opts.agent,
+            toolName: `evolution:create:${spec.name}`,
+            reason: '自生成临时插件需授权门控（默认 CONFIRM + 沙箱内运行）',
+            signal: opts?.signal,
+          });
         } catch {
           outcome = 'unavailable';
         }
       }
       if (outcome !== 'allowed-once') {
-        return { ok: false, reason: '授权门控未通过（默认 CONFIRM，未授权则不加载）' };
+        return { ok: false, reason: '授权门控未通过（默认 CONFIRM，未授权或不含 agent 句柄则不加载）' };
       }
     }
 

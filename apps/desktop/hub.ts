@@ -97,7 +97,14 @@ export class HubClient {
 
   /** 配对远程 Agent（凭据加密存储）。 */
   async pair(url: string, token: string): Promise<PairResult> {
-    if (!url || !/^https?:\/\//.test(url)) return { ok: false, reason: 'Hub URL 不合法' };
+    // 强制 https（凭据经网传输；本地调试可显式用 http://127.0.0.1，其余一律拒绝，
+    // 防明文 token 走 http 与外网任意 URL 的 SSRF 面）。
+    const trimmed = (url || '').trim().replace(/\/$/, '');
+    const isHttps = /^https:\/\//i.test(trimmed);
+    const isLoopbackHttp = /^http:\/\/127\.0\.0\.1(:\d+)?(\/|$)/i.test(trimmed) || /^http:\/\/localhost(:\d+)?(\/|$)/i.test(trimmed);
+    if (!isHttps && !isLoopbackHttp) {
+      return { ok: false, reason: 'Hub URL 必须为 https（本地调试可 http://127.0.0.1）' };
+    }
     if (!token || !token.trim()) return { ok: false, reason: '配对凭据为空' };
     let cipher: string;
     try {
@@ -106,7 +113,7 @@ export class HubClient {
       return { ok: false, reason: (err as Error).message };
     }
     try {
-      const res = await fetch(`${url.replace(/\/$/, '')}/api/pair`, {
+      const res = await fetch(`${trimmed}/api/pair`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: token.trim() }),

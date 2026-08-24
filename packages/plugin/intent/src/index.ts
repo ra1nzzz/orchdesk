@@ -82,7 +82,7 @@ export const Config: z<IntentConfig> = z.object({
 // ───────────────────────────── 文本提取 ─────────────────────────────
 
 interface TextBlock {
-  kind: 'text';
+  type: 'text';
   text: string;
 }
 
@@ -92,8 +92,9 @@ function extractText(msg: UserMessage): string {
   const content = anyMsg.content;
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
+    // dsh ContentBlock 判别字段为 type（TextBlock.type === 'text'），非 kind。
     return content
-      .filter((b): b is TextBlock => !!b && (b as TextBlock).kind === 'text' && typeof (b as TextBlock).text === 'string')
+      .filter((b): b is TextBlock => !!b && (b as TextBlock).type === 'text' && typeof (b as TextBlock).text === 'string')
       .map((b) => b.text)
       .join('\n');
   }
@@ -114,6 +115,8 @@ const F1_LEXEMES: { pattern: RegExp; weight: number; label: string }[] = [
 
 const F2_RULES: { pattern: RegExp; stage: Stage }[] = [
   { pattern: /(执行|运行|命令|cmd|shell|bash|powershell|script|脚本|npm|pnpm|pip|docker|git\s)/i, stage: 'exec-command' },
+  // 删除/清空类破坏性操作归 exec-command（Stage 无独立 delete 类别，映射为命令执行语义）
+  { pattern: /(删除|删掉|删去|清空|格式化|销毁|抹掉|rm\s|rmdir|del\s|trash|wipe|drop\s+table|truncate|删库|shred)/i, stage: 'exec-command' },
   { pattern: /(写入|保存|创建文件|写文件|生成文件|导出到|落盘|write\s|save\s|create\s+file)/i, stage: 'write-file' },
   { pattern: /(发送|发邮件|群发|对外|post\s|http|curl|请求接口|调用接口)/i, stage: 'network-send' },
   { pattern: /(问|查询|解释|总结|翻译|分析|怎么|如何|为什么|列出)/i, stage: 'query' },
@@ -154,8 +157,9 @@ function funnel(text: string): FunnelResult {
   if (stage === 'network-send') radius = 'external';
   else if (stage === 'exec-command') radius = wide ? 'system' : 'directory';
   else if (stage === 'write-file') radius = wide ? 'directory' : 'single-file';
-  // F4 可逆性：删除/外发/系统级不可逆
-  const irreversible = stage === 'network-send' || (weight >= 0.4 && (radius === 'system' || radius === 'external'));
+  // F4 可逆性：外发（network-send）或命中 F1 破坏性词表（weight>=0.4：destructive/db-destructive）
+  // 即判不可逆——不依赖 radius 反查，避免「删除文件」「rm -rf /」被漏判为可逆（fail-open）。
+  const irreversible = stage === 'network-send' || weight >= 0.4;
   const reversible: Reversibility = irreversible ? 'irreversible' : 'reversible';
   // 风险分：F1 权重 + 阶段 + 半径 + 不可逆
   let score = weight;

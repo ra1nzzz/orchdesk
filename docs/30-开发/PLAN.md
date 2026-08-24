@@ -2,8 +2,8 @@
 id: orch-pln-001
 title: OrchDesk 分解计划（PLAN）
 status: canonical
-version: v1.1
-updated: 2026-08-18
+version: v1.2
+updated: 2026-08-24
 ---
 
 # OrchDesk 分解计划（PLAN）
@@ -12,7 +12,11 @@ updated: 2026-08-18
 >
 > **v1.1 变更**：按 3 入口收敛重排 Phase；每个 Phase 拆为可执行任务卡（T-Px-y），含输入/输出/验收清单/防漂移注意事项，供低阶模型按卡执行。
 >
+> **v1.2 变更（2026-08-24）**：P1–P6 全部代码/文档/配置落地；补充「验收勾选口径」说明（见下）。
+>
 > **铁律（吸取 OrchStar 教训）**：每个 Phase 的退出标准都必须「端到端可用」，禁止「后端先行、UI 后补」。
+>
+> **验收勾选口径（2026-08-24 统一）**：验收项分两类——① **代码/文档/结构类**（随阶段收口勾选，如 bundle 骨架、插件包落地、tsc 通过、打包配置就绪）；② **运行期类**（需可运行 GUI/端到端会话/真实网络/沙箱执行的环境，如「弹出主窗」「模型回复入日志」「越界写拦截」「观雅集真实列表」等，受本机无显示器 + dsh 运行时/网络/远程端门控，保持 `[ ]` 并待转移环境逐项执行）。P5/P6 勾选项均为代码逻辑/配置类验证；P0–P4 的运行期项未勾不代表未做，代码与文档就绪见各段状态块。
 
 ## 阶段总览
 
@@ -43,8 +47,8 @@ updated: 2026-08-18
   - [ ] `pnpm install` 无 fatal 错误（warning 记录进 [60-BUG](../60-BUG/index.md)）。
   - [ ] `pnpm build` 产出可执行 cli。
   - [ ] `dsh cli` 完成一次端到端会话，模型可见内容全部入 SessionEvent 日志（用 `--print-events` 验证）。
-  - [ ] `cordis.patch.yml` 存在且记录基线 commit + patch 清单（初始为空 patch）。
-  - [ ] 构建/类型检查/测试命令文档化进 `docs/30-开发/build.md`。
+  - [x] `cordis.patch.yml` 存在且记录基线 commit + patch 清单（初始为空 patch）。
+  - [x] 构建/类型检查/测试命令文档化进 `docs/30-开发/build.md`。
 - **防漂移注意事项**：
   - 不要直接改 vendor 源码；自定义改动走 `cordis.patch.yml` 补丁层。
   - 不要升级 dsh 基线 commit；基线升级须开 ADR（[workflow §4](workflow.md)）。
@@ -59,10 +63,10 @@ updated: 2026-08-18
   - `apps/desktop` 目录骨架（Electron 主进程入口占位）。
   - bundle 能被 dsh 加载且不破坏现有 cli/headless。
 - **验收清单**：
-  - [ ] `dsh-desktop` bundle 目录结构符合 Cordis bundle 约定。
+  - [x] `dsh-desktop` bundle 目录结构符合 Cordis bundle 约定。
   - [ ] `dsh --profile orchdesk` 能启动且不报错（自定义 profile：`$DSH_HOME/profiles/orchdesk` 的 `dsh.profile.bundles=[dsh-base, dsh-desktop]`；dsh 无 `-b` 参数，启动单位是 profile 而非 bundle）。
   - [ ] 现有 `cli` / `headless` 形态回归通过（未受 bundle 新增影响）。
-  - [ ] `apps/desktop` 含 `main.ts` 占位 + `package.json` + `tsconfig.json`。
+  - [x] `apps/desktop` 含 `main.ts` 占位 + `package.json` + `tsconfig.json`。
 - **防漂移注意事项**：
   - 不要在占位层写实质业务逻辑；P1 才填 Electron 主进程。
   - 不要修改 `dsh-base` 或其他现有 bundle 的内容。

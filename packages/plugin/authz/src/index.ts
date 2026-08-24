@@ -112,6 +112,7 @@ export interface AuditEntry {
   outcome?: string;
   toolName?: string;
   reason?: string;
+  note?: string;
   sessionId?: string;
 }
 
@@ -163,6 +164,9 @@ export function apply(ctx: Context, config: AuthzConfig): void {
   };
 
   // 调用 dsh 既有服务（inject 声明，运行时由 Cordis 注入）。
+  // 注：dsh sandbox-policy 的 setSandboxMode(session: Session, mode) / resolve 需要**真实 Session**
+  // 对象（读取 session.header.cwd 等）；本插件 seam 无真实 Session 句柄（P1 桥接任务卡未接 dsh ctx），
+  // 传 {id} 假对象会在运行时抛错。故持久化调用以 try/catch 降级为审计，保持 fail-safe，不伪造调用。
   const sandboxPolicy = (ctx as unknown as { sandboxPolicy?: {
     resolve(req?: { session?: { id: string } }): { mode: string };
     setSandboxMode(session: { id: string }, mode: string): void;
@@ -173,26 +177,24 @@ export function apply(ctx: Context, config: AuthzConfig): void {
 
   async function getMode(sessionId?: string): Promise<AuthzMode> {
     // 解析当前生效的 SandboxMode → 反查 AuthzMode（default/trusted 同映射 workspace-write+ask，
-    // 视作 default；paranoid 映射 read-only+never）。
-    const resolved = sandboxPolicy?.resolve(sessionId ? { session: { id: sessionId } } : {});
-    const mode = resolved?.mode;
-    const spec = AUTHZ_MODES.find((x) => x.sandboxMode === mode && x.approvalPolicy === 'never');
-    return spec ? spec.id : 'default';
+    // 视作 default；paranoid 映射 read-only+never）。失败/不可用 → default（保守，不误报 paranoid）。
+    try {
+      const resolved = sandboxPolicy?.resolve(sessionId ? { session: { id: sessionId } } : {});
+      const mode = resolved?.mode;
+      const spec = AUTHZ_MODES.find((x) => x.sandboxMode === mode && x.approvalPolicy === 'never');
+      return spec ? spec.id : 'default';
+    } catch {
+      return 'default';
+    }
   }
 
   async function setMode(mode: AuthzMode, sessionId?: string): Promise<void> {
     const spec = modeToSpec(mode);
-    // 持久化到 session 的 sandbox/mode 事件（dsh setSandboxMode 写日志，重启可回放）。
-    if (sessionId && sandboxPolicy?.setSandboxMode) {
-      sandboxPolicy.setSandboxMode({ id: sessionId }, spec.sandboxMode);
-    }
     // approval/policy 的 paranoid='never' 由 dsh approval config / session 事件控制；
-    // 此处对 sandbox/mode 持久化已满足 fail-safe（read-only 比 danger-full-access 更严）。
-    // 注：dsh approval.setPolicy 作用于 live agent 对象，需 agent 句柄；
-    // 部署级默认 ask 已覆盖 default/trusted。保持 fail-safe，不静默放宽。
+    // sandbox/mode 持久化需真实 Session（setSandboxMode 签名），seam 未接入前仅审计，
+    // 默认 read-only 沙箱兜底，保持 fail-safe，不静默放宽。
     void approval;
-    void sessionId;
-    pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId });
+    pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId, note: 'sandbox/mode 持久化 seam：需真实 Session（P1 桥接任务卡接入 dsh ctx 后恢复）' });
   }
 
   function setUiAnswerer(fn: UiAnswerer | null): void {

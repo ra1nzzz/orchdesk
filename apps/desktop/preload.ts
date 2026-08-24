@@ -65,6 +65,53 @@ const orchdesk = {
     ipcRenderer.send('orchdesk:authz-submit-decision', id, outcome);
   },
 
+  // ---- T-P4-1/2 记忆 + 提示词库（dsh 服务 seam：ctx.memory / ctx.promptLib） ----
+  /** 记忆统计（上下文占用 / 转储数 / 召回命中）。 */
+  getMemoryStats: (): Promise<{ usageRatio: number; dumps: number; recallHits: number; domainCounts: Record<string, number> }> =>
+    ipcRenderer.invoke('orchdesk:memory-stats'),
+
+  /** 提示词库列表。 */
+  listPrompts: (): Promise<Array<Record<string, unknown>>> =>
+    ipcRenderer.invoke('orchdesk:prompt-list'),
+
+  /** 合并类别提示词（冲突标记）。 */
+  mergePrompts: (category: string, body: string): Promise<{ ok: boolean; conflicts?: Array<Record<string, unknown>> }> =>
+    ipcRenderer.invoke('orchdesk:prompt-merge', category, body),
+
+  /** 保存单个提示词。 */
+  savePrompt: (doc: Record<string, unknown>): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('orchdesk:prompt-save', doc),
+
+  /** 删除单个提示词。 */
+  deletePrompt: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('orchdesk:prompt-delete', id),
+
+  // ---- T-P5-1 补偿层（dsh 服务 seam：ctx.compensation） ----
+  /** 外发预判（composer「不可撤销」警示条）。 */
+  withhold: (text: string): Promise<{ needsConfirm: boolean; category: string; reason: string; warning: string }> =>
+    ipcRenderer.invoke('orchdesk:comp-withhold', text),
+
+  /** 记录补偿动作。 */
+  compensate: (text: string, note?: string): Promise<{ id: string; category: string; action: string; ts: number }> =>
+    ipcRenderer.invoke('orchdesk:comp-compensate', text, note),
+
+  /** 补偿层审计快照。 */
+  getCompensationAudit: (): Promise<Array<Record<string, unknown>>> =>
+    ipcRenderer.invoke('orchdesk:comp-audit'),
+
+  // ---- T-P5-2 自进化（dsh 服务 seam：ctx.evolution；临时插件仅驻内存） ----
+  /** 创建临时插件（静态门控 + CONFIRM，仅驻内存）。 */
+  createTempPlugin: (spec: Record<string, unknown>): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:evol-create', spec),
+
+  /** 当前驻内存临时插件列表。 */
+  listTempPlugins: (): Promise<Array<Record<string, unknown>>> =>
+    ipcRenderer.invoke('orchdesk:evol-list'),
+
+  /** 卸载临时插件。 */
+  disposeTempPlugin: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('orchdesk:evol-dispose', id),
+
   // ---- T-P6-1 观雅集技能市场（复用 guanji SKILL API 约定；TOKEN 由用户配置） ----
   /** TOKEN 配置状态（不返回明文）。 */
   guanjiTokenStatus: (): Promise<{ configured: boolean }> =>
@@ -78,9 +125,9 @@ const orchdesk = {
   guanjiList: (): Promise<Array<{ slug: string; name: string; description: string; caps: string[]; auth: 0 | 1 }>> =>
     ipcRenderer.invoke('orchdesk:guanji-list'),
 
-  /** 安装技能（主进程先做能力审查，auth=1 且无 token → 拒绝）。 */
-  guanjiInstall: (skill: { slug: string; name: string; description: string; caps: string[]; auth: 0 | 1 }): Promise<{ ok: boolean; review: string; reason?: string; path?: string }> =>
-    ipcRenderer.invoke('orchdesk:guanji-install', skill),
+  /** 安装技能（主进程先做能力审查；auth=1 需 authorized=true 显式授权后放行）。 */
+  guanjiInstall: (skill: { slug: string; name: string; description: string; caps: string[]; auth: 0 | 1 }, authorized = false): Promise<{ ok: boolean; review: string; reason?: string; path?: string }> =>
+    ipcRenderer.invoke('orchdesk:guanji-install', skill, authorized),
 
   /** 发布技能到观雅集（用户登录后）。 */
   guanjiPublish: (input: { slug: string; alias?: string; filePath: string }): Promise<{ ok: boolean; reason?: string }> =>

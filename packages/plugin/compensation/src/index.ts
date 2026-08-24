@@ -210,8 +210,9 @@ export function apply(ctx: Context, config: CompensationConfig): void {
     const content = anyMsg.content;
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) {
+      // dsh ContentBlock 判别字段为 type（TextBlock.type === 'text'），非 kind。
       return content
-        .filter((b): b is { kind: 'text'; text: string } => !!b && (b as { kind: string }).kind === 'text' && typeof (b as { text: string }).text === 'string')
+        .filter((b): b is { type: 'text'; text: string } => !!b && (b as { type?: string }).type === 'text' && typeof (b as { text: string }).text === 'string')
         .map((b) => b.text)
         .join('\n');
     }
@@ -249,15 +250,21 @@ export function apply(ctx: Context, config: CompensationConfig): void {
     });
 
     // 经 dsh approval seam 发起二次确认（CONFIRM）。
+    // 签名（dsh user-approval ApprovalService.request(req)）：
+    //   req 必含 agent（路由 + 审计挂在其 session 日志），signal 置于 req.signal。
     // 无 request 方法 / 无应答方 → fail-closed 拦截（reject），不开门。
-    const approval = (ctx as unknown as { approval?: { request?: (req: unknown, signal?: AbortSignal) => Promise<ApprovalOutcome> } }).approval;
+    const approval = (ctx as unknown as {
+      approval?: { request?: (req: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }) => Promise<ApprovalOutcome> };
+    }).approval;
     let outcome: ApprovalOutcome = 'unavailable';
     if (approval && typeof approval.request === 'function') {
       try {
-        outcome = await approval.request(
-          { toolName: `outbound:${category}`, reason: '跨边界/不可逆外发操作需二次确认', sessionId },
-          payload.signal,
-        );
+        outcome = await approval.request({
+          agent: payload.agent,
+          toolName: `outbound:${category}`,
+          reason: '跨边界/不可逆外发操作需二次确认',
+          signal: payload.signal,
+        });
       } catch {
         outcome = 'unavailable';
       }

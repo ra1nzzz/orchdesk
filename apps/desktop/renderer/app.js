@@ -198,7 +198,7 @@
     authLevels: [], authAudit: [],
     promptDocs: [], promptConflicts: [],
     compAudit: [], tempPlugins: [],
-    guanjiSkills: [], guanjiTokenSet: false, installedSkills: [],
+    guanjiSkills: [], guanjiTokenSet: false, installedSkills: [], askInputCb: null,
     hubStatus: { paired: false }, hubUrl: '', hubTaskText: '', hubResultText: '',
     memoryStats: { usageRatio: 0.41, dumps: 2, recallHits: 1, domainCounts: { global: 0, project: 1, director: 0, worker: 0 } },
     pExpanded: new Set(['p1', 'p2']),
@@ -224,18 +224,21 @@
       `<div class="sp"></div><button class="navbtn" data-action="toggle-theme" title="切换主题">${ic('sun')}<span class="nl">主题</span></button>`;
   }
 
-  /* ---------- 渲染：消息 ---------- */
+  /* ---------- 渲染：消息（外部/用户可控内容统一转义，防 XSS） ---------- */
+  function esc(v) {
+    return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  }
   function renderMsg(m, sid) {
     const isU = m.r === 'user';
     const intentBadge = m.intent
       ? (m.intent === 'ACT' ? `<span class="badge ok"><span class="dot" style="background:var(--ok)"></span>意图 ACT</span>`
         : m.intent === 'CONFIRM' ? `<span class="badge warn">意图 · 待确认</span>` : `<span class="badge danger">意图 · 已拦截</span>`)
       : '';
-    const tools = (m.tools && m.tools.length) ? `<details class="tools"><summary>${ic('chev', 14)} ${m.steps} 步 · ${m.tools.length} 个动作</summary>${m.tools.map((t) => `<div class="trow"><span class="dot" style="background:${t.ph === 'running' ? 'var(--warn)' : 'var(--ok)'};${t.ph === 'running' ? 'animation:pulse 1.6s infinite' : ''}"></span><span class="mono">${t.n}</span><span class="faint" style="margin-left:auto">${t.ph === 'running' ? '执行中' : '完成'}</span></div>`).join('')}</details>` : '';
-    const sub = m.sub ? `<div class="subagent"><span class="badge ${m.sub.state === 'running' ? 'warn' : 'info'}">SubAgent</span><span class="mono">${m.sub.name}</span><span class="phases faint">${m.sub.state === 'running' ? '执行中 · 即用即走' : '已回收并销毁'}</span></div>` : '';
+    const tools = (m.tools && m.tools.length) ? `<details class="tools"><summary>${ic('chev', 14)} ${m.steps} 步 · ${m.tools.length} 个动作</summary>${m.tools.map((t) => `<div class="trow"><span class="dot" style="background:${t.ph === 'running' ? 'var(--warn)' : 'var(--ok)'};${t.ph === 'running' ? 'animation:pulse 1.6s infinite' : ''}"></span><span class="mono">${esc(t.n)}</span><span class="faint" style="margin-left:auto">${t.ph === 'running' ? '执行中' : '完成'}</span></div>`).join('')}</details>` : '';
+    const sub = m.sub ? `<div class="subagent"><span class="badge ${m.sub.state === 'running' ? 'warn' : 'info'}">SubAgent</span><span class="mono">${esc(m.sub.name)}</span><span class="phases faint">${m.sub.state === 'running' ? '执行中 · 即用即走' : '已回收并销毁'}</span></div>` : '';
     const fb = (m.feedback && state.feedback.has(sid + '|' + m.t)) ? `<div class="feedback" style="color:var(--ok)">已记录反馈 · 已脱敏遥测</div>`
       : (m.feedback ? `<div class="feedback"><span>这条回答对你有帮助吗？</span><button data-action="trace" data-t="${m.t}">有帮助</button><button data-action="trace" data-t="${m.t}">需改进</button><span class="faint">TRACE 脱敏遥测 → 公开 GitHub 仓库</span></div>` : '');
-    const txt = m.typing ? `<span class="faint">思考中…</span>` : m.x;
+    const txt = m.typing ? `<span class="faint">思考中…</span>` : esc(m.x);
     return `<div class="msg ${isU ? 'user' : 'agent'}${m.typing ? ' typing' : ''}">
       <div class="avatar">${isU ? '我' : 'AI'}</div>
       <div class="body"><div class="meta"><b>${isU ? '你' : 'OrchDesk'}</b><span>${m.t}</span>${intentBadge}</div>
@@ -250,15 +253,15 @@
         const s = state.sessions[sid]; if (!s) return '';
         return `<div class="sess ${state.sel === sid ? 'active' : ''}" data-action="sel" data-id="${sid}">
           <span class="si"></span>
-          <span class="sn" title="${s.title}">${s.title}</span>
-          <span class="st">${s.updated}</span>
+          <span class="sn" title="${esc(s.title)}">${esc(s.title)}</span>
+          <span class="st">${esc(s.updated)}</span>
           <button class="sm" data-action="sess-menu" data-id="${sid}" title="更多">${ic('more', 14)}</button>
         </div>`;
       }).join('');
       return `<div class="proj">
         <div class="proj-head" data-action="proj-toggle" data-id="${p.id}">
           <span class="pf ${expanded ? 'open' : ''}">${ic('chev', 12)}</span>
-          <span class="pn">${p.n}</span>
+          <span class="pn">${esc(p.n)}</span>
           <span class="pc">${p.sessions.length}</span>
           <button class="pm" data-action="proj-menu" data-id="${p.id}" title="项目操作">${ic('more', 14)}</button>
         </div>
@@ -394,13 +397,13 @@
           <table style="width:100%">
             <tr><th style="width:32%">技能</th><th>能力</th><th style="width:80px;text-align:right">操作</th></tr>
             ${(state.guanjiSkills.length ? state.guanjiSkills : SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }))).map((s) => `<tr>
-              <td><div class="mono" style="font-size:11.5px">${s.slug}</div><div class="faint" style="font-size:11px;margin-top:2px">${s.description || ''}</div></td>
-              <td>${s.caps.map((c) => `<span class="badge cap" style="margin:2px 4px 2px 0">${c}</span>`).join('')}${s.auth ? '<span class="badge warn">需授权</span>' : ''}</td>
-              <td style="text-align:right"><button class="btn sm primary" data-action="guanji-install" data-slug="${s.slug}">安装</button></td>
+              <td><div class="mono" style="font-size:11.5px">${esc(s.slug)}</div><div class="faint" style="font-size:11px;margin-top:2px">${esc(s.description || '')}</div></td>
+              <td>${s.caps.map((c) => `<span class="badge cap" style="margin:2px 4px 2px 0">${esc(c)}</span>`).join('')}${s.auth ? '<span class="badge warn">需授权</span>' : ''}</td>
+              <td style="text-align:right"><button class="btn sm primary" data-action="guanji-install" data-slug="${esc(s.slug)}">安装</button></td>
             </tr>`).join('')}
           </table>
           <div class="row" style="margin-top:10px"><button class="btn sm" data-action="guanji-publish">发布技能到观雅集</button></div>
-          ${state.installedSkills.length ? `<div class="sec-title" style="margin-top:12px;font-size:12px">已安装（启用 / 停用 / 卸载）</div>` + state.installedSkills.map((s) => `<div class="row" style="padding:5px 0;border-top:1px solid var(--border)"><div style="flex:1"><span class="mono" style="font-size:11.5px">${s.slug}</span>${s.enabled ? '' : '<span class="badge">已停用</span>'}</div><button class="btn sm" data-action="skill-toggle" data-n="${s.slug}">${s.enabled ? '停用' : '启用'}</button><button class="btn sm ghost" data-action="skill-uninstall" data-n="${s.slug}">卸载</button></div>`).join('') : ''}
+          ${state.installedSkills.length ? `<div class="sec-title" style="margin-top:12px;font-size:12px">已安装（启用 / 停用 / 卸载）</div>` + state.installedSkills.map((s) => `<div class="row" style="padding:5px 0;border-top:1px solid var(--border)"><div style="flex:1"><span class="mono" style="font-size:11.5px">${esc(s.slug)}</span>${s.enabled ? '' : '<span class="badge">已停用</span>'}</div><button class="btn sm" data-action="skill-toggle" data-n="${esc(s.slug)}">${s.enabled ? '停用' : '启用'}</button><button class="btn sm ghost" data-action="skill-uninstall" data-n="${esc(s.slug)}">卸载</button></div>`).join('') : ''}
         </div></div>`;
     },
     ctx() {
@@ -418,13 +421,13 @@
         <div class="card" style="padding:10px">
           <div class="faint" style="margin-bottom:8px">配对远程 Agent（凭据经系统安全存储加密）；主会话可向其下发任务并回收结果。端到端需可达远程 Hub。</div>
           ${state.hubStatus.paired
-            ? `<div class="row" style="margin-bottom:8px"><span class="badge ok">已配对${state.hubStatus.agentName ? ' · ' + state.hubStatus.agentName : ''}</span><button class="btn sm ghost" data-action="hub-unpair" style="margin-left:8px">解除配对</button></div>`
-            : `<div class="mb-row"><label>Hub URL</label><input class="inp" id="hubUrl" placeholder="https://hub.example.com" value="${state.hubUrl || ''}"></div>
-               <div class="mb-row"><label>配对凭据</label><input class="inp" id="hubToken" type="password" placeholder="远程 Agent 配对 Token"></div>
-               <button class="btn sm primary" data-action="hub-pair">配对</button>`}
-          <div class="mb-row" style="margin-top:8px"><label>向远程下发任务</label><textarea id="hubTask" class="inp" rows="2" placeholder="任务描述…">${state.hubTaskText || ''}</textarea></div>
+            ? `<div class="row" style="margin-bottom:8px"><span class="badge ok">已配对${state.hubStatus.agentName ? ' · ' + esc(state.hubStatus.agentName) : ''}</span><button class="btn sm ghost" data-action="hub-unpair" style="margin-left:8px">解除配对</button></div>`
+            : `<div class="mb-row"><label>Hub URL</label><input class="inp" id="hubUrl" placeholder="https://hub.example.com" value="${esc(state.hubUrl || '')}"></div>`
+               + `<div class="mb-row"><label>配对凭据</label><input class="inp" id="hubToken" type="password" placeholder="远程 Agent 配对 Token"></div>`
+               + `<button class="btn sm primary" data-action="hub-pair">配对</button>`}
+          <div class="mb-row" style="margin-top:8px"><label>向远程下发任务</label><textarea id="hubTask" class="inp" rows="2" placeholder="任务描述…">${esc(state.hubTaskText || '')}</textarea></div>
           <button class="btn sm" data-action="hub-send">发送任务</button>
-          ${state.hubResultText ? `<div class="faint" style="margin-top:8px;white-space:pre-wrap">${state.hubResultText}</div>` : ''}
+          ${state.hubResultText ? `<div class="faint" style="margin-top:8px;white-space:pre-wrap">${esc(state.hubResultText)}</div>` : ''}
         </div>`;
     }
   };
@@ -685,6 +688,37 @@
         </div>`).join('')}
       </div>
       <div class="mf"><button class="btn ghost" data-action="modal-cancel">关闭</button></div>`);
+  }
+
+  /* ---------- 通用输入弹窗（Electron 不支持 window.prompt，统一走 modal） ---------- */
+  function askInput(opts) {
+    openModal(`<div class="mh">${ic('at', 18)}<b>${esc(opts.title)}</b></div>
+      <div class="mb">
+        ${opts.label ? `<div class="faint" style="margin-bottom:8px">${esc(opts.label)}</div>` : ''}
+        <div class="mb-row"><input id="askInput" class="inp" type="${opts.secret ? 'password' : 'text'}" placeholder="${esc(opts.placeholder || '')}" style="width:100%" autofocus></div>
+      </div>
+      <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button>
+        <button class="btn primary" data-action="ask-input-ok">${esc(opts.okText || '确定')}</button></div>`);
+    state.askInputCb = opts.onOk;
+  }
+
+  /** 观雅集技能安装（authorized=true 表示用户已在弹窗中显式授权高危能力）。 */
+  async function doInstallGuanjiSkill(skill, authorized) {
+    try {
+      const r = await bridge.guanjiInstall(skill, authorized);
+      if (r && r.ok) {
+        if (!state.installedSkills.find((x) => x.slug === skill.slug)) state.installedSkills.push({ slug: skill.slug, enabled: true });
+        toast(`已从观雅集安装「${skill.slug}」（能力审查：${r.review}）`, 'ok');
+      } else if (r && r.review === 'needs-auth') {
+        toast(`「${skill.slug}」需授权：请先在弹窗中确认高危能力`, 'danger');
+      } else {
+        toast(`安装失败：${(r && r.reason) || '未知错误'}`, 'danger');
+      }
+    } catch {
+      toast('安装请求异常', 'danger');
+    }
+    closeModal();
+    render();
   }
 
   /* ---------- 系统提示词编辑器（T-P4-3） ---------- */
@@ -1009,19 +1043,26 @@
       case 'plug-cfg': { const card = el.closest('.plug'); if (card) card.classList.toggle('open'); break; }
       case 'plug-nav': { const card = document.querySelector(`.plug[data-pid="${id}"]`); if (card) { card.classList.add('open'); card.scrollIntoView({ behavior: 'smooth', block: 'start' }); } break; }
       case 'plug-unload': toast('已卸载并回滚注册（无残留）', 'warn'); break;
-      case 'market': toast(`已从观雅集安装「${el.dataset.n}」（能力审查通过）`, 'ok'); break;
-      case 'market-auth': openAuthPicker(); break;
+      case 'market': toast(`「${el.dataset.n}」请到 设置-技能市场（观雅集）完成安装与能力审查`, 'warn'); break;
+      case 'market-auth': toast(`「${el.dataset.n}」需授权：请在 设置-技能市场 安装时于确认弹窗中授权高危能力`, 'warn'); break;
 
       /* T-P6-1 观雅集技能市场 */
       case 'guanji-token': {
-        const t = prompt('粘贴观雅集持久化 TOKEN（来自 https://skill.ytaiv.com/api/auth/token，登录后获取）：');
-        if (t && t.trim()) {
-          const r = await bridge.guanjiSetToken(t.trim());
-          state.guanjiTokenSet = !!(r && r.ok);
-          if (state.guanjiTokenSet) { try { state.guanjiSkills = await bridge.guanjiList(); } catch { /* 回落静态样本 */ } }
-          toast(state.guanjiTokenSet ? '观雅集 TOKEN 已配置' : 'TOKEN 配置失败', state.guanjiTokenSet ? 'ok' : 'danger');
-        }
-        render();
+        askInput({
+          title: '配置观雅集 TOKEN',
+          label: '粘贴观雅集持久化 TOKEN（来自 https://skill.ytaiv.com/api/auth/token，登录后获取）。TOKEN 将经系统安全存储加密保存，绝不硬编码。',
+          placeholder: '粘贴 TOKEN…',
+          secret: true,
+          okText: '保存',
+          onOk: async (t) => {
+            if (!t || !t.trim()) { toast('TOKEN 为空', 'warn'); return; }
+            const r = await bridge.guanjiSetToken(t.trim());
+            state.guanjiTokenSet = !!(r && r.ok);
+            if (state.guanjiTokenSet) { try { state.guanjiSkills = await bridge.guanjiList(); } catch { /* 回落静态样本 */ } }
+            toast(state.guanjiTokenSet ? '观雅集 TOKEN 已配置' : `TOKEN 配置失败：${(r && r.reason) || '未知错误'}`, state.guanjiTokenSet ? 'ok' : 'danger');
+            render();
+          },
+        });
         break;
       }
       case 'guanji-install': {
@@ -1029,25 +1070,41 @@
         const list = state.guanjiSkills.length ? state.guanjiSkills : SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }));
         const skill = list.find((x) => x.slug === slug);
         if (!skill) break;
-        const r = await bridge.guanjiInstall(skill);
-        if (r && r.ok) {
-          if (!state.installedSkills.find((x) => x.slug === slug)) state.installedSkills.push({ slug, enabled: true });
-          toast(`已从观雅集安装「${slug}」（能力审查：${r.review}）`, 'ok');
-        } else if (r && r.review === 'needs-auth') {
-          toast(`「${slug}」需授权：请先配置观雅集 TOKEN`, 'danger');
+        if (skill.auth === 1) {
+          // 高危技能：先弹显式授权确认（列出声明的 L3/L4 高危能力），确认后 authorized=true 安装。
+          openModal(`<div class="mh">${ic('shield', 18)}<b>授权安装「${esc(skill.name || slug)}」</b></div>
+            <div class="mb">
+              <div class="faint" style="margin-bottom:8px">该技能声明了 L3/L4 高危能力，安装后即获得这些权限（L3/L4 强制授权，不可凭 TOKEN 绕过）。请确认：</div>
+              <div>${skill.caps.map((c) => `<span class="badge warn" style="margin:2px 4px 2px 0">${esc(c)}</span>`).join('')}</div>
+            </div>
+            <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button>
+              <button class="btn danger" data-action="guanji-install-auth" data-slug="${esc(slug)}">授权并安装</button></div>`);
         } else {
-          toast(`安装失败：${(r && r.reason) || '未知错误'}`, 'danger');
+          await doInstallGuanjiSkill(skill, false);
         }
-        render();
+        break;
+      }
+      case 'guanji-install-auth': {
+        const slug = el.dataset.slug;
+        const list = state.guanjiSkills.length ? state.guanjiSkills : SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }));
+        const skill = list.find((x) => x.slug === slug);
+        if (!skill) break;
+        await doInstallGuanjiSkill(skill, true);
         break;
       }
       case 'guanji-publish': {
-        const slug = prompt('要发布的技能 slug（与 .skill 包根 SKILL.md 的 name 一致）：');
-        if (!slug || !slug.trim()) break;
-        const alias = prompt('雅称（可选，回车跳过）：') || '';
-        // 真实环境经 Electron 文件对话框选 .skill 包；此处以占位路径走桥，验证需 TOKEN。
-        const r = await bridge.guanjiPublish({ slug: slug.trim(), alias: alias.trim() || undefined, filePath: '' });
-        toast(r && r.ok ? `已发布「${slug.trim()}」到观雅集` : `发布失败：${(r && r.reason) || '需配置 TOKEN'}`, r && r.ok ? 'ok' : 'danger');
+        askInput({
+          title: '发布技能到观雅集',
+          label: '输入技能 slug（与 .skill 包根 SKILL.md 的 name 一致）。发布需已配置 TOKEN；.skill 包经 Electron 文件对话框选择后上传。',
+          placeholder: '技能 slug…',
+          okText: '发布',
+          onOk: async (slug) => {
+            if (!slug || !slug.trim()) { toast('slug 为空', 'warn'); return; }
+            const r = await bridge.guanjiPublish({ slug: slug.trim(), filePath: '' });
+            toast(r && r.ok ? `已发布「${slug.trim()}」到观雅集` : `发布失败：${(r && r.reason) || '需配置 TOKEN 与有效 .skill 文件'}`, r && r.ok ? 'ok' : 'danger');
+            render();
+          },
+        });
         break;
       }
       case 'skill-toggle': { const s = state.installedSkills.find((x) => x.slug === el.dataset.n); if (s) { s.enabled = !s.enabled; render(); } break; }
@@ -1101,8 +1158,16 @@
       case 'prompt-delete': doDeletePrompt(id); break;
 
       /* modal */
-      case 'modal-bg': if (e.target === el) closeModal(); break;
-      case 'modal-cancel': closeModal(); break;
+      case 'modal-bg': if (e.target === el) { state.askInputCb = null; closeModal(); } break;
+      case 'modal-cancel': state.askInputCb = null; closeModal(); break;
+      case 'ask-input-ok': {
+        const cb = state.askInputCb;
+        state.askInputCb = null;
+        const v = ($('#askInput') && $('#askInput').value) || '';
+        closeModal();
+        if (typeof cb === 'function') cb(v);
+        break;
+      }
       case 'archive-confirm': doArchiveProject(id); closeModal(); break;
 
       /* 向导 */
