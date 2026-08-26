@@ -132,7 +132,7 @@ ipcMain.handle('orchdesk:run-agent-turn', async (_e, sessionId: string, text: st
 // ---------------------------------------------------------------------------
 type AuthzServiceLike = {
   getMode(sessionId?: string): Promise<string>;
-  setMode(mode: string, sessionId?: string): Promise<void>;
+  setMode(mode: string, sessionId?: string): Promise<{ ok: boolean; reason?: string }>;
   getLevels(): Array<{ level: number; label: string; scope: string; requiresApproval: boolean }>;
   getAuditLog(): Array<{ kind: string; ts: number; mode?: string; outcome?: string; toolName?: string; reason?: string; sessionId?: string }>;
   setUiAnswerer(fn: ((req: { toolName: string; reason?: string; sessionId?: string }) => Promise<string>) | null): void;
@@ -174,8 +174,8 @@ ipcMain.handle('orchdesk:authz-get-mode', async () => {
   try { return { mode: await authzService.getMode() }; } catch { return { mode: 'default' }; }
 });
 ipcMain.handle('orchdesk:authz-set-mode', async (_e, mode: string) => {
-  if (!authzService) return { ok: false };
-  try { await authzService.setMode(mode); return { ok: true }; } catch { return { ok: false }; }
+  if (!authzService) return { ok: false, reason: '授权服务未加载' };
+  try { return await authzService.setMode(mode); } catch { return { ok: false, reason: '切换异常' }; }
 });
 ipcMain.handle('orchdesk:authz-get-levels', async () => {
   if (!authzService) return [];
@@ -281,7 +281,8 @@ function snapshotData(): { ok: boolean; dir?: string; reason?: string } {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const snapDir = path.join(userData, 'snapshots', stamp);
     fs.mkdirSync(path.dirname(snapDir), { recursive: true });
-    fs.cpSync(userData, snapDir, { recursive: true, filter: (src) => !src.includes(path.join('snapshots')) });
+    const snapshotsDir = path.join(userData, 'snapshots');
+    fs.cpSync(userData, snapDir, { recursive: true, filter: (src) => !src.startsWith(snapshotsDir + path.sep) });
     return { ok: true, dir: snapDir };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };

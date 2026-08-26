@@ -170,6 +170,9 @@ export function apply(ctx: Context, config: BrainConfig): void {
 
     return () => {
       offPreStep();
+      for (const [id, handle] of handles) {
+        try { void handle.dispose(); } catch { /* already disposed or unavailable */ }
+      }
       registry.clear();
       handles.clear();
       subscribers.clear();

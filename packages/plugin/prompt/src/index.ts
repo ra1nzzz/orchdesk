@@ -58,7 +58,7 @@ export interface PromptConfig {
   dataRoot: string;
 }
 
-export const Config = z.object({
+export const Config: z<PromptConfig> = z.object({
   defaultPriority: z.number().default(100),
   dataRoot: z.string().default('.orchdesk/prompt'),
 });

@@ -67,7 +67,7 @@ export interface MemoryConfig {
   dataRoot: string;
 }
 
-export const Config = z.object({
+export const Config: z<MemoryConfig> = z.object({
   dumpThreshold: z.number().default(0.8),
   recallTopK: z.number().default(5),
   maxContextTokens: z.number().default(128000),

@@ -75,7 +75,7 @@ export const Config: z<IntentConfig> = z.object({
         z.const('other'),
       ]),
     )
-    .default(['read', 'write-file', 'exec-command', 'network-send', 'message-send', 'query', 'other']),
+    .default(['read', 'query', 'write-file']),
   externalAllowlist: z.array(z.string()).default([]),
 });
 

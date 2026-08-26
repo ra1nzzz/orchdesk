@@ -134,7 +134,7 @@ export interface AuthzService {
   /** 当前会话/部署生效的模式（解析自 sandbox-policy）。 */
   getMode(sessionId?: string): Promise<AuthzMode>;
   /** 切换模式：经 dsh setSandboxMode + setApprovalPolicy 持久化（重启可回放）。 */
-  setMode(mode: AuthzMode, sessionId?: string): Promise<void>;
+  setMode(mode: AuthzMode, sessionId?: string): Promise<{ ok: boolean; reason?: string }>;
   /** 注入 GUI 应答回调（主进程桥接层在 Electron GUI 就绪后调用）。 */
   setUiAnswerer(fn: UiAnswerer | null): void;
   /** 订阅审计日志条目（供设置页/插件页检索渲染）。 */
@@ -188,13 +188,13 @@ export function apply(ctx: Context, config: AuthzConfig): void {
     }
   }
 
-  async function setMode(mode: AuthzMode, sessionId?: string): Promise<void> {
+  async function setMode(mode: AuthzMode, sessionId?: string): Promise<{ ok: boolean; reason?: string }> {
     const spec = modeToSpec(mode);
     // approval/policy 的 paranoid='never' 由 dsh approval config / session 事件控制；
-    // sandbox/mode 持久化需真实 Session（setSandboxMode 签名），seam 未接入前仅审计，
-    // 默认 read-only 沙箱兜底，保持 fail-safe，不静默放宽。
-    void approval;
-    pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId, note: 'sandbox/mode 持久化 seam：需真实 Session（P1 桥接任务卡接入 dsh ctx 后恢复）' });
+    // sandbox/mode 持久化需真实 Session（setSandboxMode 签名），seam 未接入前无法生效。
+    // 返回 { ok: false } 让 UI 层显示"当前不可用"而非乐观更新（fail-closed）。
+    pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId, note: 'persist seam unavailable (no real Session); mode change deferred' });
+    return { ok: false, reason: '沙箱模式持久化 seam 未接入（需 dsh ctx 真实 Session），切换未生效' };
   }
 
   function setUiAnswerer(fn: UiAnswerer | null): void {

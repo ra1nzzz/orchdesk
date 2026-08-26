@@ -73,11 +73,11 @@ export interface PublishResult {
   reason?: string;
 }
 
-// L3（网络）/ L4（Shell/进程）能力 → 安装前必须授权。
-const HIGH_RISK_CAPS = new Set<string>([
-  'github.write', 'fs.write', 'doc.review', 'web.fetch', 'cron.schedule',
-  'browser.navigate', 'browser.screenshot', 'git.write', 'pdf.write',
-  'mail.send', 'mail.read',
+// L3（网络）/ L4（Shell/进程）/ 系统级能力 → 安装前必须授权。
+// 默认 deny：未列入白名单的能力一律视为高危，需用户显式授权。
+const LOW_RISK_CAPS = new Set<string>([
+  'fs.read', 'doc.read', 'web.read', 'memory.read',
+  'chart.render', 'role.bind',
 ]);
 
 function configFile(): string {
@@ -127,7 +127,7 @@ export class GuanjiClient {
   /** 仅以 slug/name/desc/caps 构造最小技能对象（能力审查用）。 */
   private makeSkill(raw: { slug?: string; name?: string; description?: string; caps?: string[] }): GuanjiSkill {
     const caps = (raw.caps || []).filter((c): c is string => typeof c === 'string');
-    const auth = caps.some((c) => HIGH_RISK_CAPS.has(c)) ? 1 : 0;
+    const auth = caps.some((c) => !LOW_RISK_CAPS.has(c)) ? 1 : 0;
     return {
       slug: raw.slug || raw.name || 'unknown',
       name: raw.name || raw.slug || 'unknown',
@@ -209,7 +209,7 @@ export class GuanjiClient {
       fs.mkdirSync(dir, { recursive: true });
       const buf = Buffer.from(await res.arrayBuffer());
       const out = path.join(dir, `${skill.slug}.skill`);
-      fs.writeFileSync(out, buf, 'utf-8');
+      fs.writeFileSync(out, buf);
       return { ok: true, review, path: out };
     } catch (err) {
       return { ok: false, review, reason: `下载异常：${(err as Error).message}` };
