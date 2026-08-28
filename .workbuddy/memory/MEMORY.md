@@ -17,3 +17,13 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 
 ## 产品设计原则（用户确认）
 会话 = 一等公民（默认落地页，如 DSH）；脑手解耦/多Agent编排/意图识别是亮点但视觉弱化；一切皆插件，大部分能力收进设置。首批插件：意图识别(本地模型)/TRACE(脱敏遥测→GitHub)/脑手解耦/多Agent编排(专家团)/OrchClaw Hub(延后)。
+
+## 架构补充（v0.3.1 起）
+- **Agent Runtime 分层**：`apps/desktop/agent-runtime.ts` = 纯逻辑（零 electron 依赖，可 node 直测：工具定义/参数解析/tool_calls 归一化/文本兜底解析/消息构造）；`main.ts` 只留需 electron 的 `executeTool`。
+- **数据目录**：`dataDir()` = `ORCHDESK_HOME` > 便携模式（exe 同目录 `orchdesk-data`）> `%APPDATA%/OrchDesk`。NSIS 的 userData 即后者，故 portable 与 NSIS 共用同一目录。启动 `migrateLegacyData()` 按 key 合并历史位置（只补齐不覆盖）。
+- **工具调用双模式**：优先模型原生 function calling（`role:'tool'` + `tool_call_id`）；不支持时走 `<tool:name>json</tool>` 文本兜底，结果用 `role:'user'` 回传（无 tool_calls 时发 `role:'tool'` 会被网关拒）。
+
+## 验证入口（`cd apps/desktop`）
+- `npm run verify` = `agent-runtime-verify.cjs`(35) + `agent-loop-verify.cjs`(14) + `e2e-fix-verify.cjs`(29)
+- `agent-loop-verify.cjs` 用 `Module._load` 钩子 stub `electron` 后驱动真实主进程 `runAgentTurn`
+- 打包：`npm run dist:win`（自动 `kill-running.cjs` 结束 OrchDesk.exe 防 EBUSY）
