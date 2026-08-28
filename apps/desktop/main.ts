@@ -362,6 +362,8 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
 
   const sessionMsgs = (store[sessionId] as { msgs?: Array<{ role?: string; text?: string }> } | undefined)?.msgs || [];
   const apiMessages: Array<{ role: string; content: string }> = sessionMsgs.slice(-20).filter(m => m.role && m.text).map(m => ({ role: m.role as string, content: m.text as string }));
+  // 注入系统提示（工具调用格式约定）
+  apiMessages.unshift({ role: 'system', content: '你可以使用工具来完成任务。调用工具时请严格使用以下格式：\n<tool:工具名>参数（JSON格式）</tool>\n\n可用工具：\n- file_read: 读取本地文件（参数：{"path": "文件路径"}）\n- file_write: 写入文件（参数：{"path": "路径", "content": "内容"}）\n- file_list: 列出目录（参数：{"path": "目录路径"}）\n- shell_command: 执行命令（参数：{"command": "命令"}）\n- web_fetch: 抓取网页（参数：{"url": "URL"}）\n\n示例：<tool:file_list>{"path":"."}</tool>\n一次可以调用多个工具。普通回复不使用工具标签。' });
   apiMessages.push({ role: 'user', content: text });
 
   const toolSteps: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }> = [];
@@ -374,8 +376,7 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     let reply: string;
     try {
-      const useTools = iter === 0 && toolSteps.length === 0 ? TOOL_DEFS : [];
-      reply = await callModel(provider, model, apiMessages, useTools);
+      reply = await callModel(provider, model, apiMessages, TOOL_DEFS);
     } catch (err) {
       return { text: `（模型调用失败）${(err as Error).message}`, intent: 'CONFIRM' };
     }
