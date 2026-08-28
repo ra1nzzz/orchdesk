@@ -2,7 +2,7 @@
 id: orch-bug-000
 title: OrchDesk 活跃 BUG 与缺口索引
 status: canonical
-updated: 2026-08-17
+updated: 2026-08-29
 ---
 
 # 活跃 BUG 与缺口索引
@@ -26,11 +26,16 @@ updated: 2026-08-17
 | LSN-01 | OrchStar 后端完成但 UI 未接线 → 项目荒废 | 「后端先行、UI 后补」等于半成品 | Phase 端到端门禁（[40-质量](../40-质量/quality-gates.md)） |
 | LSN-02 | OrchStar 脏工作树含未提交 fix 脚本/smoke 截图 | 未提交制品删除后无法从 Git 恢复 | 清理前归档 + 备份（[workflow](../30-开发/workflow.md)） |
 
-## 待定 BUG
+## 活跃技术债 / BUG（本轮未解决，需接力修复）
 
 | ID | 描述 | 级别 | 状态 | 归属 |
 |---|---|---|---|---|
-| BUG-W01 | pnpm 11 在 Git Bash / 沙箱下 `safe-delete`（回收站清理临时目录）失败，install 中止 exit 1，`node_modules` 未生成；需 `--config.safe-delete=false`（或环境变量 `npm_config_safe_delete=false`）让 pnpm 直删替代回收站 | 高（阻塞 Windows 构建） | open | P0 / T-P0-1 |
+| BUG-013 | 重新打包后项目数据丢失：不同安装形态（NSIS vs portable vs dev）的 `userData` 路径各异，会话 JSON 不互通 | 高 | open | P1 数据层 |
+| BUG-014 | Agent Runtime (DSH) 回合管线未打通：工具调用正则已修，但模型回传格式与解析/循环间存在多轮不匹配，修了数轮仍不稳定 | 高 | open | P1 Agent Runtime |
+| BUG-015 | `selectedModels` 在无 provider 时清空导致发送失败（E2E mock 暴露了真实场景下的 guard 缺失） | 中 | open | P1 模型管理 |
+| BUG-016 | `electron-store` / lodash 被 pnpm 归入 `.ignored` 后遭 `EBUSY` 清理阻塞，`release/win-unpacked` 目录残留锁 | 中 | open | P0 构建 |
+
+| BUG-W01 | pnpm 11 在 Git Bash / 沙箱下 safe-delete 失败，install 中止 exit 1，node_modules 未生成；需 `--config.safe-delete=false` | 高（阻塞 Windows 构建） | open | P0 / T-P0-1 |
 | BUG-W02 | **宿主环境（WorkBuddy CLI）对 Electron 二进制存在环境级阻断**：`process._linkedBinding('electron')` → "No such binding was linked: electron"；`require('electron')` 解析到 npm 包 `index.js` 返回 exe 路径字符串（`electron_1.app` undefined → 主进程启动即崩）。**二次验证（2026-08-24 打包后实跑）**：直接运行 `node_modules/electron/dist/electron.exe`（unset `ELECTRON_RUN_AS_NODE`、NODE_OPTIONS 仅 `--use-system-ca`、无沙箱）仍复现 binding 缺失；叠加 WorkBuddy CLI 默认设置 `ELECTRON_RUN_AS_NODE=1`（强制 Node 模式）。**2026-08-24 早间「误用 node」结案为误判，已推翻**。任何 Electron GUI 无法在本 agent 宿主环境启动 | 高（阻断本 agent 环境 GUI 实跑；打包产物本身完整） | open | P1 / 打包实跑验证 |
 
 > BUG-W02 二次验证（2026-08-24 打包后实跑，推翻早间结案）：早间「误用 `node` 跑主进程」的结案**不成立**——以 `electron .` 启动 dev 模式、直接运行 `node_modules/electron/dist/electron.exe`（unset `ELECTRON_RUN_AS_NODE`、NODE_OPTIONS 仅 `--use-system-ca`、无沙箱）均复现 `process._linkedBinding('electron')` → "No such binding was linked"；`process.versions.electron=36.9.5` 存在但核心 binding 未链接，`require('electron')` 因此解析到 npm 包返回 exe 路径。叠加 WorkBuddy CLI 默认 `ELECTRON_RUN_AS_NODE=1`（强制 Node 模式，无 Chromium 初始化）。结论：**本 agent 宿主环境无法启动任何 Electron GUI**（环境级阻断，非产物缺陷）。electron-builder 打包产物（nsis Setup 84MB + portable 84MB + win-unpacked，asar 结构校验完整）在**正常 Windows 桌面**（无 WorkBuddy 注入）预期可运行，须用户实机双击验证；本 agent 环境内 GUI 实跑验证继续受 BUG-W02 门控，业务逻辑层验证走 node 直驱（verify-p5 23/23）。
