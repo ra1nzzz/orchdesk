@@ -485,19 +485,27 @@ function snapshotData(): { ok: boolean; dir?: string; reason?: string } {
 async function checkForUpdates(): Promise<{ snapshot: { ok: boolean; dir?: string }; update?: { available: boolean; version?: string; note?: string }; reason?: string }> {
   const snapshot = snapshotData();
   try {
-    // electron-updater 为可选依赖：未安装（尚未发布）时不阻断，仅提示。
-    // 用字符串字面量规避编译期模块解析（运行时动态加载）。
-    const mod = await import('electron-updater' as string).then((m: any) => m.autoUpdater).catch(() => null);
-    if (!mod) {
-      return { snapshot, update: { available: false, note: '尚未发布到 GitHub Releases，更新检查待启用（已先完成数据快照）' } };
+    const { autoUpdater } = await import('electron-updater');
+    // 仅在生产包（asar）中启用自动更新，开发模式跳过
+    if (!app.isPackaged) {
+      return { snapshot, update: { available: false, note: '开发模式，跳过自动更新检查' } };
     }
-    const res = await mod.checkForUpdates();
+    autoUpdater.setFeedURL({
+      provider: 'github',
+      owner: 'ra1nzzz',
+      repo: 'orchdesk',
+    });
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    const res = await autoUpdater.checkForUpdates();
     return {
       snapshot,
       update: {
-        available: !!res?.updateInfo,
+        available: !!res?.updateInfo?.version,
         version: res?.updateInfo?.version,
-        note: res?.updateInfo ? `发现新版本 ${res.updateInfo.version}` : '已是最新',
+        note: res?.updateInfo?.version
+          ? `发现新版本 ${res.updateInfo.version}，正在后台下载…`
+          : '已是最新',
       },
     };
   } catch (err) {

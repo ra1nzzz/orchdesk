@@ -1,0 +1,56 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.2.0] - 2026-08-28
+
+### Added
+- 智能推荐按钮：`getSmartRecommendations()` 基于近 7 天消息主题信号 + 技能使用频率 + 空闲检测动态生成快捷按钮
+- 动态时段问候语：`getGreeting()` 扩展为早上好/上午好/中午好/下午好/傍晚好/晚上好/夜深了 +「一起来做点什么呢？」
+- Markdown 渲染：集成 marked.js (MIT, UMD) 替换手写正则渲染器；Agent 消息自动 MD 渲染
+- 模型管理「默认模型」下拉：设置页可选择所有已配置提供商的模型作为默认
+- `vendor/marked.min.js` UMD 构建（renderer 直接引用无需 bundler）
+
+### Changed
+- **启动并行化**：`init()` 14 个串行 IPC → `Promise.allSettled` 并行；首屏先 `render()` 再后台加载数据
+- **欢迎页布局**：`.home-screen` 垂直居中；`.composer` 去底部背景和 border-top；`.home-greeting` 字号缩小
+- **md-body CSS**：列表紧凑化（`ul margin:2px 0` / `li margin:0 0 2px`）
+- **MODELS 架构**：删除/添加提供商时不再操作 `MODELS` 数组，改为 `bridge.getModelConfig()` 刷新 `dynamicModels`
+- `publish` 脚本移除 `--publish always`（CI 场景单独控制）
+
+### Fixed
+- composer 更多按钮下拉浮窗被 `.box` 裁剪（overflow→visible, z-index 50→200）
+- 项目选择器 `.proj-dropdown` 点击无响应（z-index + pointer-events + 阻止冒泡）
+- 模型确认选择未持久化到 session（现写入 `session.models` + localStorage）
+- 白屏闪烁：`BrowserWindow` 加 `backgroundColor: '#1E1E1E'`
+
+### Security
+- ctx-empty 占位符 `💬` → `ic('clipboard')` SVG（emoji → SVG 全覆盖）
+
+## [0.1.0] - 2026-08-24
+
+### Added
+- Electron 桌面壳基础框架（main.ts + preload.ts + renderer/）
+- 4 列布局（rail / side / main / context）
+- 会话 CRUD（新建/重命名/分支/归档）
+- 模型多选 + 思维深度滑竿 + 授权模式芯片
+- 5 内置插件 UI（意图识别/TRACE/脑手解耦/多Agent编排/OrchClaw Hub）
+- 观雅集技能市场客户端（复用 guanji SKILL API 约定）
+- OrchClaw Hub 配对客户端（safeStorage 加密凭据）
+- 补偿层 + 自进化插件（withhold/compensate/temp plugin）
+- electron-builder 打包（nsis + portable）
+- GitHub Releases 自动发布
+- 更新前数据快照（snapshotData）
+- 模型管理页面（添加/编辑/删除提供商 + 连通性测试）
+- P1-P6 全部代码落地 + tsc 编译通过
+
+### Security
+- XSS 防护（`esc()` 统一转义）
+- API Key 经 safeStorage 加密
+- guanji-publish 路径白名单
+- approval fail-closed 门控

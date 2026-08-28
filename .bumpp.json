@@ -1,0 +1,9 @@
+module.exports = {
+  preset: 'conventionalcommits',
+  releaseCommitMessageFormat: 'chore(release): {{currentTag}} [skip ci]',
+  tagPrefix: 'v',
+  skip: {
+    tag: false,
+    commit: true,
+  },
+};

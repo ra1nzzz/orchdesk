@@ -150,14 +150,29 @@ const orchdesk = {
   hubResult: (taskId: string): Promise<{ status: string; result?: string }> =>
     ipcRenderer.invoke('orchdesk:hub-result', taskId),
 
-  // ---- T-P6-3 数据快照 + 更新检查 ----
-  /** 更新前自动快照数据目录（PLAN 红线：不要更新后补）。 */
+  // ---- T-P5/T-P6 数据快照 + 更新检查 ----
   snapshotData: (): Promise<{ ok: boolean; dir?: string; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:snapshot-data'),
-
-  /** 检查更新（先完成数据快照，再接入 electron-updater）。 */
   checkUpdates: (): Promise<{ snapshot: { ok: boolean; dir?: string }; update?: { available: boolean; version?: string; note?: string }; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:check-updates'),
+  /** 用系统默认文件管理器打开项目数据目录。 */
+  openProjectDir: (): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:open-project-dir'),
+
+  /** 打开文件夹选择对话框 */
+  pickFolder: (): Promise<{ ok: boolean; path?: string; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:pick-folder'),
+
+  // ---- FR-5 模型管理（配置持久化 + 连通性测试） ----
+  /** 取模型配置（不含明文 API Key）。 */
+  getModelConfig: (): Promise<{ providers: Array<{ id: string; name: string; type: string; baseUrl: string; models: string[] }>; defaultProvider?: string }> =>
+    ipcRenderer.invoke('orchdesk:models-get'),
+  /** 保存模型配置（API Key 经 safeStorage 加密）。 */
+  saveModelConfig: (config: Record<string, unknown>): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:models-save', config),
+  /** 测试模型连通性。 */
+  testModel: (providerId: string, model: string): Promise<{ ok: boolean; latencyMs?: number; error?: string }> =>
+    ipcRenderer.invoke('orchdesk:models-test', providerId, model),
 };
 
 contextBridge.exposeInMainWorld('orchdesk', orchdesk);

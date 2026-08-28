@@ -1,8 +1,9 @@
 {
   "name": "@orchdesk/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "OrchDesk 桌面壳（Electron 主进程 + 渲染层桥接）",
+  "author": "OrchDesk Team",
   "repository": {
     "type": "git",
     "url": "https://github.com/ra1nzzz/orchdesk.git"
@@ -12,12 +13,18 @@
     "start": "pnpm run build:main && electron .",
     "build:main": "tsc -p tsconfig.json",
     "build": "pnpm run build:main && electron-builder",
-    "dist": "pnpm run build:main && electron-builder --publish always"
+    "dist": "pnpm run build:main && electron-builder --publish never",
+    "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s",
+    "version:bump": "bumpp",
+    "version:show": "node -e \"const p=require('./package.json');const v=p.version;const{execSync}=require('child_process');const tags=execSync('git tag --sort=-version:refname').toString().trim().split('\\n').filter(Boolean);console.log('version:',v,'| latest tag:',tags[0]||'none','| total tags:',tags.length)\"",
+    "release": "pnpm run changelog && pnpm run version:bump && pnpm run dist"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "bumpp": "^11.1.0",
+    "conventional-changelog-cli": "^5.0.0",
     "electron": "^36.0.0",
     "electron-builder": "^26.0.0",
+    "electron-updater": "^6.8.9",
     "typescript": "^5.6.0"
   },
   "build": {
@@ -31,21 +38,18 @@
     "files": [
       "dist/**/*",
       "renderer/**/*",
+      "vendor/**/*",
       "package.json"
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
         },
         {
           "target": "portable",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
         }
       ]
     },
