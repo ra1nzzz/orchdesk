@@ -70,6 +70,7 @@ interface ModelConfig {
   providers: ModelProvider[];
   defaultProvider?: string;
   defaultModel?: string;
+  maxToolIterations?: number;
 }
 
 const MODELS_FILE = () => path.join(app.getPath('userData'), 'models.json');
@@ -87,11 +88,12 @@ function loadModelConfig(): ModelConfig {
       providers,
       defaultProvider: (raw.defaultProvider as string | undefined) || 'ollama',
       defaultModel: (raw.defaultModel as string | undefined) || 'qwen3:14b',
+      maxToolIterations: (raw.maxToolIterations as number | undefined) || 200,
     };
     const hasPlainKey = (raw.providers as Array<Record<string, unknown>> | undefined)?.some(p => 'apiKey' in p);
     if (hasPlainKey) saveModelConfig(cfg);
     return cfg;
-  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' }; }
+  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: 200 }; }
 }
 
 function saveModelConfig(cfg: ModelConfig): void {
@@ -366,7 +368,7 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
   const toolCallIdSet = new Set<string>();
   let finalReply = '';
   let stepCount = 0;
-  const MAX_ITERATIONS = 8;
+  const MAX_ITERATIONS = modelCfg.maxToolIterations || 200;
 
   // 工具调用循环
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
@@ -502,7 +504,7 @@ ipcMain.handle('orchdesk:run-agent-turn', async (_e, sessionId: string, text: st
 // ---- FR-5 模型管理桥接 ----
 ipcMain.handle('orchdesk:models-get', async () => {
   const cfg = loadModelConfig();
-  return { providers: cfg.providers.map(p => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, models: p.models })), defaultProvider: cfg.defaultProvider, defaultModel: cfg.defaultModel };
+  return { providers: cfg.providers.map(p => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, models: p.models })), defaultProvider: cfg.defaultProvider, defaultModel: cfg.defaultModel, maxToolIterations: cfg.maxToolIterations };
 });
 
 ipcMain.handle('orchdesk:models-save', async (_e, config: unknown) => {
@@ -517,6 +519,7 @@ ipcMain.handle('orchdesk:models-save', async (_e, config: unknown) => {
     });
     if (incoming.defaultProvider) current.defaultProvider = incoming.defaultProvider;
     if (incoming.defaultModel) current.defaultModel = incoming.defaultModel;
+    if (incoming.maxToolIterations) current.maxToolIterations = Math.max(1, Math.min(500, incoming.maxToolIterations));
     saveModelConfig(current);
     return { ok: true };
   } catch (err) {

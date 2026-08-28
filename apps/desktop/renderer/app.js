@@ -199,7 +199,7 @@
     pExpanded: new Set(),
     plugSideExpanded: new Set(['builtin', 'market', 'skills', 'experts', 'connectors']),
     selectedModels: [], thinkLevel: 'standard', modelProviders: [], mpEditing: null, defaultProvider: undefined,
-    projects: [], sessions: {}
+    maxToolIterations: 200, projects: [], sessions: {}
   };
 
   const $ = (s) => document.querySelector(s);
@@ -814,6 +814,11 @@
                 ).join('')}
               </select>
             </div>
+          </div>
+          <div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px;display:flex;align-items:center;gap:8px">
+            <span class="faint" style="font-size:11.5px;white-space:nowrap;flex:none">Agent 迭代</span>
+            <input type="range" id="max-iter-pick" min="1" max="500" step="1" value="${state.maxToolIterations || 200}" style="flex:1">
+            <span id="max-iter-val" class="mono" style="font-size:11px;color:var(--fg-dim);min-width:32px;text-align:right">${state.maxToolIterations || 200}</span>
           </div>
           <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
             <b style="font-size:12.5px;margin-bottom:10px;display:block">${state.mpEditing ? '编辑提供商' : '添加提供商'}</b>
@@ -2004,8 +2009,13 @@
       state.defaultModel = e.target.value;
       autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
       render();
-      // 异步持久化
       bridge.saveModelConfig({ providers: state.modelProviders, defaultProvider: state.defaultProvider, defaultModel: state.defaultModel }).catch(() => {});
+    }
+    if (e.target.id === 'max-iter-pick') {
+      state.maxToolIterations = Math.max(1, Math.min(500, parseInt(e.target.value) || 200));
+      const valEl = $('#max-iter-val');
+      if (valEl) valEl.textContent = state.maxToolIterations;
+      bridge.saveModelConfig({ providers: state.modelProviders, defaultProvider: state.defaultProvider, defaultModel: state.defaultModel, maxToolIterations: state.maxToolIterations }).catch(() => {});
     }
   });
 
@@ -2049,6 +2059,7 @@
           dynamicModels = mc.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' \u00b7 ' + p.type, k: '(本地)', state: '\u5df2\u914d' })));
           if (mc.defaultProvider) state.defaultProvider = mc.defaultProvider;
           state.defaultModel = mc.defaultModel;
+          state.maxToolIterations = mc.maxToolIterations || 200;
           autoSelectModels(mc.providers, mc.defaultProvider, mc.defaultModel);
         } else { dynamicModels = []; state.selectedModels = []; }
       }).catch(() => { dynamicModels = []; state.selectedModels = []; }),
