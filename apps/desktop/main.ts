@@ -381,8 +381,8 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
       return { text: `（模型调用失败）${(err as Error).message}`, intent: 'CONFIRM' };
     }
 
-    // 解析工具调用（简易：匹配 <tool:name>args</tool> 格式）
-    const toolCallRegex = /<tool:(\w+)>([\s\S]*?)<\/?>/g;
+    // 解析工具调用（匹配 <tool:name>args</tool> 格式）
+    const toolCallRegex = /<tool:(\w+)>([\s\S]*?)<\/tool>/g;
     let match;
     const toolCalls: ToolCall[] = [];
     const remainingParts: string[] = [];
