@@ -209,5 +209,5 @@ git push origin main --follow-tags  # 推送 + 触发 CI
 
 ---
 
-*最后更新：2026-08-28 by ZCode assistant*
-*上游文档：[current-state.md](../00-项目/current-state.md) | [VERSION-GOVERNANCE.md](./VERSION-GOVERNANCE.md) | [CHANGELOG.md](../apps/desktop/CHANGELOG.md)*
+*最后更新：2026-08-29 by接力 assistant（v0.3.1 发布登记）*
+*上游文档：[current-state.md](./current-state.md) | [VERSION-GOVERNANCE.md](./VERSION-GOVERNANCE.md) | 变更日志 `apps/desktop/CHANGELOG.md`（仓库根，docs 外）*
