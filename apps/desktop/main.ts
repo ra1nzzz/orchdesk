@@ -1,5 +1,5 @@
 /// <reference types="electron" />
-import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage } from 'electron';
+import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, safeStorage, shell } from 'electron';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { guanjiClient } from './guanji';
@@ -51,28 +51,179 @@ function saveStore(): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 模型回合 seam（P1-5 真实闭环的接入点）
-// 当前为本地占位回复；接真实模型时，在此调用 dsh 的 ctx.agents：
-//   const ctx = await getDshCtx();                 // in-process runProfile('orchdesk')
-//   const agent = ctx.agents.create(sessionId, { provider, model, cwd });
-//   const reply = await agent.followup(createUserMessage({ content: text }));
-//   // 订阅 ctx.on('session/event') 拿 assistant/message 与工具事件
-// 真实调用需要 API Key（或本地 Ollama baseURL）；无 key 时 dsh 的 followup 会失败，
-// 故在此用占位返回，保证「桌面内会话闭环」骨架在任意环境都可演示与验证。
-// ---------------------------------------------------------------------------
-async function runAgentTurn(_sessionId: string, text: string, _opts: unknown): Promise<{ text: string; intent: string }> {
-  if (process.env.ORCHDESK_MODEL_PROVIDER) {
-    // TODO(P1-5): 真实模型分支——接 dsh ctx.agents.followup 或 Ollama。
-    // 此处保留 seam，避免在缺 key 环境下阻断 UI。
-    console.warn('[orchdesk] ORCHDESK_MODEL_PROVIDER 已设置，但真实模型分支尚未实现（P1 占位）。');
+// ===========================================================================
+// FR-5 模型管理：配置持久化 + 真实模型调用
+// ===========================================================================
+
+interface ModelProvider {
+  id: string;
+  name: string;
+  type: 'ollama' | 'openai-compatible';
+  apiMode?: 'chat' | 'responses' | 'completions';
+  baseUrl: string;
+  apiKeyEnc?: string;      // safeStorage 加密后 base64
+  apiKey?: string;          // 明文（传输用，保存后丢弃）
+  models: string[];
+}
+
+interface ModelConfig {
+  providers: ModelProvider[];
+  defaultProvider?: string;
+  defaultModel?: string;
+}
+
+const MODELS_FILE = () => path.join(app.getPath('userData'), 'models.json');
+
+function loadModelConfig(): ModelConfig {
+  try {
+    const file = MODELS_FILE();
+    if (!fs.existsSync(file)) return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' };
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
+    const providers = (raw.providers as Array<Record<string, unknown>> | undefined)?.map(p => {
+      const { apiKey: _k, ...rest } = p;
+      return rest as unknown as ModelProvider;
+    }) || [];
+    const cfg: ModelConfig = {
+      providers,
+      defaultProvider: (raw.defaultProvider as string | undefined) || 'ollama',
+      defaultModel: (raw.defaultModel as string | undefined) || 'qwen3:14b',
+    };
+    const hasPlainKey = (raw.providers as Array<Record<string, unknown>> | undefined)?.some(p => 'apiKey' in p);
+    if (hasPlainKey) saveModelConfig(cfg);
+    return cfg;
+  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' }; }
+}
+
+function saveModelConfig(cfg: ModelConfig): void {
+  fs.writeFileSync(MODELS_FILE(), JSON.stringify(cfg, null, 2), 'utf-8');
+}
+
+/** 解密 API Key（safeStorage）；无加密后端返回空串。 */
+function decryptKey(encB64?: string): string {
+  if (!encB64) return '';
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return '';
+    return safeStorage.decryptString(Buffer.from(encB64, 'base64')) as unknown as string;
+  } catch { return ''; }
+}
+
+/** 加密 API Key（safeStorage）。 */
+function encryptKey(key: string): string {
+  if (!safeStorage.isEncryptionAvailable()) return key;
+  return safeStorage.encryptString(key).toString('base64');
+}
+
+// ---- 真实模型调用（OpenAI 兼容 + Ollama）----
+
+async function callModel(provider: ModelProvider, model: string, messages: Array<{ role: string; content: string }>): Promise<string> {
+  if (provider.type === 'ollama') {
+    return callOllama(provider, model, messages);
   }
-  const reply =
-    `（本地运行时占位回复）已收到你的消息：「${text}」\n\n` +
-    `OrchDesk 的模型回合 seam 已就绪。配置 API Key（或本地 Ollama baseURL）并在 ` +
-    `runAgentTurn 中接入 dsh 的 ctx.agents.followup 后，这里会出现真实模型回复，` +
-    `且每条消息都会写入 SessionEvent 日志（append-only，可重启回放）。`;
-  return { text: reply, intent: 'ACT' };
+  return callOpenAICompatible(provider, model, messages);
+}
+
+async function callOllama(provider: ModelProvider, model: string, messages: Array<{ role: string; content: string }>): Promise<string> {
+  const url = provider.baseUrl.replace(/\/$/, '') + '/api/chat';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages, stream: false }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!res.ok) throw new Error(`Ollama 返回 HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json() as { message?: { content?: string }; error?: string };
+  if (data.error) throw new Error(data.error);
+  return data.message?.content || '';
+}
+
+async function callOpenAICompatible(provider: ModelProvider, model: string, messages: Array<{ role: string; content: string }>): Promise<string> {
+  const apiKey = decryptKey(provider.apiKeyEnc);
+  if (!apiKey) throw new Error(`提供商「${provider.name}」未配置 API Key，请先在设置页配置`);
+  const mode = provider.apiMode || 'chat';
+  const base = provider.baseUrl.replace(/\/+$/, '');
+  let url: string, body: Record<string, unknown>;
+
+  // 若 baseUrl 已包含完整 API 路径（如 …/v1/chat/completions），直接使用
+  if (base.includes('/chat/completions') || base.includes('/responses') || base.includes('/completions')) {
+    url = base;
+    if (mode === 'responses') {
+      body = { model, input: messages.map(m => ({ role: m.role, content: m.content })).filter(m => m.role === 'user').map(m => m.content).join('\n') || messages.at(-1)?.content || '' };
+    } else if (mode === 'completions') {
+      body = { model, prompt: messages.map(m => m.content).join('\n'), max_tokens: 1024 };
+    } else {
+      body = { model, messages, stream: false };
+    }
+  } else {
+    // 归一化 baseUrl：去掉尾部 / 和 /v1 路径
+    const clean = base.replace(/\/v1\/?$/, '');
+    if (mode === 'responses') {
+      url = clean + '/v1/responses';
+      body = { model, input: messages.map(m => ({ role: m.role, content: m.content })).filter(m => m.role === 'user').map(m => m.content).join('\n') || messages.at(-1)?.content || '' };
+    } else if (mode === 'completions') {
+      url = clean + '/v1/completions';
+      body = { model, prompt: messages.map(m => m.content).join('\n'), max_tokens: 1024 };
+    } else {
+      url = clean + '/v1/chat/completions';
+      body = { model, messages, stream: false };
+    }
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`模型 API 返回 HTTP ${res.status}: ${txt.slice(0, 200)}`);
+  }
+  const data = await res.json() as Record<string, unknown>;
+  if ((data as { error?: { message?: string } }).error?.message) throw new Error((data as { error?: { message?: string } }).error!.message!);
+  if (mode === 'responses') return ((data as { output_text?: string }).output_text || '');
+  if (mode === 'completions') return ((data as { choices?: Array<{ text?: string }> }).choices?.[0]?.text || '');
+  return ((data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content || '');
+}
+
+// ---------------------------------------------------------------------------
+// 模型回合（FR-5 真实闭环）
+// 当前实现：OpenAI 兼容 API + Ollama 本地模型；配置存储于 userData/models.json，
+// API Key 经 safeStorage 加密。
+// ---------------------------------------------------------------------------
+async function runAgentTurn(sessionId: string, text: string, opts: { models?: string[]; thinkLevel?: string }): Promise<{ text: string; intent: string }> {
+  const modelCfg = loadModelConfig();
+  if (!modelCfg.providers.length) return { text: '（未配置模型）请先在设置页「模型管理」中添加模型提供商。', intent: 'CONFIRM' };
+
+  // 取第一个已配置提供商；若 opts 指定了模型则优先用
+  const provider = modelCfg.providers[0]!;
+  const availableModels = provider.models || [];
+  const requested = (opts?.models || [])[0];
+  // 若请求的模型不在提供商列表中，回退到提供商的第一个模型
+  const modelPick = availableModels.includes(requested || '') ? requested : (availableModels[0] || modelCfg.defaultModel);
+  const model = modelPick || 'qwen3:14b';
+
+  // 构建消息上下文（从会话历史取最近几条）
+  const sessionMsgs = (store[sessionId] as { msgs?: Array<{ role?: string; text?: string }> } | undefined)?.msgs || [];
+  const recent = sessionMsgs.slice(-10).filter(m => m.role && m.text).map(m => ({ role: m.role as string, content: m.text as string }));
+  recent.push({ role: 'user', content: text });
+
+  try {
+    const reply = await callModel(provider, model, recent);
+
+    // 持久化用户消息 + 助手回复到会话
+    const s = store[sessionId] as Record<string, unknown> | undefined;
+    if (s) {
+      const msgs = (s.msgs as Array<Record<string, unknown>>) || [];
+      msgs.push({ role: 'user', text, ts: new Date().toISOString() });
+      msgs.push({ role: 'assistant', text: reply, model, ts: new Date().toISOString() });
+      s.msgs = msgs;
+      s.updated = new Date().toISOString();
+      saveStore();
+    }
+    return { text: reply, intent: 'ACT' };
+  } catch (err) {
+    const msg = (err as Error).message;
+    return { text: `（模型调用失败）${msg}\n\n请检查模型配置和网络连接后重试。`, intent: 'CONFIRM' };
+  }
 }
 
 function createWindow(): void {
@@ -81,6 +232,7 @@ function createWindow(): void {
     height: 900,
     center: true,
     show: false,
+    backgroundColor: '#1E1E1E',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       // 红线（ADR-0002）：渲染进程保持沙箱，绝不开 nodeIntegration。
@@ -109,16 +261,56 @@ function createTray(): void {
 // 桥接：渲染进程 → 主进程（持久化 + 模型回合）
 // ---------------------------------------------------------------------------
 ipcMain.handle('orchdesk:load-sessions', async () => {
-  return Object.values(store);
+  // 只返回有效会话（有真实消息的）；忽略过期数据
+  const all = Object.values(store);
+  return all.filter((s: any) => s && s.id && Array.isArray(s.msgs) && s.msgs.length > 0);
 });
 ipcMain.handle('orchdesk:persist-sessions', async (_e, sessions: unknown[]) => {
   store = {};
-  (sessions || []).forEach((s: any) => { if (s && s.id) store[s.id] = s; });
+  (sessions || []).forEach((s: any) => { if (s && s.id && Array.isArray(s.msgs)) store[s.id] = s; });
   saveStore();
   return { ok: true };
 });
 ipcMain.handle('orchdesk:run-agent-turn', async (_e, sessionId: string, text: string, opts: unknown) => {
-  return runAgentTurn(sessionId, text, opts);
+  return runAgentTurn(sessionId, text, opts as { models?: string[]; thinkLevel?: string });
+});
+
+// ---- FR-5 模型管理桥接 ----
+ipcMain.handle('orchdesk:models-get', async () => {
+  const cfg = loadModelConfig();
+  return { providers: cfg.providers.map(p => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, models: p.models })), defaultProvider: cfg.defaultProvider, defaultModel: cfg.defaultModel };
+});
+
+ipcMain.handle('orchdesk:models-save', async (_e, config: unknown) => {
+  try {
+    const current = loadModelConfig();
+    const incoming = config as ModelConfig;
+    current.providers = incoming.providers.map(p => {
+      const existing = current.providers.find(e => e.id === p.id);
+      const apiKeyEnc = (p as unknown as Record<string, unknown>).apiKey ? encryptKey((p as unknown as Record<string, unknown>).apiKey as string) : (existing?.apiKeyEnc || '');
+      const { apiKey: _k, ...rest } = p as unknown as Record<string, unknown>;
+      return { ...rest, apiKeyEnc } as unknown as ModelProvider;
+    });
+    if (incoming.defaultProvider) current.defaultProvider = incoming.defaultProvider;
+    if (incoming.defaultModel) current.defaultModel = incoming.defaultModel;
+    saveModelConfig(current);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
+
+ipcMain.handle('orchdesk:models-test', async (_e, providerId: string, model: string) => {
+  const cfg = loadModelConfig();
+  const provider = cfg.providers.find(p => p.id === providerId);
+  if (!provider) return { ok: false, error: '提供商不存在' };
+  const t0 = Date.now();
+  try {
+    await callModel(provider, model, [{ role: 'user', content: 'ping' }]);
+    return { ok: true, latencyMs: Date.now() - t0 };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message, latencyMs: Date.now() - t0 };
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -206,7 +398,7 @@ function dshBridgeStub(channel: string): void {
 }
 ipcMain.handle('orchdesk:memory-stats', () => {
   dshBridgeStub('memory');
-  return { usageRatio: 0.41, dumps: 2, recallHits: 1, domainCounts: { global: 0, project: 1, director: 0, worker: 0 } };
+  return null;
 });
 ipcMain.handle('orchdesk:prompt-list', () => {
   dshBridgeStub('prompt');
@@ -214,23 +406,23 @@ ipcMain.handle('orchdesk:prompt-list', () => {
 });
 ipcMain.handle('orchdesk:prompt-merge', () => {
   dshBridgeStub('prompt');
-  return { ok: true, conflicts: [] };
+  return { sections: [], conflicts: [] };
 });
 ipcMain.handle('orchdesk:prompt-save', () => {
   dshBridgeStub('prompt');
-  return { ok: true };
+  return { ok: false };
 });
 ipcMain.handle('orchdesk:prompt-delete', () => {
   dshBridgeStub('prompt');
-  return { ok: true };
+  return { ok: false };
 });
 ipcMain.handle('orchdesk:comp-withhold', () => {
   dshBridgeStub('compensation');
-  return { needsConfirm: false, category: 'other', reason: 'dsh 桥未接入（占位）', warning: '' };
+  return { needsConfirm: false, category: 'other', reason: '', warning: '' };
 });
 ipcMain.handle('orchdesk:comp-compensate', () => {
   dshBridgeStub('compensation');
-  return { id: `stub-${Date.now().toString(36)}`, category: 'other', action: 'dsh 桥未接入（占位）', ts: Date.now() };
+  return { id: 'cmp-' + Date.now().toString(36), ts: Date.now(), text: '', note: '', action: '' };
 });
 ipcMain.handle('orchdesk:comp-audit', () => {
   dshBridgeStub('compensation');
@@ -238,7 +430,7 @@ ipcMain.handle('orchdesk:comp-audit', () => {
 });
 ipcMain.handle('orchdesk:evol-create', () => {
   dshBridgeStub('evolution');
-  return { ok: false, reason: 'dsh 桥未接入（P1-5 seam）' };
+  return { ok: false, reason: '未接入' };
 });
 ipcMain.handle('orchdesk:evol-list', () => {
   dshBridgeStub('evolution');
@@ -246,7 +438,7 @@ ipcMain.handle('orchdesk:evol-list', () => {
 });
 ipcMain.handle('orchdesk:evol-dispose', () => {
   dshBridgeStub('evolution');
-  return { ok: false, reason: 'dsh 桥未接入（P1-5 seam）' };
+  return { ok: false, reason: '未接入' };
 });
 
 // ---------------------------------------------------------------------------
@@ -315,6 +507,31 @@ async function checkForUpdates(): Promise<{ snapshot: { ok: boolean; dir?: strin
 
 ipcMain.handle('orchdesk:snapshot-data', async () => snapshotData());
 ipcMain.handle('orchdesk:check-updates', async () => checkForUpdates());
+
+/** 用系统默认文件管理器打开数据目录（项目目录 = userData）。 */
+ipcMain.handle('orchdesk:open-project-dir', async () => {
+  try {
+    await shell.openPath(app.getPath('userData'));
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
+
+/** 打开文件夹选择对话框 */
+ipcMain.handle('orchdesk:pick-folder', async () => {
+  try {
+    const { dialog } = await import('electron');
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      properties: ['openDirectory'],
+      title: '选择项目本地文件夹'
+    });
+    if (!result.canceled && result.filePaths.length) return { ok: true, path: result.filePaths[0] };
+    return { ok: false, reason: 'cancelled' };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
 
 app.whenReady().then(() => {
   loadStore();

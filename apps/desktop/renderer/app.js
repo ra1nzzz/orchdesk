@@ -24,6 +24,7 @@
     edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
     fork: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M6 8v8M18 16V8a4 4 0 0 0-4-4H8"/>',
     folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    folderOpen: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7l3 3h12l-1 8H6l-3-3z"/>',
     archive: '<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4"/>',
     at: '<circle cx="12" cy="12" r="4"/><path d="M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1"/>',
     shield: '<path d="M12 2 4 5v6c0 5 3.5 9.5 8 11 4.5-1.5 8-6 8-11V5z"/>',
@@ -31,51 +32,39 @@
     bot: '<rect x="4" y="7" width="16" height="12" rx="3"/><circle cx="9" cy="13" r="1.2"/><circle cx="15" cy="13" r="1.2"/><path d="M12 7V3M9 3h6"/>',
     trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1.2 13a2 2 0 0 1-2 1.8H8.2a2 2 0 0 1-2-1.8L5 6"/>',
     warn: '<path d="M10.3 3.86 1.82 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/>',
-    search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>'
+    search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+    zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    fileText: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+    wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+    presentation: '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+    clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    clipboard: '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>',
+    check: '<polyline points="20 6 9 17 4 12"/>',
+    circle: '<circle cx="12" cy="12" r="9"/>',
+    refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+    code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
   };
   const ic = (n, s = 20) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
-
-  /* ---------- 种子数据（首次运行 / 浏览器预览用） ---------- */
-  const SEED_PROJECTS = [
-    { id: 'p1', n: 'OrchDesk', d: '本地 Agent 工作台', open: 1, archived: 0, sessions: ['s1', 's2'] },
-    { id: 'p2', n: '写作助手', d: 'AI 资讯日报 / 知识库', open: 1, archived: 0, sessions: ['s3'] },
-    { id: 'p3', n: '已归档', d: '', open: 0, archived: 1, sessions: ['s4'] }
-  ];
   const EXPERTS = ['Orchestrator（主会话）', '开发总监', '设计总监', '测试总监', '项目管理总监', '文档总监', '艺术总监', '风险控制总监'];
   const TEAMS = [{ n: '预置 · 全栈开发团', m: '开发总监 + 测试总监 + 文档总监' }, { n: '预置 · 写作团', m: '文档总监 + 艺术总监' }, { n: '自定义 · 我的专家团', m: '自编排（拖拽专家）' }];
-  // 三模式（与 @orchdesk/dsh-authz 插件对齐；映射到 dsh sandbox/mode + approval/policy）。
   const AUTH_MODES = [
-    { id: 'default', label: '默认安全', blurb: '工作区可写；L3/L4 操作弹窗确认。平衡日常使用与安全。' },
+    { id: 'default', label: '默认安全', blurb: '工作区可写；L3/L4 操作弹窗确认。' },
     { id: 'trusted', label: '信任模式', blurb: '同默认沙箱，放宽命令/网络白名单；高危操作仍弹窗。' },
-    { id: 'paranoid', label: '偏执模式', blurb: '只读沙箱 + 任何 ask 自动拒绝。最严；不可逆操作一律不开门。' },
+    { id: 'paranoid', label: '偏执模式', blurb: '只读沙箱 + 任何 ask 自动拒绝。' },
   ];
-  // 提示词分类标签（与 @orchdesk/dsh-prompt 插件 CATEGORY_LABELS 对齐）。
   const PROMPT_CAT_LABELS = { role: '角色行为', safety: '安全边界', format: '输出格式', 'skill-link': '技能联动' };
   const PROMPT_CATS = Object.keys(PROMPT_CAT_LABELS);
-  const SEED_SESSIONS = {
-    s1: { id: 's1', pid: 'p1', title: '主会话', expert: 'Orchestrator（主会话）', model: 'Claude Opus 4.7', updated: '刚刚', ts: '22:01', msgs: [
-      { r: 'user', t: '22:01', x: '帮我优化这段登录逻辑，并跑一遍测试。' },
-      { r: 'agent', t: '22:01', intent: 'ACT', x: '好的。我让「代码审查」SubAgent 先分析现有实现，同时本地模型做了意图初筛，判定为普通开发请求，直接放行。',
-        tools: [{ n: '脑-手：派发 SubAgent · 代码审查', ph: 'running' }, { n: 'git.status', ph: 'done' }], steps: 2, sub: { name: 'W-107 代码审查', state: 'running' }, feedback: 1 },
-      { r: 'user', t: '22:03', x: '顺便把结论整理成一份说明。' },
-      { r: 'agent', t: '22:04', intent: 'ACT', x: 'SubAgent 已返回，结论已回收并沉淀到项目记忆。说明整理好了，见下方。',
-        tools: [{ n: '脑-手：回收 + 沉淀', ph: 'done' }, { n: 'orchclaw-tasks.finish', ph: 'done' }], steps: 2, sub: { name: 'W-107 代码审查', state: 'disposed' }, feedback: 1 }] },
-    s2: { id: 's2', pid: 'p1', title: '代码审查', expert: '开发总监', model: 'Claude Sonnet 4.6', updated: '昨天', ts: '昨天', msgs: [{ r: 'user', t: '昨天', x: '审查这次重构的边界条件。' }, { r: 'agent', t: '昨天', intent: 'ACT', x: '已审查完成，发现 2 处边界遗漏，均已标注。', steps: 4, feedback: 1 }] },
-    s3: { id: 's3', pid: 'p2', title: '写作助手', expert: '文档总监', model: 'GPT-5', updated: '周一', ts: '周一', msgs: [{ r: 'agent', t: '周一', x: '日报模板已就绪，随时可以开始。', steps: 1, feedback: 1 }] },
-    s4: { id: 's4', pid: 'p3', title: '（旧）API 探索', expert: '开发总监', model: 'DeepSeek-V4', updated: '上周', ts: '上周', archived: 1, msgs: [{ r: 'user', t: '上周', x: '尝试用 deepseek-harness 跑个 demo。' }] }
-  };
   const PLUGINS = [
-    { id: 'intent', n: '意图识别', on: 1, model: 'qwen3:14b（本地）', d: 'prompt 到达模型前必经 agent/pre-step；本地模型做 F1-F4 初筛，高风险才转人工确认。', repo: '', caps: ['prompt.read', 'intent.classify', 'flow.gate'], cfg: ['风险阈值：0.70', '默认回退：BLOCK', '初筛模型：qwen3:14b（本地）'] },
-    { id: 'trace', n: 'TRACE', on: 1, d: 'Agent Loop 前 / Loop 结束，记录用户对语用意图的反馈；脱敏后遥测上传至公开 GitHub 仓库。', repo: 'github.com/ra1nzzz/orchdesk-telemetry（脱敏）', caps: ['event.read', 'pii.mask', 'github.write'], cfg: ['脱敏：开', '反馈时机：Loop 结束后', '遥测仓库：公开 GitHub'] },
-    { id: 'brain', n: '脑手解耦', on: 1, d: '主会话负责理解、回收、沉淀；SubAgent 执行、反馈、即用即走。', repo: '', caps: ['agent.spawn', 'agent.dispose', 'memory.commit'], cfg: ['每任务 SubAgent 并发：1-3', 'SubAgent 上下文隔离：开'] },
-    { id: 'multi', n: '多Agent编排', on: 1, d: '类 WorkBuddy 的专家与专家团；可用预置，也可自编排。', repo: '', caps: ['expert.load', 'team.compose', 'role.bind'], cfg: ['预置专家团：2 个', '自编排：开'] },
-    { id: 'hub', n: 'OrchClaw Hub', on: 0, deferred: 0, d: '配对远程 Agent 后，主会话可向其下发任务并回收结果（联调就绪，待配对）。', repo: '', caps: ['pair.token', 'agent.remote', 'ws.channel'], cfg: ['配对：安全存储加密', '远程 Agent 通道：主会话'] }
+    { id: 'intent', n: '意图识别', on: 1, d: 'prompt 到达模型前必经 agent/pre-step；本地模型做 F1-F4 初筛，高风险才转人工确认。', repo: '', caps: ['prompt.read', 'intent.classify', 'flow.gate'], cfg: ['风险阈值：0.70', '默认回退：BLOCK'] },
+    { id: 'trace', n: 'TRACE', on: 1, d: 'Agent Loop 前 / Loop 结束，记录用户对语用意图的反馈；脱敏后遥测上传。', repo: '', caps: ['event.read', 'pii.mask'], cfg: ['脱敏：开', '反馈时机：Loop 结束后'] },
+    { id: 'brain', n: '脑手解耦', on: 1, d: '主会话负责理解、回收、沉淀；SubAgent 执行、反馈、即用即走。', repo: '', caps: ['agent.spawn', 'agent.dispose', 'memory.commit'], cfg: ['每任务并发：1-3'] },
+    { id: 'multi', n: '多Agent编排', on: 1, d: '类 WorkBuddy 的专家与专家团；可用预置，也可自编排。', repo: '', caps: ['expert.load', 'team.compose', 'role.bind'], cfg: ['预置专家团：2 个'] },
+    { id: 'hub', n: 'OrchClaw Hub', on: 0, d: '配对远程 Agent 后，主会话可向其下发任务并回收结果。', repo: '', caps: ['pair.token', 'agent.remote', 'ws.channel'], cfg: ['配对：安全存储加密'] }
   ];
   const SKILLS_MARKET = [
     { n: 'guanji', d: '观雅集官方客户端', caps: ['skill.fetch', 'skill.install'], auth: 0 },
     { n: 'consolidate-project-knowledge-base', d: '项目知识库治理', caps: ['fs.read', 'fs.write', 'doc.review'], auth: 1 },
     { n: 'aihot', d: 'AI 资讯日报', caps: ['web.fetch', 'cron.schedule'], auth: 0 },
-    { n: 'kimi-webbridge', d: '本地浏览器接管（截图/抓取）', caps: ['browser.navigate', 'browser.screenshot'], auth: 1 }
   ];
   const PLUGIN_MARKET = [
     { n: 'Git 集成', d: '仓库操作 / PR / Issue', caps: ['git.read', 'git.write'], auth: 1 },
@@ -85,127 +74,132 @@
     { n: '数据可视化', d: 'Chart.js 图表生成', caps: ['chart.render'], auth: 0 }
   ];
   const CONNECTORS = [
-    { n: 'GitHub', d: '代码托管', on: 1 }, { n: '飞书', d: '协作平台', on: 0 }, { n: '企业微信', d: '企业通讯', on: 0 },
-    { n: '腾讯文档', d: '在线文档', on: 0 }, { n: 'Notion', d: '知识管理', on: 0 }, { n: 'Linear', d: '项目管理', on: 0 },
-    { n: 'TAPD', d: '研发管理', on: 0 }, { n: '钉钉', d: '企业通讯', on: 0 }
-  ];
-  const MODELS = [
-    { n: 'Claude Opus 4.7', p: 'Anthropic · 200K', k: 'sk-••••••••', state: '已测' },
-    { n: 'Claude Sonnet 4.6', p: 'Anthropic · 200K', k: 'sk-••••••••', state: '已测' },
-    { n: 'GPT-5', p: 'OpenAI · 256K', k: 'sk-••••••••', state: '已测' },
-    { n: 'DeepSeek-V4', p: 'DeepSeek · 128K', k: 'sk-••••••••', state: '未配' },
-    { n: 'qwen3:14b', p: 'Ollama 本地 · 意图初筛', k: '(本地)', state: '已就绪' }
+    { n: 'GitHub', d: '代码托管', on: 1 }, { n: '飞书', d: '协作平台', on: 0 },
+    { n: '企业微信', d: '企业通讯', on: 0 }, { n: '腾讯文档', d: '在线文档', on: 0 },
+    { n: 'Notion', d: '知识管理', on: 0 }, { n: 'Linear', d: '项目管理', on: 0 }, { n: '钉钉', d: '企业通讯', on: 0 }
   ];
 
-  /* ---------- 桥接（主进程 contextBridge；缺省回落页内内存） ---------- */
+  // 模型池：仅来自真实配置（设置页添加的提供商）；无配置 = 空池，UI 显示"选择模型"
+  let MODELS = [];
+
+  /* ---------- 模型选择：持久化 + 默认策略 ---------- */
+  const MODEL_SELECTION_KEY = 'orchdesk.modelSelection';
+  function saveModelSelection(models) {
+    try { localStorage.setItem(MODEL_SELECTION_KEY, JSON.stringify(models || [])); } catch { /* 隐私模式等忽略 */ }
+  }
+  function loadModelSelection() {
+    try {
+      const v = localStorage.getItem(MODEL_SELECTION_KEY);
+      const arr = v ? JSON.parse(v) : null;
+      return Array.isArray(arr) ? arr : null;
+    } catch { return null; }
+  }
+
+  /**
+   * 默认选择策略（providers 非空时调用）：
+   * 1. 用户上次在对话框确认的选择优先（跨会话复用，localStorage 持久化）
+   * 2. 仅一种有效模型 → 默认启用它
+   * 3. 本地 + API → 本地勾选（意图识别）+ API（主运行）
+   * 4. 多个 API → 设置页指定的默认模型 + 本地（若有）
+   */
+  function autoSelectModels(providers, defaultProviderId, defaultModelName) {
+    const pool = dynamicModels;
+    if (!pool.length) { state.selectedModels = []; return; }
+    const has = (n) => pool.some(m => m.n === n);
+
+    // 本地模型判定：提供商 type=ollama，或名称含 本地/Ollama
+    const ollamaNames = new Set((providers || []).filter(p => p.type === 'ollama').map(p => p.name));
+    const isLocal = (m) => ollamaNames.has(String(m.p).split(' · ')[0]) || /本地|Ollama/i.test(m.p);
+    const localModels = pool.filter(isLocal);
+    const apiModels = pool.filter(m => !isLocal(m));
+
+    // 1) 用户持久化的选择优先（至少保留 1 个且全部仍有效）
+    const saved = loadModelSelection();
+    if (saved && saved.length > 0 && saved.every(has)) {
+      state.selectedModels = saved;
+      return;
+    }
+
+    if (apiModels.length === 0) {
+      // 只有本地模型（0 或多个）：全不勾或勾第一个
+      state.selectedModels = pool.length ? [pool[0].n] : [];
+    } else if (apiModels.length === 1) {
+      // 单个 API：本地（若有）作为意图识别 + API 主运行
+      state.selectedModels = localModels.length ? [apiModels[0].n, localModels[0].n] : [apiModels[0].n];
+    } else {
+      // 多个 API：设置页指定的默认模型优先，其次默认提供商下的模型，再否则第一个 API
+      const dm = (defaultModelName && has(defaultModelName) ? pool.find(m => m.n === defaultModelName && !isLocal(m)) : null)
+        || (defaultProviderId ? apiModels.find(m => String(m.p).startsWith(defaultProviderId)) : null)
+        || apiModels[0];
+      state.selectedModels = localModels.length ? [dm.n, localModels[0].n] : [dm.n];
+    }
+    saveModelSelection(state.selectedModels);
+  }
+
+  function getModelPool() { return dynamicModels.length ? dynamicModels : MODELS; }
+
+  let dynamicModels = [];
+
+  /* ---------- 桥接（主进程 contextBridge；无桥接时显示"未连接"） ---------- */
   const bridge = (function () {
     const real = (typeof window !== 'undefined' && window.orchdesk) ? window.orchdesk : null;
     if (real) return real;
-    // 浏览器预览回落：页内内存，不跨重启持久化
-    let mem = [];
-    const compAudit = [];
-    const tempPlugins = new Map();
-    const clone = (x) => JSON.parse(JSON.stringify(x));
-    // T-P5 本地启发式（与插件 classify / staticGate 同义；仅占位演示，真实逻辑在补偿层/自进化插件）。
-    const WITHHOLD_RE = /(删除|删掉|删去|清空|格式化|rm\s|rmdir|del\s|trash|wipe|drop\s+table|删库|shred|发送|发邮件|群发|对外发送|发消息|广播|notify|send\s+email|message-send|broadcast|请求接口|调用接口|调用API|网络请求|POST|GET|PUT|http|curl|fetch|api\s+call|webhook|API|写入共享|上传到共享|保存到共享盘|写共享目录|写共享文件|shared\s+drive|upload\s+to\s+shared|发布|部署|提交|支付|转账|购买|下单|publish|deploy|commit|payment|transfer|purchase)/i;
-    function classifyOutboundLocal(text) {
-      const needs = WITHHOLD_RE.test(text || '');
-      return { needsConfirm: needs, category: needs ? 'outbound' : 'other', reason: needs ? '检测到跨边界/不可逆外发操作' : '未检测到跨边界外发操作', warning: needs ? '⚠ 此操作不可撤销：发送前需二次确认' : '' };
-    }
-    function suggestCompLocal(text) {
-      const t = (text || '');
-      if (/(删除|删掉|删库|rm\s|del\s|wipe)/i.test(t)) return '从回收站/备份恢复；记录被删路径以便追溯';
-      if (/(发送|发邮件|对外发送|广播)/i.test(t)) return '撤回消息（若通道支持）；否则记录已发内容与收件方';
-      if (/(请求接口|调用|网络|http|curl|fetch|API|webhook)/i.test(t)) return '记录外发请求；必要时联系服务端作废 token/会话';
-      if (/(共享|shared\s+drive|upload\s+to\s+shared)/i.test(t)) return '从共享盘版本历史恢复上一版';
-      if (/(发布|部署|提交|支付|转账|购买|下单)/i.test(t)) return '记录不可逆操作；尝试业务侧回滚（如适用）';
-      return '记录操作以便审计追溯';
-    }
-    const HARD_DENY_RE = /(child_process|exec\(|eval\(|new\s+Function|process\.exit|process\.kill|require\('child_process'\)|remote\s+import|import\s*\(\s*['"]https?:|vm\.|__proto__|constructor\s*\.\s*constructor)/i;
-    function staticGateLocal(code) {
-      if (!code || !code.trim()) return { allowed: false, reason: '空代码，拒绝' };
-      if (HARD_DENY_RE.test(code)) return { allowed: false, reason: '命中静态拒绝规则（危险 API）' };
-      return { allowed: true, requiresSandbox: true };
-    }
+    // 无桥接：返回空壳，UI 显示"未连接"状态
     return {
-      loadSessions: () => Promise.resolve(clone(mem)),
-      persistSessions: (arr) => { mem = clone(arr); return Promise.resolve(); },
-      runAgentTurn: (sessionId, text, opts) => Promise.resolve({
-        text: '（浏览器预览模式）未连接主进程运行时，这是本地占位回复。在 Electron 中此回合会调用真实模型（或本地 Ollama）。',
-        intent: 'ACT'
-      }),
-      // T-P3-2 授权桥（占位环境回落：返回默认，UI 不崩；Electron 中由 preload 接主进程）。
+      loadSessions: () => Promise.resolve([]),
+      persistSessions: (arr) => Promise.resolve({ ok: false, reason: '未连接主进程' }),
+      runAgentTurn: (sessionId, text, opts) => Promise.resolve({ text: '未连接主进程运行时，无法调用模型。请在设置中配置模型提供商。', intent: 'CONFIRM' }),
+      // 授权
       getAuthMode: () => Promise.resolve({ mode: 'default' }),
       setAuthMode: () => Promise.resolve({ ok: false }),
-      getAuthLevels: () => Promise.resolve([
-        { level: 0, label: '读取', scope: '无副作用', requiresApproval: false },
-        { level: 1, label: '状态写入', scope: '应用域内', requiresApproval: false },
-        { level: 2, label: '文件系统', scope: '受限目录', requiresApproval: false },
-        { level: 3, label: '网络', scope: '白名单', requiresApproval: true },
-        { level: 4, label: 'Shell / 进程', scope: '仅 FULL ACCESS', requiresApproval: true },
-      ]),
+      getAuthLevels: () => Promise.resolve([]),
       getAuthAudit: () => Promise.resolve([]),
       onAuthRequest: () => () => {},
       submitDecision: () => {},
-      // T-P4-3 提示词库桥（占位环境回落：返回空列表，UI 不崩；Electron 中由 preload 接主进程）。
+      // 提示词库
       listPrompts: () => Promise.resolve([]),
       mergePrompts: () => Promise.resolve({ sections: [], conflicts: [] }),
       savePrompt: () => Promise.resolve({ ok: false }),
       deletePrompt: () => Promise.resolve({ ok: false }),
-      // T-P4-1/2 记忆桥（占位环境回落：返回静态占用与示例召回；Electron 中由 preload 接主进程 memory 服务）。
-      getMemoryStats: () => Promise.resolve({ usageRatio: 0.41, dumps: 2, recallHits: 1, domainCounts: { global: 0, project: 1, director: 0, worker: 0 } }),
-      // T-P5-1 补偿层桥（占位环境回落：本地启发式 + 本地审计；Electron 中由 preload 接主进程 compensation 服务）。
-      withhold: (text) => Promise.resolve(classifyOutboundLocal(text)),
-      compensate: (text, note) => {
-        const rec = { id: 'cmp-' + Date.now().toString(36), ts: Date.now(), text: (text || '').slice(0, 80), note: note || '', action: suggestCompLocal(text) };
-        compAudit.push(rec);
-        return Promise.resolve(rec);
-      },
-      getCompensationAudit: () => Promise.resolve(compAudit.slice()),
-      // T-P5-2 自进化桥（占位环境回落：仅驻内存 Map；Electron 中由 preload 接主进程 evolution 服务，真实沙箱执行）。
-      createTempPlugin: (spec) => {
-        const gate = staticGateLocal(spec && spec.code ? spec.code : '');
-        if (!gate.allowed) return Promise.resolve({ ok: false, reason: gate.reason });
-        const id = 'tp-' + Date.now().toString(36);
-        const rec = { id, name: (spec && spec.name) || 'untitled', status: 'active', trustLevel: 'shell', requiresSandbox: true, inMemory: true };
-        tempPlugins.set(id, rec);
-        return Promise.resolve({ ok: true, plugin: rec });
-      },
-      listTempPlugins: () => Promise.resolve([...tempPlugins.values()]),
-      disposeTempPlugin: (id) => Promise.resolve(tempPlugins.delete(id)),
-      // T-P6-1 观雅集桥（浏览器预览回落：静态样本 + 本地能力审查；Electron 中接主进程 guanji 客户端）。
+      // 记忆
+      getMemoryStats: () => Promise.resolve(null),
+      // 补偿层
+      withhold: (text) => Promise.resolve({ needsConfirm: false, category: 'other', reason: '', warning: '' }),
+      compensate: (text, note) => Promise.resolve({ id: 'cmp-' + Date.now().toString(36), ts: Date.now(), text: (text || '').slice(0, 80), note: note || '', action: '记录操作以便审计追溯' }),
+      getCompensationAudit: () => Promise.resolve([]),
+      createTempPlugin: (spec) => Promise.resolve({ ok: false, reason: '主进程未接入（P1-5 seam）' }),
+      listTempPlugins: () => Promise.resolve([]),
+      disposeTempPlugin: (id) => Promise.resolve(false),
       guanjiTokenStatus: () => Promise.resolve({ configured: false }),
       guanjiSetToken: () => Promise.resolve({ ok: false }),
       guanjiList: () => Promise.resolve(SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }))),
-      guanjiInstall: (skill) => skill && skill.auth ? Promise.resolve({ ok: false, review: 'needs-auth', reason: '演示环境需配置观雅集 TOKEN' }) : Promise.resolve({ ok: true, review: 'allowed' }),
-      guanjiPublish: () => Promise.resolve({ ok: false, reason: '演示环境需配置观雅集 TOKEN' }),
-      // T-P6-2 OrchClaw Hub 桥（浏览器预览回落：未接主进程；Electron 中接主进程 hub 客户端，真实配对远程）。
+      guanjiInstall: (skill) => skill && skill.auth ? Promise.resolve({ ok: false, review: 'needs-auth', reason: '需配置观雅集 TOKEN' }) : Promise.resolve({ ok: true, review: 'allowed' }),
+      guanjiPublish: () => Promise.resolve({ ok: false, reason: '需配置观雅集 TOKEN' }),
       hubStatus: () => Promise.resolve({ paired: false }),
-      hubPair: () => Promise.resolve({ ok: false, reason: '演示环境未接主进程' }),
+      hubPair: () => Promise.resolve({ ok: false, reason: '未配对' }),
       hubSend: () => Promise.resolve({ ok: false, reason: '未配对' }),
       hubResult: () => Promise.resolve({ status: 'error', result: '未配对' }),
-      // T-P6-3 数据快照 + 更新检查（浏览器预览回落：未接主进程）。
-      snapshotData: () => Promise.resolve({ ok: false, reason: '演示环境未接主进程' }),
-      checkUpdates: () => Promise.resolve({ snapshot: { ok: false }, update: { available: false, note: '演示环境未接主进程' } }),
+      snapshotData: () => Promise.resolve({ ok: false, reason: '未接入' }),
+      checkUpdates: () => Promise.resolve({ snapshot: { ok: false }, update: { available: false, note: '未接入' } }),
     };
   })();
 
   /* ---------- 状态 ---------- */
-  const clone = (x) => JSON.parse(JSON.stringify(x));
   const state = {
-    page: 'session', theme: 'light', sel: 's1', ctxOpen: 1, wz: 0, wzExpert: 0,
+    page: 'session', theme: 'dark', sel: null, ctxOpen: 1, ctxTab: 'todo', wz: 0, wzExpert: 0,
+    selProjForComposer: null, projDropdownOpen: false, composerMoreOpen: false,
+    newConvMode: true,
     feedback: new Set(), authMode: 'default',
     authLevels: [], authAudit: [],
     promptDocs: [], promptConflicts: [],
     compAudit: [], tempPlugins: [],
     guanjiSkills: [], guanjiTokenSet: false, installedSkills: [], askInputCb: null,
     hubStatus: { paired: false }, hubUrl: '', hubTaskText: '', hubResultText: '',
-    memoryStats: { usageRatio: 0.41, dumps: 2, recallHits: 1, domainCounts: { global: 0, project: 1, director: 0, worker: 0 } },
-    pExpanded: new Set(['p1', 'p2']),
+    memoryStats: null,
+    pExpanded: new Set(),
     plugSideExpanded: new Set(['builtin', 'market', 'skills', 'experts', 'connectors']),
-    selectedModels: ['Claude Opus 4.7'], thinkLevel: 'standard',
-    projects: clone(SEED_PROJECTS),
-    sessions: clone(SEED_SESSIONS)
+    selectedModels: [], thinkLevel: 'standard', modelProviders: [], mpEditing: null, defaultProvider: undefined,
+    projects: [], sessions: {}
   };
 
   const $ = (s) => document.querySelector(s);
@@ -229,87 +223,352 @@
     return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   }
   function renderMsg(m, sid) {
-    const isU = m.r === 'user';
-    const intentBadge = m.intent
-      ? (m.intent === 'ACT' ? `<span class="badge ok"><span class="dot" style="background:var(--ok)"></span>意图 ACT</span>`
-        : m.intent === 'CONFIRM' ? `<span class="badge warn">意图 · 待确认</span>` : `<span class="badge danger">意图 · 已拦截</span>`)
+    const isU = (m.r || m.role) === 'user';
+    const intentBadge = m.intent && m.intent !== 'ACT'
+      ? (m.intent === 'CONFIRM' ? `<span class="badge warn">意图 · 待确认</span>` : `<span class="badge danger">意图 · 已拦截</span>`)
       : '';
-    const tools = (m.tools && m.tools.length) ? `<details class="tools"><summary>${ic('chev', 14)} ${m.steps} 步 · ${m.tools.length} 个动作</summary>${m.tools.map((t) => `<div class="trow"><span class="dot" style="background:${t.ph === 'running' ? 'var(--warn)' : 'var(--ok)'};${t.ph === 'running' ? 'animation:pulse 1.6s infinite' : ''}"></span><span class="mono">${esc(t.n)}</span><span class="faint" style="margin-left:auto">${t.ph === 'running' ? '执行中' : '完成'}</span></div>`).join('')}</details>` : '';
+    const tools = (m.tools && m.tools.length) ? `<details class="tools"><summary>${ic('chev', 14)} ${m.steps} 步 · ${m.tools.length} 个动作</summary>${m.tools.map((t) => `<div class="trow"><span class="tdot" style="background:${t.ph === 'running' ? 'var(--warn)' : 'var(--ok)'};${t.ph === 'running' ? 'animation:pulse 1.6s infinite' : ''}"></span><span class="mono">${esc(t.n)}</span><span class="faint" style="margin-left:auto">${t.ph === 'running' ? '执行中' : '完成'}</span></div>`).join('')}</details>` : '';
     const sub = m.sub ? `<div class="subagent"><span class="badge ${m.sub.state === 'running' ? 'warn' : 'info'}">SubAgent</span><span class="mono">${esc(m.sub.name)}</span><span class="phases faint">${m.sub.state === 'running' ? '执行中 · 即用即走' : '已回收并销毁'}</span></div>` : '';
     const fb = (m.feedback && state.feedback.has(sid + '|' + m.t)) ? `<div class="feedback" style="color:var(--ok)">已记录反馈 · 已脱敏遥测</div>`
-      : (m.feedback ? `<div class="feedback"><span>这条回答对你有帮助吗？</span><button data-action="trace" data-t="${m.t}">有帮助</button><button data-action="trace" data-t="${m.t}">需改进</button><span class="faint">TRACE 脱敏遥测 → 公开 GitHub 仓库</span></div>` : '');
-    const txt = m.typing ? `<span class="faint">思考中…</span>` : esc(m.x);
+      : (m.feedback ? `<div class="feedback"><span>这条回答对你有帮助吗？</span><button data-action="trace" data-t="${m.t}">有帮助</button><button data-action="trace" data-t="${m.t}">需改进</button><span class="faint">反馈将用于改善回复质量</span></div>` : '');
+    const raw = m.x || m.text || '';
+    let txt;
+    if (m.typing) {
+      txt = '<span class="faint">思考中…</span>';
+    } else if (isU) {
+      txt = esc(raw);
+    } else {
+      // Agent 回复：检测是否整条是纯代码块 → 否则 Markdown 渲染
+      const trimmed = raw.trim();
+      const fullCode = trimmed.match(/^```(\w*)\n([\s\S]*)\n```$/);
+      if (fullCode) {
+        txt = `<pre><code>${esc(fullCode[2].trim())}</code></pre>`;
+      } else {
+        txt = renderMD(raw);
+      }
+    }
     return `<div class="msg ${isU ? 'user' : 'agent'}${m.typing ? ' typing' : ''}">
       <div class="avatar">${isU ? '我' : 'AI'}</div>
       <div class="body"><div class="meta"><b>${isU ? '你' : 'OrchDesk'}</b><span>${m.t}</span>${intentBadge}</div>
-      <div>${txt}</div>${sub}${tools}${fb}</div></div>`;
+      <div class="md-body">${txt}</div>${sub}${tools}${fb}</div></div>`;
   }
 
-  /* ---------- 渲染：侧栏（项目分组 + 会话 + 悬浮 +） ---------- */
+  /* ---------- 渲染：侧栏（ZCode 风格：分组/项目切换 + 文件夹图标） ---------- */
   function renderSideSession() {
-    const blocks = state.projects.map((p) => {
+    const active = state.projects.filter(p => !p.archived);
+    const archived = state.projects.filter(p => p.archived);
+
+    const renderProject = (p) => {
       const expanded = state.pExpanded.has(p.id);
-      const sess = p.sessions.map((sid) => {
-        const s = state.sessions[sid]; if (!s) return '';
-        return `<div class="sess ${state.sel === sid ? 'active' : ''}" data-action="sel" data-id="${sid}">
-          <span class="si"></span>
-          <span class="sn" title="${esc(s.title)}">${esc(s.title)}</span>
-          <span class="st">${esc(s.updated)}</span>
-          <button class="sm" data-action="sess-menu" data-id="${sid}" title="更多">${ic('more', 14)}</button>
-        </div>`;
-      }).join('');
       return `<div class="proj">
         <div class="proj-head" data-action="proj-toggle" data-id="${p.id}">
           <span class="pf ${expanded ? 'open' : ''}">${ic('chev', 12)}</span>
+          ${p.path ? '<span class="pf-open" style="color:var(--fg-faint);font-size:12px" title="有本地文件夹">' + ic('folderOpen', 14) + '</span>' : '<span class="pf-open" style="color:var(--fg-faint);font-size:12px" title="无文件夹绑定">' + ic('folder', 14) + '</span>'}
           <span class="pn">${esc(p.n)}</span>
-          <span class="pc">${p.sessions.length}</span>
-          <button class="pm" data-action="proj-menu" data-id="${p.id}" title="项目操作">${ic('more', 14)}</button>
+          <span class="pm" style="display:flex;gap:1px;align-items:center">
+            <button class="opbtn" data-action="proj-menu" data-id="${p.id}" title="项目操作">···</button>
+          </span>
         </div>
-        ${expanded ? `<div class="proj-list">${sess}</div>` : ''}
+        ${expanded ? `<div class="proj-list">${p.sessions.map((sid) => {
+          const s = state.sessions[sid]; if (!s) return '';
+          return `<div class="sess ${state.sel === sid ? 'active' : ''}" data-action="sel" data-id="${sid}">
+            <span class="sn" title="${esc(s.title)} ${esc(s.expert)}">${esc(s.title)}</span>
+            ${s.updated !== '刚刚' ? `<span class="st">${esc(s.updated)}</span>` : ''}
+            <button class="opbtn" data-action="sess-menu" data-id="${sid}" title="会话操作">···</button>
+          </div>`;
+        }).join('')}</div>` : ''}
       </div>`;
-    }).join('');
-    return blocks + `<div class="fab-wrap"><button class="fab" data-action="newconv" title="新建会话">${ic('plus', 22)}</button></div>`;
+    };
+
+    const activeBlocks = active.map(renderProject).join('');
+
+    // 归档 - 折叠
+    const archBlocks = archived.map(renderProject).join('');
+    const archExpanded = state.pExpanded.has('__archived__');
+    const archToggle = archBlocks ? `<div class="proj-head" data-action="proj-toggle" data-id="__archived__" style="opacity:0.6">
+      <span class="pf ${archExpanded ? 'open' : ''}">${ic('chev', 12)}</span>
+      <span class="pn" style="color:var(--fg-dim);text-transform:none;font-weight:500;letter-spacing:0;font-size:12px">已归档</span>
+    </div>${archExpanded ? `<div class="proj-list">${archBlocks}</div>` : ''}` : '';
+
+    // 任务模式会话（不属于任何项目的独立会话）
+    const allProjectIds = new Set(state.projects.map(p => p.id));
+    const taskSessions = Object.values(state.sessions).filter(s => s.pid === '__task__' || !allProjectIds.has(s.pid));
+    const taskExpanded = state.pExpanded.has('__task__');
+    const taskBlock = taskSessions.length ? `<div class="proj">
+      <div class="proj-head" data-action="proj-toggle" data-id="__task__">
+        <span class="pf ${taskExpanded ? 'open' : ''}">${ic('chev', 12)}</span>
+        <span class="pn" style="color:var(--fg-faint);text-transform:none;font-weight:500;letter-spacing:0;font-size:12px">${ic('zap', 14)} 任务</span>
+        <span class="pc">${taskSessions.length}</span>
+      </div>
+      ${taskExpanded ? `<div class="proj-list">${taskSessions.map((s) => {
+        return `<div class="sess ${state.sel === s.id ? 'active' : ''}" data-action="sel" data-id="${s.id}">
+          <span class="sn" title="${esc(s.title)} ${esc(s.expert)}">${esc(s.title)}</span>
+          ${s.updated !== '刚刚' ? `<span class="st">${esc(s.updated)}</span>` : ''}
+          <button class="opbtn" data-action="sess-menu" data-id="${s.id}" title="会话操作">···</button>
+        </div>`;
+      }).join('')}</div>` : ''}
+    </div>` : '';
+
+    return `<div class="proj-seg">
+      <span class="seg-label">项目 / 任务</span>
+      <div class="seg-tabs">
+        <button class="seg-tab active" data-action="todo">项目</button>
+      </div>
+    </div>
+    <div style="display:align-items:center;gap:4px;padding:4px 10px 8px">
+      <span style="font-size:12px;font-weight:600;color:var(--fg)"></span>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--fg-faint);cursor:pointer;margin-left:auto" data-action="newconv" title="新建会话"><path d="M12 5v14M5 12h14"/></svg>
+    </div>` + activeBlocks + taskBlock + archToggle + `<div class="fab-wrap"><button class="fab" data-action="newconv" title="新建会话">${ic('plus', 22)}</button></div>`;
+  }
+
+  function getGreeting() {
+    const h = new Date().getHours();
+    let g;
+    if (h < 6) g = '夜深了，注意休息';
+    else if (h < 9) g = '早上好';
+    else if (h < 12) g = '上午好';
+    else if (h < 14) g = '中午好';
+    else if (h < 18) g = '下午好';
+    else if (h < 20) g = '傍晚好';
+    else if (h < 22) g = '晚上好';
+    else g = '夜深了，注意休息';
+    return g + '! 一起来做点什么呢？';
+  }
+
+  /* 智能推荐：基于最近 7 天对话主题信号 + 技能使用频率 + 空闲检测 */
+  function getSmartRecommendations() {
+    const sessions = Object.values(state.sessions || {});
+    const now = Date.now();
+    const week = 7 * 24 * 3600_000;
+
+    if (!sessions.length) {
+      // 首次使用 → 新手引导
+      return [
+        { label: '创建项目', icon: 'folder', action: 'home-create-proj' },
+        { label: '闲时任务', icon: 'clock', action: 'quick-idle' },
+        { label: '浏览技能', icon: 'grid', action: 'quick-skills' },
+        { label: '项目分析', icon: 'search', action: 'quick-analyze' },
+      ];
+    }
+
+    // 最近 7 天用户消息主题信号
+    const recent = sessions
+      .filter(s => s.ts > now - week)
+      .flatMap(s => (s.msgs || []).filter(m => m.role === 'user').map(m => (m.text || '')));
+
+    const match = (re) => recent.some(m => re.test(m));
+
+    let ordered = [];
+    if (match(/报错|bug|修复|debug|error|exception/i))              ordered.push('报错修复');
+    if (match(/文档|报告|周报|总结|markdown|readme/i))               ordered.push('文档报告');
+    if (match(/重构|refactor|优化|升级|架构/i))                       ordered.push('项目重构');
+    if (match(/数据|分析|统计|报表|dashboard/i))                       ordered.push('数据分析');
+    if (match(/PPT|幻灯片|演示|presentation|slides/i))               ordered.push('PPT 制作');
+
+    // 高频技能替换
+    const skillFreq = {};
+    sessions.forEach(s => (s.msgs || []).forEach(m => {
+      (m.tools || []).forEach(t => { skillFreq[t.n] = (skillFreq[t.n] || 0) + 1; });
+      if (m.sub) { const n = m.sub.name || 'agent'; skillFreq[n] = (skillFreq[n] || 0) + 1; }
+    }));
+    const topSkill = Object.entries(skillFreq).sort((a, b) => b[1] - a[1])[0];
+    if (topSkill && topSkill[1] >= 2 && ordered.length >= 3) {
+      ordered[2] = topSkill[0];
+    }
+
+    // 空闲检测（7 天无新会话 → 加入闲时任务）
+    const hasRecent = sessions.some(s => s.ts > now - week);
+    if (!hasRecent && !ordered.includes('闲时任务')) ordered.push('闲时任务');
+
+    // 兜底填充
+    const pool = ['报错修复', '文档报告', 'PPT 制作', '闲时任务'];
+    pool.forEach(k => { if (!ordered.includes(k)) ordered.push(k); });
+
+    const iconMap = {
+      '报错修复': 'wrench', '文档报告': 'fileText', '项目重构': 'code',
+      '数据分析': 'bar-chart', 'PPT 制作': 'presentation', '闲时任务': 'clock',
+      '创建项目': 'folder', '浏览技能': 'grid', '项目分析': 'search',
+    };
+    const actionMap = {
+      '报错修复': 'quick-debug', '文档报告': 'quick-weekly', 'PPT 制作': 'quick-ppt',
+      '项目重构': 'quick-refactor', '数据分析': 'quick-data', '闲时任务': 'quick-idle',
+      '创建项目': 'home-create-proj', '浏览技能': 'quick-skills', '项目分析': 'quick-analyze',
+    };
+
+    return ordered.slice(0, 4).map(label => ({
+      label,
+      icon: iconMap[label] || 'zap',
+      action: actionMap[label] || 'todo',
+    }));
   }
 
   function thinkLabel(l) { return ({ off: '关闭', standard: '标准', deep: '深度', max: '最大' })[l] || '标准'; }
   function renderComposer(s) {
     const AUTH_MODE_LABEL = { default: '默认安全', trusted: '信任模式', paranoid: '偏执模式' };
-    const authChip = `<button class="auth ${state.authMode === 'paranoid' ? 'full' : ''}" data-action="auth-open"><span class="dot"></span>${AUTH_MODE_LABEL[state.authMode] || '默认安全'}</button>`;
     const mpLabel = state.selectedModels.length > 1 ? state.selectedModels.length + ' 个模型' : (state.selectedModels[0] || '选择模型');
     const thinkIdx = ({ off: 0, standard: 1, deep: 2, max: 3 })[state.thinkLevel] || 1;
-    return `<div class="composer"><div class="box" style="margin:0 auto">
+    // 当前选中项目
+    const activeProjects = state.projects.filter(p => !p.archived);
+    const curProj = state.selProjForComposer ? activeProjects.find(p => p.id === state.selProjForComposer) : null;
+    const projName = curProj ? curProj.n : '选择项目（或进入任务模式）';
+    const projSelector = `<div style="position:relative">
+      <div class="proj-select ${state.projDropdownOpen ? 'open' : ''}" data-action="proj-select-toggle" title="选择项目">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="ps-name">${esc(projName)}</span>
+        <svg class="ps-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </div>
+      <div class="proj-dropdown ${state.projDropdownOpen ? 'open' : ''}" id="projDropdown">
+        <div class="pd-label">项目</div>
+        ${activeProjects.length ? activeProjects.map(p => `<div class="pd-item ${curProj && curProj.id === p.id ? 'active' : ''}" data-action="composer-proj-pick" data-pid="${p.id}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <div><div>${esc(p.n)}</div>${p.d ? `<div class="pd-meta">${esc(p.d)}</div>` : ''}</div>
+          ${curProj && curProj.id === p.id ? '<span class="badge ok" style="margin-left:auto;font-size:10px">当前</span>' : ''}
+        </div>`).join('') : '<div class="pd-item" style="color:var(--fg-faint);cursor:default">暂无项目</div>'}
+        <div class="pd-sep"></div>
+        <div class="pd-item ${!curProj ? 'active' : ''}" data-action="composer-proj-task" title="不关联项目，直接对话">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 12l2 2 4-4"/></svg>
+          <div><div>任务模式</div><div class="pd-meta">不关联项目，直接对话</div></div>
+        </div>
+      </div>
+    </div>`;
+    return `<div class="composer"><div class="box">
+      ${projSelector}
       <textarea id="composer" placeholder="向 ${s.expert} 发消息…（先经意图识别插件初筛）"></textarea>
       <div id="outboundWarn" class="outbound-warn" hidden></div>
       <div class="bar">
-        <div class="tools-left">
-          <button class="t-btn" data-action="skill-add" data-tip="加载技能">${ic('plus')}</button>
-          <button class="t-btn" data-action="expert-add" data-tip="引用专家或专家团">${ic('at')}</button>
-          ${authChip}
+        <div class="composer-more">
+          <button class="t-btn" data-action="composer-more-toggle" data-tip="更多选项">${ic('more')}</button>
+          <div class="composer-more-dropdown ${state.composerMoreOpen ? 'open' : ''}" id="composerMore">
+            <div class="composer-more-item" data-action="skill-add">
+              <span class="cm-icon">${ic('plus', 16)}</span>
+              <span class="cm-label">加载技能</span>
+            </div>
+            <div class="composer-more-item" data-action="expert-add">
+              <span class="cm-icon">${ic('at', 16)}</span>
+              <span class="cm-label">引用专家或专家团</span>
+            </div>
+            <div class="composer-more-item" data-action="auth-open">
+              <span class="cm-icon">${ic('shield', 16)}</span>
+              <span class="cm-label">授权模式</span>
+              <span class="cm-val">${AUTH_MODE_LABEL[state.authMode] || '默认安全'}</span>
+            </div>
+            <div class="composer-more-sep"></div>
+            <div class="composer-more-item think-item">
+              <div class="think-row"><span class="cm-label">思维深度</span><span class="tl">${thinkLabel(state.thinkLevel)}</span></div>
+              <input type="range" min="0" max="3" step="1" value="${thinkIdx}" data-action="think-slider">
+            </div>
+            <div class="composer-more-item" style="cursor:default">
+              <span class="cm-icon"><span class="dot" style="background:var(--ok);width:7px;height:7px;border-radius:50%"></span></span>
+              <span class="cm-label">意图识别</span>
+              <span class="cm-val">本地模型</span>
+            </div>
+          </div>
         </div>
         <div class="right">
-          <span class="intent-hint" id="intentHint"><span class="dot" style="background:var(--ok)"></span>意图识别：本地模型 ACT</span>
           <button class="c-mp ${state.selectedModels.length > 1 ? 'multi' : ''}" data-action="model-pick"><span class="md"></span><span class="mn">${mpLabel}</span>${ic('chev', 12)}</button>
-          <div class="think-slider">
-            <span>思维</span>
-            <input type="range" min="0" max="3" step="1" value="${thinkIdx}" data-action="think-slider">
-            <span class="tl">${thinkLabel(state.thinkLevel)}</span>
-          </div>
           <button class="btn sm primary" data-action="send">发送</button>
         </div>
       </div>
     </div></div>`;
   }
 
+  /* ---------- 渲染：会话主区（ZCode 风格：新对话/欢迎页 + 快捷入口） ---------- */
+  function renderHomeScreen() {
+    const activeProjects = state.projects.filter(p => !p.archived);
+    const curProj = state.selProjForComposer && state.selProjForComposer !== '__task__' ? activeProjects.find(p => p.id === state.selProjForComposer) : null;
+    const projLabel = curProj ? curProj.n : '选择项目（或进入任务模式）';
+    
+    // 项目选择下拉
+    const projSelector = `<div style="position:relative">
+      <div class="proj-select ${state.projDropdownOpen ? 'open' : ''}" data-action="proj-select-toggle" title="选择项目">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="ps-name">${esc(projLabel)}</span>
+        <svg class="ps-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </div>
+      <div class="proj-dropdown ${state.projDropdownOpen ? 'open' : ''}" id="projDropdown">
+        <div class="pd-label">项目</div>
+        ${activeProjects.length ? activeProjects.map(p => `<div class="pd-item ${curProj && curProj.id === p.id ? 'active' : ''}" data-action="composer-proj-pick" data-pid="${p.id}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <div><div>${esc(p.n)}</div>${p.d ? `<div class="pd-meta">${esc(p.d)}</div>` : ''}</div>
+          ${curProj && curProj.id === p.id ? '<span class="badge ok" style="margin-left:auto;font-size:10px">当前</span>' : ''}
+        </div>`).join('') : '<div class="pd-item" style="color:var(--fg-faint);cursor:default">暂无项目</div>'}
+        <div class="pd-sep"></div>
+        <div class="pd-item" data-action="home-create-proj" title="创建新项目">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          <div><div>创建项目</div><div class="pd-meta">新建项目并绑定本地文件夹</div></div>
+        </div>
+        <div class="pd-item ${!curProj ? 'active' : ''}" data-action="composer-proj-task" title="不关联项目，直接对话">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 12l2 2 4-4"/></svg>
+          <div><div>任务模式</div><div class="pd-meta">不关联项目，直接对话</div></div>
+        </div>
+      </div>
+    </div>`;
+
+    // 智能推荐快捷操作（基于对话历史主题 + 技能使用频率 + 空闲检测）
+    const recs = getSmartRecommendations();
+    const recHtml = recs.map(q =>
+      `<button class="quick-action-btn" data-action="${q.action}" title="${q.label}">
+        <span class="qa-icon">${ic(q.icon, 16)}</span><span>${q.label}</span>
+      </button>`
+    ).join('');
+
+    return `<div class="home-screen">
+      <div class="home-greeting">${esc(getGreeting())}</div>
+      <div class="home-input-wrap">
+        <div class="composer"><div class="box">
+          ${projSelector}
+          <textarea id="homeComposer" placeholder="向 OrchDesk 提问…" rows="1"></textarea>
+          <div id="outboundWarn" class="outbound-warn" hidden></div>
+          <div class="bar">
+            <div class="composer-more">
+              <button class="t-btn" data-action="composer-more-toggle" data-tip="更多选项">${ic('more')}</button>
+              <div class="composer-more-dropdown ${state.composerMoreOpen ? 'open' : ''}" id="composerMore">
+                <div class="composer-more-item" data-action="skill-add">
+                  <span class="cm-icon">${ic('plus', 16)}</span>
+                  <span class="cm-label">加载技能</span>
+                </div>
+                <div class="composer-more-item" data-action="expert-add">
+                  <span class="cm-icon">${ic('at', 16)}</span>
+                  <span class="cm-label">引用专家或专家团</span>
+                </div>
+                <div class="composer-more-item think-item">
+                  <div class="think-row"><span class="cm-label">思维深度</span><span class="tl">${thinkLabel(state.thinkLevel)}</span></div>
+                  <input type="range" min="0" max="3" step="1" value="${({off:0,standard:1,deep:2,max:3}[state.thinkLevel]||1)}" data-action="think-slider">
+                </div>
+              </div>
+            </div>
+            <div class="right">
+              <button class="c-mp ${state.selectedModels.length > 1 ? 'multi' : ''}" data-action="model-pick"><span class="md"></span><span class="mn">${state.selectedModels.length > 1 ? state.selectedModels.length + ' 个模型' : (state.selectedModels[0] || '选择模型')}</span>${ic('chev', 12)}</button>
+              <button class="btn sm primary" data-action="home-send">发送</button>
+            </div>
+          </div>
+        </div></div>
+        <div class="home-quick-actions">
+          ${recHtml}
+        </div>
+      </div>
+    </div>`;
+  }
+
   const VIEWS = {};
   VIEWS.session = {
     side() { return renderSideSession(); },
     main() {
-      const s = state.sessions[state.sel] || state.sessions.s1;
+      // 新对话模式 → 主页（优先级最高）
+      if (state.newConvMode) {
+        state.newConvMode = false;
+        return renderHomeScreen();
+      }
+      // 无选中会话 → 主页
+      if (!state.sel || !state.sessions[state.sel]) {
+        return renderHomeScreen();
+      }
+      const s = state.sessions[state.sel];
       return `<div style="flex:1;overflow-y:auto" id="msgScroll">
         <div style="max-width:760px;margin:0 auto;padding:18px 16px 10px">
           <div class="row" style="justify-content:space-between;margin-bottom:4px">
-            <div class="row"><b style="font-size:16px">${s.title}</b>
-              <span class="badge info">${s.expert}</span></div>
+            <div class="row"><b style="font-size:16px">${esc(s.title)}</b>
+              <span class="badge info">${esc(s.expert)}</span></div>
             <button class="iconbtn" data-action="toggle-ctx" title="切换右侧面板" style="transform:rotate(${state.ctxOpen ? 0 : 180}deg);transition:.15s">${ic('chev', 14)}</button></div>
           <div id="confirmZone"></div>
           ${(s.msgs || []).map((m) => renderMsg(m, s.id)).join('')}
@@ -317,19 +576,114 @@
       ${renderComposer(s)}`;
     },
     ctx() {
-      const s = state.sessions[state.sel] || state.sessions.s1;
-      const ms = state.memoryStats || { usageRatio: 0.41, dumps: 2, recallHits: 1, domainCounts: { global: 0, project: 1, director: 0, worker: 0 } };
-      const pct = Math.round((ms.usageRatio ?? 0.41) * 100);
-      return `<div class="sec-title">会话上下文</div>
-        <div class="card" style="padding:12px"><div class="row" style="justify-content:space-between"><span class="mut" style="font-size:12px">上下文占用</span><b>${pct}%</b></div>
-          <div class="gauge" style="margin-top:6px"><i style="width:${Math.min(100, pct)}%"></i><span class="th" style="left:80%"></span></div>
-          <div class="faint" style="margin-top:5px">80% 阈值触发自动转储（LLM 摘要 + 本地 TF-IDF 编码 + 伪记忆注入，原消息不丢）</div></div>
-        <div class="sec-title">记忆召回</div><div class="faint">已转储 ${ms.dumps ?? 0} 次 · 近期召回命中 ${ms.recallHits ?? 0} 条（project 域优先）</div>
-        <div class="sec-title">四域记忆分布</div><div class="faint">global ${ms.domainCounts?.global ?? 0} · project ${ms.domainCounts?.project ?? 0} · director ${ms.domainCounts?.director ?? 0} · worker ${ms.domainCounts?.worker ?? 0}</div>
-        <div class="sec-title">本次会话的 SubAgent</div>
-        <div class="faint">W-107 代码审查：已回收并销毁（即用即走）</div>
-        <div class="sec-title">分叉</div><button class="btn sm" data-action="fork">从此会话分叉</button>
-        <div class="faint" style="margin-top:6px" id="forkLog">暂无分叉</div>`;
+      const s = state.sel && state.sessions[state.sel] ? state.sessions[state.sel] : null;
+      const tabId = state.ctxTab || 'todo';
+      const tabs = [
+        { id: 'todo', label: '待办', badge: '' },
+        { id: 'products', label: '产物', badge: '' },
+        { id: 'skills', label: '技能与MCP', badge: '' },
+      ];
+      const tabsHTML = tabs.map(t => `<button class="ctx-tab ${tabId === t.id ? 'active' : ''}" data-action="ctx-tab" data-id="${t.id}">${t.label}</button>`).join('');
+
+      if (!s) {
+        return `<div class="ctx-header">
+            <div class="ctx-title">${ic('clipboard', 16)} 任务监控</div>
+            <div class="ctx-subtitle">DSH 插件 · 已启用</div>
+          </div>
+          <div class="ctx-tabs">${tabsHTML}</div>
+          <div class="ctx-body">
+            <div class="ctx-empty"><div class="empty-icon">${ic('clipboard', 28)}</div>选择会话后查看任务跟踪<br><span style="font-size:10px">发送消息后 Agent 步骤、产物、技能将在此显示</span></div>
+          </div>
+          <div id="previewRoot"></div>`;
+      }
+
+      const msgs = s.msgs || [];
+      // ---- 提取步骤 ----
+      const steps = [];
+      msgs.forEach((m, i) => {
+        if (m.tools && m.tools.length) {
+          m.tools.forEach((t) => {
+            steps.push({ text: t.n, status: t.ph === 'done' ? 'done' : t.ph === 'running' ? 'running' : 'pending', time: m.t || '' });
+          });
+        }
+        if (m.sub) {
+          steps.push({ text: 'SubAgent: ' + (m.sub.name || ''), status: m.sub.state === 'disposed' ? 'done' : 'running', time: m.t || '' });
+        }
+      });
+      const doneSteps = steps.filter(st => st.status === 'done').length;
+      const runningSteps = steps.filter(st => st.status === 'running').length;
+
+      // ---- 提取产物 ----
+      const products = [];
+      const codeBlockRe = /```(\w+)?\n([\s\S]*?)```/g;
+      msgs.forEach((m, i) => {
+        if ((m.r === 'agent' || m.role === 'assistant') && (m.x || m.text)) {
+          const content = m.x || m.text || '';
+          let match;
+          while ((match = codeBlockRe.exec(content)) !== null) {
+            const lang = match[1] || 'text';
+            const code = match[2].trim();
+            const extMap = { python:'py', javascript:'js', typescript:'ts', html:'html', css:'css', json:'json', markdown:'md', bash:'sh', shell:'sh', rust:'rs', go:'go' };
+            const ext = extMap[lang.toLowerCase()] || lang;
+            const type = ext === 'md' ? 'md' : ['py','js','ts','html','css','json','sh','rs','go'].includes(ext) ? 'code' : 'md';
+            products.push({ id: 'p' + i + '_' + products.length, name: (lang || 'text') + '_output' + (ext !== 'text' ? '.' + ext : ''), lang, content: code, size: code.length, type });
+          }
+        }
+      });
+
+      // ---- 技能 ----
+      const usedSkills = [];
+      const seen = new Set();
+      msgs.forEach(m => {
+        if ((m.r === 'agent' || m.role === 'assistant') && (m.x || m.text)) {
+          const content = m.x || m.text || '';
+          const re = /\{skill:(\w+)\}/g;
+          let sm;
+          while ((sm = re.exec(content)) !== null) {
+            if (!seen.has(sm[1])) { seen.add(sm[1]); usedSkills.push(sm[1]); }
+          }
+        }
+      });
+      const builtinSkills = ['intent', 'trace', 'brain', 'multi'];
+      builtinSkills.forEach(sk => { if (!seen.has(sk)) usedSkills.unshift(sk); });
+
+      const mcps = [
+        { name: 'filesystem', desc: '文件系统', connected: true },
+        { name: 'browser', desc: '浏览器自动化', connected: true },
+        { name: 'git', desc: 'Git 仓库', connected: false },
+        { name: 'memory', desc: '记忆服务', connected: false },
+      ];
+
+      // ---- Tab 内容 ----
+      let bodyHTML = '';
+      if (tabId === 'todo') {
+        if (steps.length === 0) {
+          bodyHTML = '<div class="ctx-empty"><div class="empty-icon">' + ic('check', 28) + '</div>暂无执行步骤<br><span style="font-size:10px">发送消息后将跟踪 Agent 操作</span></div>';
+        } else {
+          bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">执行步骤</div>' + steps.map(st => {
+            const dot = st.status === 'done' ? ic('check', 12) : st.status === 'running' ? ic('refresh', 12) : ic('circle', 12);
+            return '<div class="ctx-step"><span class="step-dot ' + st.status + '">' + dot + '</span><span class="step-text">' + esc(st.text) + '</span><span class="step-time">' + esc(st.time) + '</span></div>';
+          }).join('') + '</div>';
+        }
+      } else if (tabId === 'products') {
+        if (products.length === 0) {
+          bodyHTML = '<div class="ctx-empty"><div class="empty-icon">' + ic('fileText', 28) + '</div>暂无产物<br><span style="font-size:10px">Agent 生成代码时将在此显示</span></div>';
+        } else {
+          bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">会话产物 (' + products.length + ')</div>' + products.map(p => {
+            const iconCls = p.type === 'md' ? 'md' : p.type === 'code' ? 'code' : 'img';
+            const iconChar = p.type === 'md' ? ic('fileText', 16) : ic('code', 16);
+            return '<div class="ctx-product" data-action="preview-product" data-pid="' + p.id + '" data-content="' + esc(p.content).replace(/"/g, '&quot;') + '" data-name="' + esc(p.name) + '" data-lang="' + esc(p.lang || '') + '"><span class="prod-icon ' + iconCls + '">' + iconChar + '</span><span class="prod-name">' + esc(p.name) + '</span><span class="prod-size">' + (p.size > 1024 ? (p.size/1024).toFixed(1) + 'KB' : p.size + 'B') + '</span></div>';
+          }).join('') + '</div>';
+        }
+      } else if (tabId === 'skills') {
+        bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">插件（默认启用）</div>' + usedSkills.map(sk => {
+          const isOn = builtinSkills.includes(sk);
+          return '<div class="ctx-skill"><span class="sk-icon builtin">' + sk[0].toUpperCase() + '</span><span class="sk-name">' + esc(sk) + '</span><span class="sk-status ' + (isOn ? 'on' : 'idle') + '">' + (isOn ? '已启用' : '可用') + '</span></div>';
+        }).join('') + '</div>';
+        bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接</div>' + mcps.map(m => '<div class="ctx-mcp"><span class="mcp-dot ' + (m.connected ? 'connected' : 'disconnected') + '"></span><span style="flex:1">' + esc(m.name) + '</span><span style="font-size:10px;color:var(--fg-faint)">' + m.desc + ' · ' + (m.connected ? '已连接' : '待连接') + '</span></div>').join('') + '</div>';
+      }
+
+      return '<div class="ctx-header"><div class="ctx-title">' + ic('clipboard', 16) + ' 任务监控</div><div class="ctx-subtitle">' + esc(s.title) + ' · ' + esc(s.expert) + '</div></div><div class="ctx-tabs">' + tabsHTML + '</div><div class="ctx-body">' + bodyHTML + '</div><div id="previewRoot"></div>';
     }
   };
 
@@ -374,7 +728,7 @@
               <div class="pcaps">${p.caps.map((c, i) => `<span class="badge cap ${i === 0 ? '' : (c.includes('write') || c.includes('dispose') || c.includes('commit') ? 'warn' : '')}">${c}</span>`).join('')}</div>
             </div>
             <div class="pactions">
-              <div class="switch ${p.on ? 'on' : ''}" data-action="plug-toggle" data-id="${p.id}"></div>
+              <div class="switch ${p.on ? 'on' : ''}" data-action="plug-toggle" data-id="${p.id}" onclick="this.classList.toggle('on');toast(this.classList.contains('on')?'已启用 ${p.id}（注册为 effect）':'已停用 ${p.id}（注册已回滚，无残留）',this.classList.contains('on')?'ok':'warn')"></div>
               <button class="btn sm" data-action="plug-cfg" data-id="${p.id}">配置</button>
             </div>
           </div>
@@ -437,7 +791,7 @@
     side() {
       return `<div class="sec-title">设置</div>
         ${[{ id: 'model', n: '模型', icon: 'bot' }, { id: 'cred', n: '凭据', icon: 'shield' }, { id: 'sandbox', n: '沙箱与授权', icon: 'shield' }, { id: 'prompt', n: '系统提示词', icon: 'at' }, { id: 'desktop', n: '桌面集成', icon: 'settings' }, { id: 'data', n: '数据目录', icon: 'folder' }, { id: 'about', n: '关于', icon: 'at' }]
-          .map((s) => `<div class="node" style="padding:6px 8px;border-radius:7px;cursor:pointer;display:flex;align-items:center;gap:8px"><span style="color:var(--fg-dim)">${ic(s.icon, 14)}</span><span style="font-size:12.5px">${s.n}</span></div>`).join('')}`;
+          .map((s) => `<div class="node" data-action="settings-nav" data-id="${s.id}" style="padding:6px 8px;border-radius:7px;cursor:pointer;display:flex;align-items:center;gap:8px"><span style="color:var(--fg-dim)">${ic(s.icon, 14)}</span><span style="font-size:12.5px">${s.n}</span></div>`).join('')}`;
     },
     main() {
       return `<div class="main-inner"><h1 class="pg">设置</h1><div class="pg-sub">模型、沙箱、授权、桌面集成等能力均以插件形式挂载，在此统一管理。</div>
@@ -447,19 +801,70 @@
           <div class="stat"><div class="sk">数据目录</div><div class="sv" style="font-size:12px;font-weight:500">%APPDATA%/OrchDesk</div></div>
           <div class="stat"><div class="sk">运行时</div><div class="sv" style="font-size:12px;font-weight:500">dsh 99f6f02</div></div>
         </div>
-        <div class="sec-title"><span class="ico">${ic('bot', 14)}</span>模型</div>
-        <div class="models-search"><input type="search" placeholder="按名称 / 提供方搜索…"></div>
-        <div class="card models-card">
-          <table>
-            <tr><th>模型</th><th>提供方</th><th>密钥</th><th>状态</th><th style="text-align:right">操作</th></tr>
-            ${MODELS.map((m) => `<tr>
-              <td><b>${m.n}</b></td><td class="mut">${m.p}</td><td class="mono faint">${m.k}</td>
-              <td>${m.state === '已测' ? '<span class="badge ok">已测</span>' : m.state === '已就绪' ? '<span class="badge ok">已就绪</span>' : '<span class="badge">未配</span>'}</td>
-              <td style="text-align:right"><button class="btn sm" data-action="model-test" data-n="${m.n}">测试</button></td>
-            </tr>`).join('')}
-          </table>
+        <div class="sec-title" id="settings-section-model"><span class="ico">${ic('bot', 14)}</span>模型管理</div>
+        <div class="card" id="model-mgmt-card">
+          <div class="faint" style="margin-bottom:14px">添加模型提供商后，会话中发送消息将调用真实模型 API（OpenAI 兼容或 Ollama 本地）。API Key 经系统安全存储加密。</div>
+          <div id="model-providers-list"></div>
+          <div id="default-model-pick-wrap" style="${state.modelProviders.length ? '' : 'display:none'}">
+            <div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px;display:flex;align-items:center;gap:8px">
+              <span class="faint" style="font-size:11.5px;white-space:nowrap">默认模型</span>
+              <select id="default-model-pick" class="mp-inp" style="flex:1;font-size:12px">
+                ${(state.modelProviders || []).flatMap(p => (p.models || []).map(m => ({ n: m, pn: p.name, pt: p.type }))).map(m =>
+                  `<option value="${esc(m.n)}" ${state.defaultModel === m.n ? 'selected' : ''}>${esc(m.pn)} (${m.pt === 'ollama' ? '本地' : 'API'}) · ${esc(m.n)}</option>`
+                ).join('')}
+              </select>
+            </div>
+          </div>
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+            <b style="font-size:12.5px;margin-bottom:10px;display:block">${state.mpEditing ? '编辑提供商' : '添加提供商'}</b>
+            <div class="mp-form">
+              <div class="mp-row">
+                <label class="mp-label">类型</label>
+                <select id="mp-type" class="mp-inp" style="max-width:180px">
+                  <option value="ollama">Ollama 本地</option>
+                  <option value="openai-compatible">OpenAI 兼容</option>
+                </select>
+              </div>
+              <div class="mp-row">
+                <label class="mp-label">名称</label>
+                <input type="text" id="mp-name" placeholder="如 OpenAI、DeepSeek" class="mp-inp">
+              </div>
+              <div class="mp-row">
+                <label class="mp-label">Base URL</label>
+                <div class="mp-url-wrap">
+                  <input type="text" id="mp-url" placeholder="localhost:11434" class="mp-inp mp-url-inp">
+                  <label class="mp-url-check"><input type="checkbox" id="mp-fullurl" checked> 完整 URL（含 http://）</label>
+                </div>
+              </div>
+              <div class="mp-row" id="mp-mode-row" style="display:none">
+                <label class="mp-label">API 协议</label>
+                <select id="mp-mode" class="mp-inp" style="max-width:200px">
+                  <option value="chat">/v1/chat/completions（标准对话）</option>
+                  <option value="responses">/v1/responses（ Responses API）</option>
+                  <option value="completions">/v1/completions（文本补全）</option>
+                </select>
+                <span class="faint" style="font-size:11px;margin-left:8px">选择 API 端点协议</span>
+              </div>
+              <div class="mp-row">
+                <label class="mp-label">API Key</label>
+                <input type="password" id="mp-key" placeholder="sk-...（可选，Ollama 可留空）" class="mp-inp">
+              </div>
+              <div class="mp-row">
+                <label class="mp-label">模型</label>
+                <input type="text" id="mp-models" placeholder="gpt-4o, claude-3-5-sonnet（逗号分隔）" class="mp-inp">
+                <span class="faint" style="font-size:11px;margin-left:8px">逗号分隔多个模型名称</span>
+              </div>
+              <div class="mp-row" style="margin-top:4px">
+                <label class="mp-label"></label>
+                <div style="display:flex;gap:8px">
+                  <button class="btn sm primary" data-action="model-add-provider">${state.mpEditing ? '保存' : '添加'}</button>
+                  ${state.mpEditing ? '<button class="btn sm" data-action="model-cancel-edit">取消</button>' : ''}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="sec-title"><span class="ico">${ic('shield', 14)}</span>沙箱与授权</div>
+        <div class="sec-title" id="settings-section-sandbox"><span class="ico">${ic('shield', 14)}</span>沙箱与授权</div>
         <div class="card">
           <div class="row" style="margin-bottom:10px">
             <span class="badge ok">沙箱 Windows ACL</span><span class="badge info">L0-L4 分级</span><span class="faint">fail-closed</span>
@@ -485,7 +890,7 @@
           </div>
           <div class="row" style="margin-top:8px"><button class="btn sm" data-action="comp-record">+ 记录补偿动作</button><span class="faint">不保证完全撤销，仅尽力补偿</span></div>
         </div>
-        <div class="sec-title"><span class="ico">${ic('at', 14)}</span>系统提示词库</div>
+        <div class="sec-title" id="settings-section-prompt"><span class="ico">${ic('at', 14)}</span>系统提示词库</div>
         <div class="card">
           <div class="faint" style="margin-bottom:8px">提示词与技能解耦；分类（角色行为 / 安全边界 / 输出格式 / 技能联动）；支持 <span class="mono">{'{skill:xxx}'}</span> 引用；按 Agent 绑定 + 优先级合并（冲突显式标记）。</div>
           <div class="row" style="margin-bottom:8px"><button class="btn sm primary" data-action="prompt-new">+ 新建提示词</button><span class="faint">共 ${state.promptDocs.length} 条</span></div>
@@ -497,7 +902,7 @@
           </div>
           ${state.promptConflicts.length ? `<div class="warn-list" style="margin-top:8px"><div class="badge warn">合并冲突 ${state.promptConflicts.length} 处（已显式标记，未静默覆盖）</div>${state.promptConflicts.slice(0, 4).map((c) => `<div style="font-size:11px;margin-top:4px">· ${PROMPT_CAT_LABELS[c.category] || c.category}：${c.docA} ↔ ${c.docB}</div>`).join('')}</div>` : ''}
         </div>
-        <div class="sec-title"><span class="ico">${ic('settings', 14)}</span>桌面集成</div>
+        <div class="sec-title" id="settings-section-desktop"><span class="ico">${ic('settings', 14)}</span>桌面集成</div>
         <div class="desktop-grid">
           <div class="desktop-item"><div><div class="di-name">系统托盘</div><div class="di-desc">关闭窗口后继续运行</div></div><div class="switch on" data-action="todo"></div></div>
           <div class="desktop-item"><div><div class="di-name">全局快捷键</div><div class="di-desc mono">Ctrl+Shift+Space</div></div><div class="switch on" data-action="todo"></div></div>
@@ -506,13 +911,13 @@
           <div class="desktop-item"><div><div class="di-name">悬浮窗</div><div class="di-desc">桌面浮动小窗</div></div><div class="switch" data-action="todo"></div></div>
           <div class="desktop-item"><div><div class="di-name">开机提醒</div><div class="di-desc">关键事件系统通知</div></div><div class="switch on" data-action="todo"></div></div>
         </div>
-        <div class="sec-title"><span class="ico">${ic('folder', 14)}</span>数据目录</div>
+        <div class="sec-title" id="settings-section-data"><span class="ico">${ic('folder', 14)}</span>数据目录</div>
         <div class="card">
           <div class="row"><span class="mono">%APPDATA%/OrchDesk</span><span class="faint">· 本地优先，数据不出本机</span></div>
           <div class="faint" style="margin-top:6px;font-size:11.5px">包含 sessions.db · memory · plugins · logs · 缓存</div>
-          <div class="row" style="margin-top:8px"><button class="btn sm" data-action="todo">打开目录</button><button class="btn sm" data-action="snapshot-data">导出快照</button><button class="btn sm primary" data-action="check-updates">检查更新（先快照）</button></div>
+          <div class="row" style="margin-top:8px"><button class="btn sm" data-action="open-project-dir">打开目录</button><button class="btn sm" data-action="snapshot-data">导出快照</button><button class="btn sm primary" data-action="check-updates">检查更新（先快照）</button></div>
         </div>
-        <div class="sec-title"><span class="ico">${ic('at', 14)}</span>关于</div>
+        <div class="sec-title" id="settings-section-about"><span class="ico">${ic('at', 14)}</span>关于</div>
         <div class="card">
           <div class="row" style="justify-content:space-between"><span>OrchDesk 桌面壳</span><b>P6</b></div>
           <div class="faint" style="margin-top:4px">会话优先的本地 Agent 工作台</div>
@@ -548,20 +953,102 @@
   }
 
   /* ---------- 引擎 ---------- */
+  function updateProtocolRow() {
+    const t = $('#mp-type')?.value;
+    const row = $('#mp-mode-row');
+    if (row) row.style.display = t === 'openai-compatible' ? '' : 'none';
+  }
+  function renderModelProviders() {
+    const el = $('#model-providers-list');
+    if (!el) return;
+    const providers = state.modelProviders || [];
+    if (!providers.length) {
+      el.innerHTML = '<div class="faint prov-empty">尚未配置模型提供商，请使用下方表单添加。<br>添加后可在对话中调用真实模型 API（OpenAI 兼容或 Ollama 本地），API Key 经系统安全存储加密。</div>';
+      return;
+    }
+    const modeLabel = { chat: 'Chat', responses: 'Responses', completions: 'Completions', ollama: 'Ollama' };
+    el.innerHTML = providers.map(p => `<div class="prov-row" data-id="${p.id}">
+      <div class="prov-info">
+        <div class="prov-name"><b>${esc(p.name)}</b><span class="badge info">${p.type === 'ollama' ? 'Ollama 本地' : 'OpenAI 兼容 · ' + (modeLabel[p.apiMode] || 'Chat')}</span></div>
+        <div class="prov-detail"><span class="mono faint">${esc(p.baseUrl)}</span><span class="faint">·</span><span class="faint">${(p.models || []).join(', ')}</span></div>
+      </div>
+      <div class="prov-actions"><button class="btn sm ghost" data-action="model-test" data-n="${esc(p.name)}">测试</button><button class="btn sm" data-action="model-edit-provider" data-id="${p.id}">编辑</button><button class="btn sm danger" data-action="model-del-provider" data-id="${p.id}">删除</button></div>
+    </div>`).join('');
+    refreshDefaultModelPicker();
+  }
+
+  function refreshDefaultModelPicker() {
+    const wrap = $('#default-model-pick-wrap');
+    if (!wrap) return;
+    const allModels = (state.modelProviders || []).flatMap(p => (p.models || []).map(m => ({ n: m, pn: p.name, pt: p.type })));
+    const pick = wrap.querySelector('select');
+    if (!pick) return;
+    pick.innerHTML = allModels.map(m =>
+      `<option value="${esc(m.n)}" ${state.defaultModel === m.n ? 'selected' : ''}>${esc(m.pn)} (${m.pt === 'ollama' ? '本地' : 'API'}) · ${esc(m.n)}</option>`
+    ).join('');
+    wrap.style.display = allModels.length ? '' : 'none';
+  }
+
   function render() {
-    renderRail();
-    const v = VIEWS[state.page];
-    $('#side').innerHTML = v.side();
-    $('#main').innerHTML = v.main();
-    $('#context').innerHTML = v.ctx();
-    $('#appGrid').classList.toggle('has-ctx', state.ctxOpen);
-    $('#winTitle').textContent = PAGES.find((x) => x.id === state.page).n + ' — 本地 Agent 工作台';
-    const sc = $('#msgScroll'); if (sc) sc.scrollTop = sc.scrollHeight;
+    try {
+      renderRail();
+      const v = VIEWS[state.page];
+      if (!v) {
+        $('#main').innerHTML = '<div style="color:red;padding:40px">未知页面：' + esc(state.page) + '</div>';
+        return;
+      }
+      $('#side').innerHTML = v.side();
+      $('#main').innerHTML = v.main();
+      $('#context').innerHTML = v.ctx();
+      $('#appGrid').classList.toggle('has-ctx', state.ctxOpen);
+      $('#winTitle').textContent = (PAGES.find((x) => x.id === state.page)?.n || '会话') + ' — 本地 Agent 工作台';
+      if (state.page === 'settings') renderModelProviders();
+      if (state.page === 'settings' && state.settingsSection) {
+        const target = $('#settings-section-' + state.settingsSection);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        document.querySelectorAll('[data-action="settings-nav"]').forEach(el => {
+          el.style.background = el.dataset.id === state.settingsSection ? 'var(--bg-hover)' : '';
+        });
+      }
+      const sc = $('#msgScroll'); if (sc) sc.scrollTop = sc.scrollHeight;
+    } catch (err) {
+      console.error('[render] ERROR:', err);
+      $('#main').innerHTML = '<div style="color:#EF4444;padding:40px;font-family:monospace"><b>渲染错误</b><pre>' + (err && err.stack || err) + '</pre></div>';
+    }
   }
 
   function toast(msg, type = '') {
     const t = document.createElement('div'); t.className = 'toast ' + type; t.textContent = msg;
     $('#toastRoot').appendChild(t); setTimeout(() => t.remove(), 3200);
+  }
+
+  /* ---------- Markdown 渲染器（基于 marked.js） ---------- */
+  function renderMD(md) {
+    if (!md) return '';
+    try {
+      const raw = typeof marked !== 'undefined' ? marked.parse(md, { gfm: true, breaks: false }) : esc(md);
+      // marked 输出可能含 HTML 标签，仅对非代码部分转义
+      // 简单策略：对 < 标签做白名单过滤（只保留 marked 生成的 HTML 标签）
+      return raw.replace(/<(?!\/?(pre|code|h[1-6]|ul|ol|li|p|br|strong|b|em|i|a|blockquote|table|thead|tbody|tr|td|th|sup|sub|hr|del|s|strike)\b)[^>]*>/gi, '&lt;$0').replace(/&lt;\/(pre|code|h[1-6]|ul|ol|li|p|strong|b|em|i|a|blockquote|table|thead|tbody|tr|td|th|sup|sub|del|s|strike)>/, '</$1>');
+    } catch {
+      return esc(md);
+    }
+  }
+
+  function openProductPreview(name, content, lang) {
+    const body = document.createElement('div');
+    body.className = 'ctx-preview-overlay';
+    body.innerHTML = `<div class="ctx-preview-card">
+      <div class="ctx-preview-head">
+        <span class="ph-title">${esc(name)}${lang ? ' <span class="faint" style="font-weight:400;font-size:11px">' + esc(lang) + '</span>' : ''}</span>
+        <button class="ctx-preview-close" data-action="preview-close">✕</button>
+      </div>
+      <div class="ctx-preview-body">${renderMD(content)}</div>
+    </div>`;
+    document.body.appendChild(body);
+    body.addEventListener('click', (e) => {
+      if (e.target.closest('[data-action="preview-close"]') || e.target === body) body.remove();
+    });
   }
   function openModal(html) { $('#modalRoot').innerHTML = `<div class="overlay" data-action="modal-bg"><div class="modal">${html}</div></div>`; }
   function closeModal() { $('#modalRoot').innerHTML = ''; }
@@ -582,20 +1069,29 @@
     }, 0);
   }
 
+  function createSessionInProject(pid) {
+    const id = 's' + Date.now().toString(36);
+    const p = state.projects.find((x) => x.id === pid);
+    const s = { id, pid, title: '新会话', expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+    state.sessions[id] = s;
+    if (p && !p.sessions.includes(id)) p.sessions.push(id);
+    state.pExpanded.add(pid);
+    state.sel = id;
+    state.selProjForComposer = pid;
+    state.projDropdownOpen = false;
+    persist(); render();
+    const pName = p ? p.n : pid;
+    toast(`已新建会话 → ${pName}`, 'ok');
+  }
+
   /* ---------- 会话操作（真实落盘，经桥） ---------- */
   function findProjectOf(sid) { return state.projects.find((p) => p.sessions.includes(sid)); }
   function touch(s) { s.updated = '刚刚'; }
 
-  async function doNewConv() {
-    const id = 's' + Date.now().toString(36);
-    const s = { id, pid: 'p1', title: '新会话', expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
-    state.sessions[id] = s;
-    const p1 = state.projects.find((p) => p.id === 'p1');
-    if (p1 && !p1.sessions.includes(id)) p1.sessions.unshift(id);
-    state.pExpanded.add('p1');
-    state.sel = id;
-    persist(); render();
-    toast('已新建会话（已落盘）', 'ok');
+  function doNewConv() {
+    state.newConvMode = true;
+    state.sel = null;
+    render();
   }
 
   async function doSend() {
@@ -638,6 +1134,17 @@
     toast('已创建分支（继承前缀事件，独立写入）', 'ok');
   }
 
+  async function doDeleteSession(sid) {
+    const from = findProjectOf(sid);
+    if (from) from.sessions = from.sessions.filter((x) => x !== sid);
+    delete state.sessions[sid];
+    if (state.sel === sid) {
+      state.sel = Object.keys(state.sessions)[0] || null;
+    }
+    persist(); render();
+    toast(`会话 #${sid} 已删除`, 'warn');
+  }
+
   async function doArchiveSession(sid) {
     const s = state.sessions[sid]; if (!s) return;
     const from = findProjectOf(sid);
@@ -652,7 +1159,21 @@
 
   async function doArchiveProject(pid) {
     const p = state.projects.find((x) => x.id === pid); if (!p) return;
-    p.archived = 1; p.open = 0; state.pExpanded.delete(pid);
+    // 将所有归档会话统一归入"已归档"虚拟容器
+    let arch = state.projects.find((x) => x.id === '__archived__');
+    if (!arch) {
+      arch = { id: '__archived__', n: '已归档', d: '', open: 0, archived: 1, sessions: [] };
+      state.projects.push(arch);
+    }
+    // 将项目内所有会话移入归档容器
+    p.sessions.forEach((sid) => {
+      if (!arch.sessions.includes(sid)) arch.sessions.push(sid);
+      const s = state.sessions[sid]; if (s) { s.pid = arch.id; s.archived = 1; }
+    });
+    p.sessions = [];
+    p.archived = 1; p.open = 0;
+    state.pExpanded.delete(pid);
+    state.pExpanded.add('__archived__');
     persist(); render();
     toast(`项目「${p.n}」已归档`, 'warn');
   }
@@ -880,23 +1401,40 @@
   }
 
   function openModelPicker() {
+    const pool = getModelPool();
+    if (!pool.length) {
+      openModal(`<div class="mh">${ic('bot', 18)}<b>选择模型</b></div>
+        <div class="mb">
+          <div class="faint">尚未配置任何模型提供商。请到 <b>设置 → 模型管理</b> 添加提供商（OpenAI 兼容 API 或 Ollama 本地）。</div>
+        </div>
+        <div class="mf"><button class="btn ghost" data-action="modal-cancel">关闭</button></div>`);
+      return;
+    }
+    const poolNames = new Set(pool.map(m => m.n));
+    // 同步：清理已不在当前模型池中的残留选中项
+    const prevLen = state.selectedModels.length;
+    state.selectedModels = state.selectedModels.filter(n => poolNames.has(n));
+    if (state.selectedModels.length !== prevLen) {
+      console.log('[model] cleaned stale selection:', prevLen, '->', state.selectedModels.length);
+    }
     const groups = {};
-    MODELS.forEach((m) => { const p = m.p.split(' · ')[0]; if (!groups[p]) groups[p] = []; groups[p].push(m); });
+    pool.forEach((m) => { const p = m.p.split(' · ')[0]; if (!groups[p]) groups[p] = []; groups[p].push(m); });
     const html = Object.entries(groups).map(([provider, models]) => {
       const allSel = models.every((m) => state.selectedModels.includes(m.n));
       return `<div class="mg-grp">
-        <div class="mg-h">${provider}<span class="mg-all" data-action="mg-toggle-all" data-p="${provider}">${allSel ? '取消全选' : '全选'}</span></div>
+        <div class="mg-h">${esc(provider)}<span class="mg-all" data-action="mg-toggle-all" data-p="${esc(provider)}">${allSel ? '取消全选' : '全选'}</span></div>
         ${models.map((m) => { const sel = state.selectedModels.includes(m.n);
-          return `<div class="m-opt ${sel ? 'sel' : ''}" data-action="model-toggle" data-n="${m.n}">
+          const isDefault = state.defaultModel === m.n;
+          return `<div class="m-opt ${sel ? 'sel' : ''}" data-action="model-toggle" data-n="${esc(m.n)}">
             <div class="mo-cb"></div>
-            <div class="mo-info"><div class="mo-name">${m.n}</div><div class="mo-meta">${m.p}</div></div>
+            <div class="mo-info"><div class="mo-name">${esc(m.n)}${isDefault ? ' <span class="badge ok">默认</span>' : ''}</div><div class="mo-meta">${esc(m.p)}</div></div>
             <div class="mo-state">${m.state === '已测' || m.state === '已就绪' ? '<span class="badge ok">' + m.state + '</span>' : '<span class="badge">' + m.state + '</span>'}</div>
           </div>`; }).join('')}
       </div>`;
     }).join('');
     openModal(`<div class="mh">${ic('bot', 18)}<b>选择模型</b></div>
       <div class="mb">
-        <div class="faint" style="margin-bottom:10px">可选择一个或多个提供商的单个或多个模型；多选时按顺序调用（主模型 + 备用）。思维等级对所有选中模型生效。</div>
+        <div class="faint" style="margin-bottom:10px">第一个选中 = 主运行模型；本地模型勾选后作为意图识别。此选择会保存，新会话自动复用。默认模型可在 设置→模型管理 中指定。</div>
         ${html}
       </div>
       <div class="mf">
@@ -906,34 +1444,209 @@
   }
 
   /* ---------- 交互 ---------- */
+  // 点击空白处关闭项目下拉
+  document.body.addEventListener('click', (e) => {
+    if ((state.projDropdownOpen && !e.target.closest('.proj-select') && !e.target.closest('.proj-dropdown')) ||
+        (state.composerMoreOpen && !e.target.closest('.composer-more'))) {
+      state.projDropdownOpen = false;
+      state.composerMoreOpen = false;
+      const dd = document.querySelector('.proj-dropdown');
+      if (dd) dd.classList.remove('open');
+      const ps = document.querySelector('.proj-select');
+      if (ps) ps.classList.remove('open');
+      const cm = document.querySelector('.composer-more-dropdown');
+      if (cm) cm.classList.remove('open');
+    }
+  });
+  /* composer Enter-to-send（homeComposer + 会话内 #composer） */
+  document.body.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && (e.target.id === 'homeComposer' || e.target.id === 'composer')) {
+      e.preventDefault();
+      const sendBtn = e.target.closest('.home-textarea-wrap')?.querySelector('[data-action="home-send"]')
+        || document.querySelector('[data-action="home-send"], [data-action="send"]');
+      if (sendBtn) sendBtn.click();
+    }
+  });
   document.body.addEventListener('click', async (e) => {
     const el = e.target.closest('[data-action]'); if (!el) return;
     const a = el.dataset.action, id = el.dataset.id;
     switch (a) {
       case 'nav': state.page = id; render(); break;
+      case 'settings-nav': state.settingsSection = id; render(); break;
       case 'toggle-theme': { state.theme = state.theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = state.theme; break; }
       case 'toggle-ctx': state.ctxOpen = !state.ctxOpen; render(); break;
+      case 'ctx-tab': state.ctxTab = el.dataset.id; render(); break;
+      case 'preview-product': {
+        const content = el.dataset.content;
+        const name = el.dataset.name;
+        const lang = el.dataset.lang;
+        if (content) openProductPreview(name, content, lang);
+        break;
+      }
+      case 'proj-select-toggle': { state.projDropdownOpen = !state.projDropdownOpen; const dd = $('#projDropdown'); if (dd) dd.classList.toggle('open', state.projDropdownOpen); break; }
+      case 'composer-proj-pick': {
+        const pid = el.dataset.pid;
+        state.selProjForComposer = pid;
+        state.projDropdownOpen = false;
+        // 若当前会话不在该项目下，跳转到该项目下的第一个会话或创建新会话
+        const curS = state.sessions[state.sel];
+        if (!curS || curS.pid !== pid) {
+          const p = state.projects.find(x => x.id === pid);
+          const existing = p ? p.sessions.find(sid => state.sessions[sid]) : null;
+          if (existing) { state.sel = existing; }
+          else if (p) { createSessionInProject(pid); }
+        }
+        render();
+        break;
+      }
+      case 'composer-proj-task': {
+        state.selProjForComposer = '__task__';
+        state.projDropdownOpen = false;
+        closeModal();
+        const id = 's' + Date.now().toString(36);
+        const s = { id, pid: '__task__', title: '任务', expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+        state.sessions[id] = s;
+        state.sel = id;
+        state.pExpanded.add('__task__');
+        persist(); render();
+        toast('已进入任务模式（无项目）', 'ok');
+        break;
+      }
+      case 'welcome-new-proj': doNewConv(); break;
+      case 'welcome-task': {
+        const id = 's' + Date.now().toString(36);
+        const s = { id, pid: '__task__', title: '任务', expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+        state.sessions[id] = s; state.sel = id;
+        persist(); render(); toast('已进入任务模式（无项目）', 'ok');
+        break;
+      }
 
       /* 会话 */
       case 'sel': state.sel = id; render(); break;
       case 'newconv': doNewConv(); break;
+      case 'home-send': {
+        const homeInp = $('#homeComposer');
+        const text = homeInp?.value?.trim();
+        if (!text) { toast('输入为空', 'warn'); break; }
+        homeInp.value = '';
+        if (!state.selProjForComposer || state.selProjForComposer === '__task__') {
+          const id = 's' + Date.now().toString(36);
+          const s = { id, pid: '__task__', title: text.slice(0, 20), expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+          state.sessions[id] = s;
+          state.sel = id;
+          state.selProjForComposer = '__task__';
+          state.pExpanded.add('__task__');
+          persist(); render();
+        } else {
+          const pid = state.selProjForComposer;
+          const sid = 's' + Date.now().toString(36);
+          const p = state.projects.find(x => x.id === pid);
+          const s = { id: sid, pid, title: text.slice(0, 20), expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+          state.sessions[sid] = s;
+          if (p && !p.sessions.includes(sid)) p.sessions.push(sid);
+          state.pExpanded.add(pid);
+          state.sel = sid;
+          persist(); render();
+        }
+        const c = $('#composer');
+        if (c) {
+          c.value = text;
+          c.dispatchEvent(new Event('input', { bubbles: true }));
+          doSend();
+        } else {
+          toast('发送失败：未找到输入框', 'warn');
+        }
+        break;
+      }
+      case 'quick-weekly': case 'quick-debug': case 'quick-ppt': case 'quick-idle':
+      case 'quick-refactor': case 'quick-data': case 'quick-skills': case 'quick-analyze': {
+        const labels = {
+          'quick-weekly': '周报总结', 'quick-debug': '报错修复', 'quick-ppt': 'PPT 制作',
+          'quick-idle': '闲时任务', 'quick-refactor': '项目重构', 'quick-data': '数据分析',
+          'quick-skills': '浏览技能', 'quick-analyze': '项目分析',
+        };
+        const prompts = {
+          'quick-weekly': '请帮我写一份周报总结，包含本周完成的工作、遇到的问题和下周计划。',
+          'quick-debug': '请帮我诊断并修复以下代码问题：',
+          'quick-ppt': '请帮我制作 PPT，主题是：',
+          'quick-idle': '请帮我处理以下闲时任务：',
+          'quick-refactor': '请帮我分析并重构以下代码：',
+          'quick-data': '请帮我分析以下数据并给出洞察：',
+          'quick-skills': '请帮我推荐适合当前项目的技能：',
+          'quick-analyze': '请帮我分析当前项目的结构和代码质量：',
+        };
+        const text = prompts[a] || '';
+        const inp = $('#homeComposer');
+        if (inp) { inp.value = text; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+        const sendBtn = document.querySelector('[data-action="home-send"]');
+        if (sendBtn) sendBtn.click();
+        toast(`已加载「${labels[a] || a}」模板`, 'ok');
+        break;
+      }
+      case 'home-create-proj': {
+        openModal(`<div class="mh">${ic('folder', 18)}<b>创建项目</b></div>
+          <div class="mb">
+            <div class="mb-row"><label>项目名称</label><input id="newProjName" class="inp" placeholder="如：React 重构" style="width:100%"></div>
+            <div class="mb-row"><label>本地文件夹</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input id="newProjPath" class="inp" placeholder="选择或输入本地文件夹路径" style="flex:1" readonly>
+                <button class="btn sm" data-action="pick-folder">浏览</button>
+              </div>
+              <div class="faint" style="font-size:11px;margin-top:4px">绑定后可通过「打开项目目录」快速访问</div>
+            </div>
+          </div>
+          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="do-create-proj-home">创建</button></div>`);
+        break;
+      }
+      case 'pick-folder': {
+        const pathInput = $('#newProjPath');
+        try {
+          const r = await bridge.pickFolder();
+          if (r && r.ok && r.path && pathInput) pathInput.value = r.path;
+        } catch {
+          const selected = prompt('请输入本地文件夹路径：');
+          if (selected && pathInput) pathInput.value = selected;
+        }
+        break;
+      }
+      case 'do-create-proj-home': {
+        const name = ($('#newProjName')?.value || '').trim();
+        const path = ($('#newProjPath')?.value || '').trim();
+        if (!name) { toast('请输入项目名称', 'warn'); break; }
+        const id = 'p' + Date.now().toString(36);
+        const p = { id, n: name, d: '', open: 1, archived: 0, sessions: [], path: path || '' };
+        state.projects.push(p);
+        state.selProjForComposer = id;
+        persist();
+        closeModal();
+        // Create initial session
+        createSessionInProject(id);
+        toast(`项目「${name}」已创建`, 'ok');
+        break;
+      }
       case 'proj-toggle': { if (state.pExpanded.has(id)) state.pExpanded.delete(id); else state.pExpanded.add(id); render(); break; }
       case 'proj-menu': e.stopPropagation(); openMenu(el, [
         { id: 'open', label: '打开项目目录', svg: ic('folder', 14) },
         { sep: 1, label: '归档项目', svg: ic('archive', 14), danger: 1, id: 'archive' }]);
-        document.querySelector('.pop [data-id="open"]').onclick = () => { toast('已打开项目目录（演示）', 'ok'); $('#menuRoot').innerHTML = ''; };
+        document.querySelector('.pop [data-id="open"]').onclick = async () => {
+          $('#menuRoot').innerHTML = '';
+          const r = await bridge.openProjectDir();
+          toast(r && r.ok ? '已打开项目目录' : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
+        };
         document.querySelector('.pop [data-id="archive"]').onclick = () => { $('#menuRoot').innerHTML = ''; confirmArchiveProject(id); };
         break;
       case 'sess-menu': e.stopPropagation(); openMenu(el, [
         { id: 'copy', label: '复制会话 ID', svg: ic('copy', 14) },
         { id: 'rename', label: '重命名', svg: ic('edit', 14) },
         { sep: 1, id: 'fork', label: '创建分支', svg: ic('fork', 14) },
-        { sep: 1, id: 'archive', label: '归档', svg: ic('archive', 14), danger: 1 }]);
+        { sep: 1, id: 'archive', label: '归档', svg: ic('archive', 14), danger: 1 },
+        { sep: 1, id: 'delete', label: '删除', svg: ic('trash', 14), danger: 1 }]);
         const pop = document.querySelector('.pop');
         pop.querySelector('[data-id="copy"]').onclick = () => { navigator.clipboard && navigator.clipboard.writeText(id).catch(() => {}); toast(`已复制 #${id}`, 'ok'); $('#menuRoot').innerHTML = ''; };
         pop.querySelector('[data-id="rename"]').onclick = () => { $('#menuRoot').innerHTML = ''; confirmRename(id); };
         pop.querySelector('[data-id="fork"]').onclick = () => { $('#menuRoot').innerHTML = ''; confirmNewBranch(id); };
         pop.querySelector('[data-id="archive"]').onclick = () => { $('#menuRoot').innerHTML = ''; doArchiveSession(id); };
+        pop.querySelector('[data-id="delete"]').onclick = async () => { $('#menuRoot').innerHTML = ''; await doDeleteSession(id); };
         break;
       case 'fork': confirmNewBranch(state.sel); break;
       case 'branch-confirm': { const inp = $('#modalRoot input[type=text]'); const nm = inp ? inp.value : ''; closeModal(); doFork(state.sel, nm); break; }
@@ -991,7 +1704,7 @@
             <div class="mb-row"><label>名称</label><input id="tpName" class="inp" placeholder="如：summarizer"></div>
             <div class="mb-row"><label>代码</label><textarea id="tpCode" class="inp" rows="4" placeholder="export function run(t){ return t; }"></textarea></div>
           </div>
-          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="tp-create">创建（CONFIRM）</button></div>`);
+          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="tp-create" onclick="var n=document.getElementById('tpName')?document.getElementById('tpName').value.trim():'';var c=document.getElementById('tpCode')?document.getElementById('tpCode').value.trim():'';if(!n||!c){toast('请填写名称与代码','warn');return;}try{bridge.createTempPlugin({name:n,code:c}).then(function(r){if(r&&r.ok){state.tempPlugins.unshift(r.plugin);closeModal();render();toast('已创建临时插件「'+n+'」（仅驻内存）','ok');}else{toast('创建被拒：'+(r&&r.reason||'静态门控未通过'),'danger');}}).catch(function(){toast('创建失败（运行时未接入）','warn');});}catch(e){toast('创建失败','warn');}">创建（CONFIRM）</button></div>`);
         break;
       }
       case 'tp-create': {
@@ -1018,23 +1731,39 @@
       case 'trace': { state.feedback.add('s1|' + el.dataset.t); render(); toast('TRACE：反馈已脱敏并遥测至公开 GitHub 仓库', 'ok'); break; }
 
       /* 模型选择 + 思维等级 */
+      case 'composer-more-toggle': { state.composerMoreOpen = !state.composerMoreOpen; const cm = document.querySelector('.composer-more-dropdown'); if (cm) cm.classList.toggle('open', state.composerMoreOpen); break; }
       case 'model-pick': openModelPicker(); break;
       case 'model-toggle': {
         const n = el.dataset.n; const idx = state.selectedModels.indexOf(n);
         if (idx >= 0) { state.selectedModels.splice(idx, 1); el.classList.remove('sel'); }
         else { state.selectedModels.push(n); el.classList.add('sel'); }
         const btn = document.querySelector('[data-action="model-confirm"]'); if (btn) btn.textContent = `确认（${state.selectedModels.length} 个）`;
-        document.querySelectorAll('.mg-all').forEach((sp) => { const p = sp.dataset.p; const grp = MODELS.filter((m) => m.p.split(' · ')[0] === p); const allSel = grp.every((m) => state.selectedModels.includes(m.n)); sp.textContent = allSel ? '取消全选' : '全选'; });
+        document.querySelectorAll('.mg-all').forEach((sp) => { const p = sp.dataset.p; const grp = getModelPool().filter((m) => m.p.split(' · ')[0] === p); const allSel = grp.every((m) => state.selectedModels.includes(m.n)); sp.textContent = allSel ? '取消全选' : '全选'; });
         break;
       }
       case 'mg-toggle-all': {
-        const p = el.dataset.p; const grp = MODELS.filter((m) => m.p.split(' · ')[0] === p);
+        const p = el.dataset.p; const grp = getModelPool().filter((m) => m.p.split(' · ')[0] === p);
         const allSel = grp.every((m) => state.selectedModels.includes(m.n));
         if (allSel) grp.forEach((m) => { const i = state.selectedModels.indexOf(m.n); if (i >= 0) state.selectedModels.splice(i, 1); });
         else grp.forEach((m) => { if (!state.selectedModels.includes(m.n)) state.selectedModels.push(m.n); });
         openModelPicker(); break;
       }
-      case 'model-confirm': closeModal(); render(); break;
+      case 'model-confirm': {
+        const selectedNames = [...state.selectedModels];
+        // 持久化到 localStorage（跨会话复用）
+        if (selectedNames.length === 0) {
+          try { localStorage.removeItem(MODEL_SELECTION_KEY); } catch { /* ignore */ }
+          autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
+          toast('未选择模型，已回退默认策略', 'warn');
+        } else {
+          saveModelSelection(selectedNames);
+        }
+        // 持久化到当前选中会话
+        const curS = state.sessions[state.sel];
+        if (curS && selectedNames.length) curS.model = selectedNames[0];
+        if (curS) curS.models = selectedNames;
+        closeModal(); render(); break;
+      }
       case 'model-clear': state.selectedModels = []; openModelPicker(); break;
 
       /* 插件 */
@@ -1138,9 +1867,76 @@
 
       /* 设置 */
       case 'model-test': { el.disabled = true; el.textContent = '测试中…'; setTimeout(() => { el.disabled = false; el.textContent = '测试'; toast(`${el.dataset.n} 连通正常`, 'ok'); }, 800); break; }
+      case 'model-edit-provider': {
+        const p = (state.modelProviders || []).find(x => x.id === el.dataset.id);
+        if (!p) break;
+        state.mpEditing = { id: p.id };
+        render();
+        $('#mp-type').value = p.type || 'ollama';
+        $('#mp-name').value = p.name;
+        $('#mp-url').value = p.baseUrl;
+        $('#mp-fullurl').checked = true;
+        $('#mp-mode').value = p.apiMode || 'chat';
+        $('#mp-key').value = '';
+        $('#mp-models').value = (p.models || []).join(', ');
+        updateProtocolRow();
+        $('#mp-name').focus();
+        break;
+      }
+      case 'model-del-provider': {
+        state.modelProviders = (state.modelProviders || []).filter(x => x.id !== el.dataset.id);
+        const r = await bridge.saveModelConfig({ providers: state.modelProviders, defaultProvider: state.defaultProvider });
+        if (r && r.ok) {
+          try { const mc = await bridge.getModelConfig(); if (mc && mc.providers) dynamicModels = mc.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' · ' + p.type, k: '(本地)', state: '已配' }))); } catch { dynamicModels = []; }
+          toast('提供商已删除', 'warn'); renderModelProviders();
+        } else { toast('删除失败', 'danger'); }
+        break;
+      }
+      case 'model-cancel-edit': { state.mpEditing = null; render(); break; }
+      case 'model-add-provider': {
+        const type = $('#mp-type')?.value || 'ollama';
+        const name = $('#mp-name')?.value?.trim();
+        let url = $('#mp-url')?.value?.trim();
+        const full = ($('#mp-fullurl')?.checked);
+        const key = $('#mp-key')?.value?.trim();
+        const modelsStr = $('#mp-models')?.value?.trim();
+        const apiMode = type === 'openai-compatible' ? ($('#mp-mode')?.value || 'chat') : 'ollama';
+        if (!name || !url) { toast('请填写名称和 Base URL', 'warn'); break; }
+        if (!full) {
+          const proto = url.startsWith('http://') ? 'http://' : url.startsWith('https://') ? 'https://' : 'http://';
+          url = proto + url;
+        }
+        const models = modelsStr ? modelsStr.split(',').map(s => s.trim()).filter(Boolean) : ['default'];
+        const isEdit = !!state.mpEditing;
+        const providers = [...(state.modelProviders || [])];
+        if (isEdit) {
+          const idx = providers.findIndex(p => p.id === state.mpEditing.id);
+          const provider = { id: state.mpEditing.id, name, type, apiMode, baseUrl: url, models, apiKey: key };
+          if (idx >= 0) providers[idx] = provider;
+          else providers.push(provider);
+          state.mpEditing = null;
+        } else {
+          const id = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+          providers.push({ id, name, type, apiMode, baseUrl: url, models, apiKey: key });
+        }
+        const r2 = await bridge.saveModelConfig({ providers, defaultProvider: type === 'ollama' ? providers[providers.length - 1]?.id : (state.defaultProvider || providers[0]?.id) });
+        if (r2 && r2.ok) {
+          state.modelProviders = providers;
+          try { const mc2 = await bridge.getModelConfig(); if (mc2 && mc2.providers) dynamicModels = mc2.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' · ' + p.type, k: key ? 'sk-••••••••' : '(本地)', state: '已配' }))); } catch { dynamicModels = []; }
+          toast(isEdit ? `提供商「${name}」已更新` : `提供商「${name}」已添加`, 'ok');
+          if (!isEdit) { $('#mp-name').value = ''; $('#mp-url').value = ''; $('#mp-key').value = ''; $('#mp-models').value = ''; }
+          renderModelProviders();
+        } else { toast(`保存失败：${(r2 && r2.reason) || ''}`, 'danger'); }
+        break;
+      }
       case 'todo': toast('该操作在真实版本中打开对应面板'); break;
 
       /* T-P6-3 数据快照 + 更新检查 */
+      case 'open-project-dir': {
+        const r = await bridge.openProjectDir();
+        toast(r && r.ok ? '已打开项目目录' : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
+        break;
+      }
       case 'snapshot-data': { const r = await bridge.snapshotData(); toast(r && r.ok ? `数据快照已生成：${r.dir}` : `快照失败：${(r && r.reason) || ''}`, r && r.ok ? 'ok' : 'danger'); break; }
       case 'check-updates': {
         toast('正在先快照数据目录，然后检查更新…', 'ok');
@@ -1178,13 +1974,17 @@
     }
   });
 
+  let outboundTimer = null;
   async function updateOutboundWarn(text) {
     const el = $('#outboundWarn'); if (!el) return;
-    try {
-      const w = await Promise.resolve(bridge.withhold(text || ''));
-      if (w && w.needsConfirm) { el.hidden = false; el.textContent = w.warning || '⚠ 此操作不可撤销：发送前需二次确认'; }
-      else { el.hidden = true; el.textContent = ''; }
-    } catch { el.hidden = true; }
+    clearTimeout(outboundTimer);
+    outboundTimer = setTimeout(async () => {
+      try {
+        const w = await Promise.resolve(bridge.withhold(text || ''));
+        if (w && w.needsConfirm) { el.hidden = false; el.textContent = w.warning || '⚠ 此操作不可撤销：发送前需二次确认'; }
+        else { el.hidden = true; el.textContent = ''; }
+      } catch { el.hidden = true; }
+    }, 300);
   }
 
   document.body.addEventListener('input', (e) => {
@@ -1198,73 +1998,84 @@
       if (tl) tl.textContent = labels[v];
     }
   });
+  document.body.addEventListener('change', (e) => {
+    if (e.target.id === 'mp-type') updateProtocolRow();
+    if (e.target.id === 'default-model-pick' && e.target.value !== state.defaultModel) {
+      state.defaultModel = e.target.value;
+      autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
+      render();
+      // 异步持久化
+      bridge.saveModelConfig({ providers: state.modelProviders, defaultProvider: state.defaultProvider, defaultModel: state.defaultModel }).catch(() => {});
+    }
+  });
 
   /* ---------- 启动 ---------- */
   async function init() {
+    console.log('[init] starting...', 'sessions:', Object.keys(state.sessions).length, 'projects:', state.projects.length);
+
+    // 立即渲染空壳（用户先看到界面，不等数据）
+    render();
+
+    // 第一步：加载会话（决定走 wizard 还是主界面）
     try {
       const remote = await bridge.loadSessions();
+      console.log('[init] loaded sessions:', remote.length);
       if (remote && remote.length) {
         state.sessions = {};
         remote.forEach((s) => { state.sessions[s.id] = s; });
-        // 重建 projects.sessions 引用
         state.projects.forEach((p) => { p.sessions = remote.filter((s) => s.pid === p.id).map((s) => s.id); });
         if (!state.sessions[state.sel]) state.sel = remote[0].id;
       }
-    } catch (err) { /* 回落种子数据 */ }
-    // 授权初始化（T-P3-2）：拉取真实模式/分级/审计，并订阅审批弹窗请求。
-    try {
-      const mode = await bridge.getAuthMode();
-      if (mode && mode.mode) state.authMode = mode.mode;
-    } catch { /* 回落默认 default */ }
-    try {
-      const levels = await bridge.getAuthLevels();
-      if (levels && levels.length) state.authLevels = levels;
-    } catch { /* 分级留空，UI 显示加载中 */ }
-    try {
-      const audit = await bridge.getAuthAudit();
-      if (audit) state.authAudit = audit;
-    } catch { /* 审计留空 */ }
-    // 订阅主进程转发的 dsh approval/request（L3/L4 操作弹窗，fail-closed）。
+      console.log('[init] state.sel:', state.sel, 'total sessions:', Object.keys(state.sessions).length);
+    } catch (err) { console.error('[init] error:', err); }
+
+    // 第二步：并行加载所有元数据（互不依赖，同时发起）
+    const results = await Promise.allSettled([
+      // 授权
+      bridge.getAuthMode().then(r => { if (r?.mode) state.authMode = r.mode; }).catch(() => {}),
+      bridge.getAuthLevels().then(r => { if (Array.isArray(r) && r.length) state.authLevels = r; }).catch(() => {}),
+      bridge.getAuthAudit().then(r => { if (r) state.authAudit = r; }).catch(() => {}),
+      // 提示词库
+      bridge.listPrompts().then(r => { if (Array.isArray(r)) state.promptDocs = r; }).catch(() => {}),
+      bridge.mergePrompts('main').then(r => { if (r?.conflicts) state.promptConflicts = r.conflicts; }).catch(() => {}),
+      // 记忆 + 补偿 + 自进化
+      bridge.getMemoryStats().then(r => { if (r) state.memoryStats = r; }).catch(() => {}),
+      bridge.getCompensationAudit().then(r => { if (Array.isArray(r)) state.compAudit = r; }).catch(() => {}),
+      bridge.listTempPlugins().then(r => { if (Array.isArray(r)) state.tempPlugins = r; }).catch(() => {}),
+      // 模型管理
+      bridge.getModelConfig().then(async (mc) => {
+        if (mc && mc.providers && mc.providers.length) {
+          state.modelProviders = mc.providers;
+          dynamicModels = mc.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' \u00b7 ' + p.type, k: '(本地)', state: '\u5df2\u914d' })));
+          if (mc.defaultProvider) state.defaultProvider = mc.defaultProvider;
+          state.defaultModel = mc.defaultModel;
+          autoSelectModels(mc.providers, mc.defaultProvider, mc.defaultModel);
+        } else { dynamicModels = []; state.selectedModels = []; }
+      }).catch(() => { dynamicModels = []; state.selectedModels = []; }),
+      // 观雅集
+      bridge.guanjiTokenStatus().then(r => { state.guanjiTokenSet = !!(r && r.configured); }).catch(() => {}),
+      bridge.guanjiList().then(r => { if (Array.isArray(r) && r.length) state.guanjiSkills = r; }).catch(() => {}),
+      // Hub
+      bridge.hubStatus().then(r => { if (r) state.hubStatus = r; }).catch(() => {}),
+    ]);
+
+    // 订阅审批弹窗
     if (bridge.onAuthRequest) {
       bridge.onAuthRequest((req) => { showApprovalModal(req); });
     }
-    // 提示词库初始化（T-P4-3）：拉取真实提示词列表 + 合并冲突。
-    try {
-      const list = await bridge.listPrompts();
-      if (Array.isArray(list)) state.promptDocs = list;
-    } catch { /* 占位环境保留空列表 */ }
-    try {
-      const merged = await bridge.mergePrompts('main');
-      if (merged && Array.isArray(merged.conflicts)) state.promptConflicts = merged.conflicts;
-    } catch { /* 冲突留空 */ }
-    // 记忆统计初始化（T-P4-1/2）：上下文占用 / 转储数 / 召回命中（占位环境回落静态值）。
-    try {
-      const ms = await bridge.getMemoryStats();
-      if (ms) state.memoryStats = ms;
-    } catch { /* 保留静态占位 */ }
-    // 补偿层审计初始化（T-P5-1）：拉取补偿审计（占位环境回落空）。
-    try {
-      const ca = await bridge.getCompensationAudit();
-      if (Array.isArray(ca)) state.compAudit = ca;
-    } catch { /* 审计留空 */ }
-    // 自进化临时插件初始化（T-P5-2）：拉取当前驻内存临时插件（重启即失）。
-    try {
-      const tp = await bridge.listTempPlugins();
-      if (Array.isArray(tp)) state.tempPlugins = tp;
-    } catch { /* 留空 */ }
-    // T-P6-1 观雅集：拉取 TOKEN 状态 + 真实技能列表（无 token 回落静态样本）。
-    try {
-      const ts = await bridge.guanjiTokenStatus();
-      state.guanjiTokenSet = !!(ts && ts.configured);
-      const gl = await bridge.guanjiList();
-      if (Array.isArray(gl) && gl.length) state.guanjiSkills = gl;
-    } catch { /* 保留静态样本 */ }
-    // T-P6-2 OrchClaw Hub：拉取配对状态。
-    try {
-      const hs = await bridge.hubStatus();
-      if (hs) state.hubStatus = hs;
-    } catch { /* 未配对 */ }
-    render(); renderWizard();
+
+    console.log('[init] parallel results:', results.map((r, i) => r.status === 'rejected' ? `${i}:FAIL` : `${i}:ok`).join(', '));
+
+    // Final render
+    if (!Object.keys(state.sessions).length) {
+      console.log('[init] showing wizard (no sessions)');
+      $('#wizard').classList.remove('hidden');
+      renderWizard();
+    } else {
+      console.log('[init] rendering...');
+      render();
+    }
+    console.log('[init] done');
   }
   setInterval(() => { const c = $('#clock'); if (c) c.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }, 1000);
   init();

@@ -35,8 +35,18 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -51,5 +61,8 @@
         "repo": "orchdesk"
       }
     ]
+  },
+  "dependencies": {
+    "marked": "^18.0.11"
   }
 }

@@ -2,7 +2,7 @@
 id: orch-cur-001
 title: OrchDesk 当前状态
 status: canonical
-updated: 2026-08-24
+updated: 2026-08-28
 ---
 
 # OrchDesk 当前状态
@@ -159,3 +159,19 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 - **P1–P6 全部代码与配置已就绪**：六阶段（底座/桌面壳/内置插件/安全底座/智能层/补偿自进化/生态发布）的插件、桥接、渲染 UI、打包配置均落地并通过 tsc 编译（EXIT=0）+ app.js 语法检查 + 插件真实逻辑 node 直驱验证（verify-p5 23/23）+ 知识库审计 0 issues。**打包已产出**：electron-builder 成功生成 nsis Setup（`release/OrchDesk Setup 0.0.0.exe`，84MB）+ portable（`release/OrchDesk 0.0.0.exe`）+ `latest.yml` + `win-unpacked/`（asar 结构校验完整）。剩余动作是**运行期验证**（与 P1 同源门控）：① 本 agent 环境 Electron 阻断（BUG-W02 open：binding 未链接 + `ELECTRON_RUN_AS_NODE=1`），GUI 实跑须在**正常 Windows 桌面**直接双击产物 exe 或执行 `pnpm --filter @orchdesk/desktop start`；② 真实模型闭环需在 `main.ts:runAgentTurn` 接入 `dsh ctx.agents.followup` 或本地 Ollama（配置 API Key / `ORCHDESK_MODEL_PROVIDER`）；③ 观雅集真实列表/安装/发布需用户配置 TOKEN + 网络；④ OrchClaw Hub 端到端联调需可达远程 Hub；⑤ 正式发布分发需补 `publish`/`repository` 真实仓库信息后走 GitHub Releases。
 - **本机门控**：本 agent 宿主环境（WorkBuddy CLI）无法启动任何 Electron GUI（BUG-W02 open，2026-08-24 早间「误用 node」结案已推翻）；打包/联调/发布实跑须在正常 Windows 桌面 + 网络/远程环境完成。代码正确性已通过 tsc 编译（EXIT=0）+ app.js 语法检查 + verify-p5（真实插件逻辑）+ asar 结构校验 + 知识库 audit 0 issues。
 - 铁律：每个 Phase 端到端可用，不重演 OrchStar「后端先行、UI 荒废」。P6 为路线图收口阶段，生态（观雅集/Hub）与发布（electron-builder/更新前快照）均按 PLAN 落地、不任务漂移。
+
+## UI/UX 迭代（2026-08-28）
+
+| 事项 | 证据 |
+|---|---|
+| **启动并行化** | `init()` 从 14 个串行 IPC 改为 `Promise.allSettled` 并行；首屏 `render()` 先渲染空壳，后台并行加载会话/授权/提示词/记忆/补偿/模型/观雅集/Hub 等元数据 |
+| **欢迎页智能推荐** | `getSmartRecommendations()`：无历史→新手引导（创建项目/闲时任务/浏览技能/项目分析）；有历史→扫描近 7 天消息主题信号（报错/文档/重构/数据/PPT）+ 技能使用频率 TOP1 + 空闲检测，动态生成 4 个快捷按钮 |
+| **动态时段问候** | `getGreeting()` 扩展：早上好/上午好/中午好/下午好/傍晚好/晚上好/夜深了 +「一起来做点什么呢？」 |
+| **布局调整** | `.home-screen` `justify-content:center`（垂直居中）；`.composer` 去底部背景和 border-top；`.home-greeting` 字号缩小到 20px/600 |
+| **Markdown 渲染** | 集成 `marked.js`（MIT, UMD）替换手写正则渲染器；新增 `.md-body` 样式（代码块/列表/引用/链接）；`:nth-child` 修复列表间隔过宽（`ul margin:2px 0` / `li margin:0 0 2px`） |
+| **模型管理 UI** | 设置页「默认模型」下拉（来自所有已配置提供商的模型列表）；切换后 `autoSelectModels` 重算 + 异步持久化到 `models.json` |
+| **下拉浮窗层级** | `.composer-more-dropdown` z-index 50→200；`.proj-dropdown` z-index 50→200 + `pointer-events:auto/none` 过渡 |
+| **项目选择器修复** | 阻止 `.proj-dropdown` 内点击冒泡到 `proj-select-toggle` handler |
+| **电灯白屏防护** | `BrowserWindow` 加 `backgroundColor: '#1E1E1E'` |
+| **Emoji → SVG 全覆盖** | 全部 emoji 图标已迁移到 `ic()` SVG 映射（含 ctx-empty 💬→clipboard） |
+| **E2E 测试** | Playwright 脚本 26/29 PASS（3 项为 mock bridge 消息收发限制，预期内） |
