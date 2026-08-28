@@ -2075,6 +2075,15 @@
       console.log('[init] rendering...');
       render();
     }
+    // 动态状态栏：显示 OrchDesk Core + 当前 commit
+    try {
+      const el = $('#statusText');
+      if (el) {
+        const resp = await fetch('https://api.github.com/repos/ra1nzzz/orchdesk/commits/main', { signal: AbortSignal.timeout?.(3000) });
+        if (resp.ok) { const d = await resp.json(); el.textContent = 'OrchDesk Core · ' + d.sha.slice(0, 7); }
+        else el.textContent = 'OrchDesk Core · local';
+      }
+    } catch { const el = $('#statusText'); if (el) el.textContent = 'OrchDesk Core · local'; }
     console.log('[init] done');
   }
   setInterval(() => { const c = $('#clock'); if (c) c.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }, 1000);

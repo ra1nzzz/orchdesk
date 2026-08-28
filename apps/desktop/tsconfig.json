@@ -3,7 +3,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "dist",
-    "types": ["node", "electron"],
+    "types": ["electron"],
     "module": "commonjs",
     "moduleResolution": "node",
     "target": "ES2022"
