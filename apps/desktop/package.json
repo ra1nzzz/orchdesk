@@ -45,11 +45,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -67,6 +71,7 @@
     ]
   },
   "dependencies": {
-    "marked": "^18.0.11"
+    "marked": "^18.0.11",
+    "png-to-ico": "^3.0.2"
   }
 }
