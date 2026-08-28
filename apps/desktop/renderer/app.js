@@ -1103,7 +1103,16 @@
     const c = $('#composer'); if (!c) return;
     const text = c.value.trim();
     if (!text) { toast('输入为空', 'warn'); return; }
-    if (state.selectedModels.length === 0) { toast('请先选择至少一个模型', 'warn'); return; }
+    if (state.selectedModels.length === 0) {
+      // 配置可能在「设置 → 模型」刚更新过，或上一次 getModelConfig 请求失败，
+      // 发送前再自动选择一次；仍为空才拦截（并给出可达的路径，而非死胡同）。
+      autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
+      if (state.selectedModels.length === 0) {
+        toast('未检测到可用模型 · 已跳转到「设置 → 模型管理」', 'warn');
+        state.page = 'settings'; state.settingsSection = 'model'; render();
+        return;
+      }
+    }
     const s = state.sessions[state.sel]; if (!s) return;
     const t = nowTime();
     s.msgs.push({ r: 'user', t, x: text }); touch(s);
@@ -2061,8 +2070,13 @@
           state.defaultModel = mc.defaultModel;
           state.maxToolIterations = mc.maxToolIterations || 200;
           autoSelectModels(mc.providers, mc.defaultProvider, mc.defaultModel);
-        } else { dynamicModels = []; state.selectedModels = []; }
-      }).catch(() => { dynamicModels = []; state.selectedModels = []; }),
+        } else {
+          // BUG-015：桥接可用但无提供商时不要清空选择（可能是瞬时失败），
+          // 交给 autoSelectModels 决定，避免「发送被拦死且无出路」。
+          dynamicModels = [];
+          autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
+        }
+      }).catch(() => { dynamicModels = []; autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel); }),
       // 观雅集
       bridge.guanjiTokenStatus().then(r => { state.guanjiTokenSet = !!(r && r.configured); }).catch(() => {}),
       bridge.guanjiList().then(r => { if (Array.isArray(r) && r.length) state.guanjiSkills = r; }).catch(() => {}),

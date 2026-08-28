@@ -4,6 +4,21 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
+import {
+  ALLOWED_COMMANDS,
+  TOOL_DEFS,
+  type ApiMessage,
+  type ModelReply,
+  type NativeToolCall,
+  type ToolCall,
+  type ToolResult,
+  buildAssistantToolCallMessage,
+  buildSystemPrompt,
+  buildToolResultMessage,
+  extractToolCalls,
+  isKnownTool,
+  normalizeNativeToolCalls,
+} from './agent-runtime';
 
 // ============================================================================
 // OrchDesk 桌面壳主进程（P1）
@@ -27,9 +42,158 @@ const isDev = !app.isPackaged;
 // ---------------------------------------------------------------------------
 let store: Record<string, unknown> = {};
 
+// ---------------------------------------------------------------------------
+// BUG-013：数据目录统一 + 历史数据迁移
+// ----------------------------------------------------------------------------
+// userData 的取值随安装形态漂移（dev / portable / NSIS 各不相同），导致重装后
+// 会话与模型配置「凭空消失」。这里改为解析一个**与安装形态无关的规范化目录**：
+//
+//   1) ORCHDESK_HOME 环境变量（最高优先级，便于调试与多实例隔离）
+//   2) 便携模式：exe 同目录存在 orchdesk-data/ 或 PORTABLE 标记 → 数据随 exe 走
+//   3) 其余（含 NSIS 安装、portable 首次运行、dev）→ %APPDATA%/OrchDesk
+//
+// 由于 NSIS 的 userData 本身就是 %APPDATA%\OrchDesk，第 3 条让 **portable 与
+// NSIS 天然共用同一目录**，重装 / 换安装包类型不再丢数据。
+// 启动时会从所有历史候选路径「按 key 合并」（不覆盖目标侧已有的更新数据）。
+// ---------------------------------------------------------------------------
+
+const DATA_DIR_NAME = 'OrchDesk';
+const DATA_FILES = ['orchdesk-sessions.json', 'models.json'] as const;
+
+/** 检测便携模式数据目录（exe 同目录），未启用返回 null。 */
+function detectPortableDataDir(): string | null {
+  if (!app.isPackaged) return null;
+  try {
+    const exeDir = path.dirname(app.getPath('exe'));
+    const dataDir = path.join(exeDir, 'orchdesk-data');
+    const marker = path.join(exeDir, 'PORTABLE');
+    if (fs.existsSync(dataDir) || fs.existsSync(marker)) return dataDir;
+  } catch { /* exe 路径不可用则视为非便携 */ }
+  return null;
+}
+
+let resolvedDataDir: string | null = null;
+
+function dataDir(): string {
+  if (resolvedDataDir) return resolvedDataDir;
+  const envHome = (process.env.ORCHDESK_HOME || '').trim();
+  let dir: string;
+  if (envHome) {
+    dir = path.resolve(envHome);
+  } else {
+    dir = detectPortableDataDir() || path.join(app.getPath('appData'), DATA_DIR_NAME);
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    console.error('[orchdesk] 数据目录不可用，回退 userData:', (err as Error).message);
+    dir = app.getPath('userData');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch { /* 尽力而为 */ }
+  }
+  resolvedDataDir = dir;
+  console.log(`[orchdesk] 数据目录: ${dir}`);
+  return dir;
+}
+
+/** 所有历史可能的数据目录（用于迁移）。 */
+function legacyDataDirs(): string[] {
+  const out = new Set<string>();
+  const push = (p: string | undefined) => { if (p) out.add(p); };
+  try { push(app.getPath('userData')); } catch { /* ignore */ }
+  try { push(path.join(app.getPath('appData'), DATA_DIR_NAME)); } catch { /* ignore */ }
+  try { push(path.join(app.getPath('appData'), 'orchdesk')); } catch { /* ignore */ }
+  try { push(path.join(app.getPath('userData'), '..')); } catch { /* ignore */ }
+  // portable 历史位置：exe 同目录
+  try { if (app.isPackaged) push(path.join(path.dirname(app.getPath('exe')), 'orchdesk-data')); } catch { /* ignore */ }
+  // dev 历史位置：apps/desktop 与仓库根
+  try { push(path.resolve(__dirname, '..')); } catch { /* ignore */ }
+  try { push(path.resolve(__dirname, '../..')); } catch { /* ignore */ }
+  try { push(path.join(path.resolve(__dirname, '..'), '.orchdesk-home')); } catch { /* ignore */ }
+  return [...out];
+}
+
+function readJson(file: string): unknown | null {
+  try {
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, 'utf-8'));
+  } catch { return null; }
+}
+
+function mergeSessions(targetFile: string, srcData: unknown): number {
+  const src = (srcData && typeof srcData === 'object' ? srcData : {}) as Record<string, Record<string, unknown>>;
+  let merged = 0;
+  const dst = (readJson(targetFile) || {}) as Record<string, Record<string, unknown>>;
+  for (const [id, s] of Object.entries(src)) {
+    if (!s || typeof s !== 'object' || !Array.isArray(s.msgs)) continue;
+    const cur = dst[id];
+    if (!cur) { dst[id] = s; merged++; continue; }
+    // 同 id：保留 updated 较新的一份，并把对方独有的消息并入
+    const curT = String(cur.updated || '');
+    const srcT = String(s.updated || '');
+    const newer = srcT > curT ? s : cur;
+    const older = srcT > curT ? cur : s;
+    const newerMsgs = Array.isArray(newer.msgs) ? newer.msgs : [];
+    const olderMsgs = Array.isArray(older.msgs) ? older.msgs : [];
+    const base = newerMsgs.length >= olderMsgs.length ? newerMsgs : olderMsgs;
+    dst[id] = { ...older, ...newer, msgs: base };
+    merged++;
+  }
+  if (merged) fs.writeFileSync(targetFile, JSON.stringify(dst), 'utf-8');
+  return merged;
+}
+
+function mergeModels(targetFile: string, srcData: unknown): number {
+  const src = (srcData && typeof srcData === 'object' ? srcData : {}) as { providers?: Array<Record<string, unknown>> };
+  const srcProviders = Array.isArray(src.providers) ? src.providers : [];
+  if (!srcProviders.length) return 0;
+  const dst = (readJson(targetFile) || { providers: [] }) as { providers?: Array<Record<string, unknown>>; [k: string]: unknown };
+  const dstProviders = Array.isArray(dst.providers) ? dst.providers : [];
+  let added = 0;
+  for (const p of srcProviders) {
+    if (!p || typeof p !== 'object') continue;
+    const id = String(p.id ?? p.name ?? '');
+    if (!id || dstProviders.some((d) => String(d?.id ?? '') === id)) continue;
+    dstProviders.push(p);
+    added++;
+  }
+  if (added) {
+    dst.providers = dstProviders;
+    fs.writeFileSync(targetFile, JSON.stringify(dst, null, 2), 'utf-8');
+  }
+  return added;
+}
+
+/**
+ * 启动迁移：从所有历史候选目录合并数据到规范化目录。
+ * 只「补齐」不「覆盖」——目标侧已存在的数据永远优先。
+ */
+function migrateLegacyData(): void {
+  const target = dataDir();
+  const sources = legacyDataDirs();
+  for (const src of sources) {
+    if (!src || src === target) continue;
+    for (const f of DATA_FILES) {
+      const srcFile = path.join(src, f);
+      const data = readJson(srcFile);
+      if (data == null) continue;
+      try {
+        if (f === 'orchdesk-sessions.json') {
+          const n = mergeSessions(path.join(target, f), data);
+          if (n) console.log(`[orchdesk] 迁移会话 ${n} 条：${srcFile}`);
+        } else {
+          const n = mergeModels(path.join(target, f), data);
+          if (n) console.log(`[orchdesk] 迁移模型配置 ${n} 个提供商：${srcFile}`);
+        }
+      } catch (err) {
+        console.warn(`[orchdesk] 迁移 ${srcFile} 失败:`, (err as Error).message);
+      }
+    }
+  }
+}
+
 function sessionsFile(): string {
   // 惰性获取：app.getPath 需在 app ready 之后才稳定可用。
-  return path.join(app.getPath('userData'), 'orchdesk-sessions.json');
+  return path.join(dataDir(), 'orchdesk-sessions.json');
 }
 
 function loadStore(): void {
@@ -73,7 +237,7 @@ interface ModelConfig {
   maxToolIterations?: number;
 }
 
-const MODELS_FILE = () => path.join(app.getPath('userData'), 'models.json');
+const MODELS_FILE = () => path.join(dataDir(), 'models.json');
 
 function loadModelConfig(): ModelConfig {
   try {
@@ -116,15 +280,17 @@ function encryptKey(key: string): string {
 }
 
 // ---- 真实模型调用（OpenAI 兼容 + Ollama，支持 function calling）----
+// 返回结构化 ModelReply（content + toolCalls），不再把 tool_calls 编码成
+// `<tool:...>` 文本再由上层正则解码（BUG-014 根因：编码 → 解码往返易断）。
 
-async function callModel(provider: ModelProvider, model: string, messages: Array<{ role: string; content: string }>, toolDefs: Array<{ type: string; function: Record<string, unknown> }> = []): Promise<string> {
+async function callModel(provider: ModelProvider, model: string, messages: ApiMessage[], toolDefs: typeof TOOL_DEFS = []): Promise<ModelReply> {
   if (provider.type === 'ollama') {
     return callOllama(provider, model, messages, toolDefs);
   }
   return callOpenAICompatible(provider, model, messages, toolDefs);
 }
 
-async function callOllama(provider: ModelProvider, model: string, messages: Array<{ role: string; content: string }>, toolDefs: Array<{ type: string; function: Record<string, unknown> }> = []): Promise<string> {
+async function callOllama(provider: ModelProvider, model: string, messages: ApiMessage[], toolDefs: typeof TOOL_DEFS = []): Promise<ModelReply> {
   const url = provider.baseUrl.replace(/\/$/, '') + '/api/chat';
   const body: Record<string, unknown> = { model, messages, stream: false };
   if (toolDefs.length) body.tools = toolDefs;
@@ -135,78 +301,131 @@ async function callOllama(provider: ModelProvider, model: string, messages: Arra
     signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) throw new Error(`Ollama 返回 HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json() as { message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> }; error?: string };
+  const data = await res.json() as {
+    message?: { content?: string; tool_calls?: unknown };
+    error?: string;
+  };
   if (data.error) throw new Error(data.error);
-  // 检测工具调用（Ollama 格式）
-  if (data.message?.tool_calls && data.message.tool_calls.length) {
-    const tc = data.message.tool_calls[0]!;
-    if (tc.function?.name) {
-      return `<tool:${tc.function.name}>${tc.function.arguments || ''}</tool>`;
-    }
-  }
-  return data.message?.content || '(空回复)';
+
+  const toolCalls = normalizeNativeToolCalls(data.message?.tool_calls);
+  return {
+    content: data.message?.content || '',
+    toolCalls,
+    source: toolCalls.length ? 'native' : 'none',
+  };
 }
 
-async function callOpenAICompatible(provider: ModelProvider, model: string, messages: Array<{ role: string; content: string }>, toolDefs: Array<{ type: string; function: Record<string, unknown> }> = []): Promise<string> {
+/** 构造请求 URL / body（chat / responses / completions 三种 API 形态）。 */
+function buildRequest(base: string, mode: 'chat' | 'responses' | 'completions', model: string, messages: ApiMessage[]): { url: string; body: Record<string, unknown> } {
+  const isFullEndpoint = /\/chat\/completions|\/responses|\/completions/.test(base);
+  const clean = base.replace(/\/v1\/?$/, '');
+
+  if (mode === 'responses') {
+    const input = messages
+      .filter(m => m.role === 'user')
+      .map(m => m.content || '')
+      .join('\n') || messages.at(-1)?.content || '';
+    return {
+      url: isFullEndpoint ? base : clean + '/v1/responses',
+      body: { model, input },
+    };
+  }
+  if (mode === 'completions') {
+    return {
+      url: isFullEndpoint ? base : clean + '/v1/completions',
+      body: { model, prompt: messages.map(m => `${m.role}: ${m.content || ''}`).join('\n'), max_tokens: 1024 },
+    };
+  }
+  return {
+    url: isFullEndpoint ? base : clean + '/v1/chat/completions',
+    body: { model, messages, stream: false },
+  };
+}
+
+/** 从 OpenAI chat 响应中取出正文。 */
+function pickOpenAIContent(data: Record<string, unknown>, mode: 'chat' | 'responses' | 'completions'): string {
+  if (mode === 'responses') {
+    const direct = (data as { output_text?: string }).output_text;
+    if (typeof direct === 'string' && direct) return direct;
+    const out = (data as { output?: Array<{ type?: string; content?: Array<{ text?: string }> }> }).output;
+    if (Array.isArray(out)) {
+      const parts: string[] = [];
+      for (const item of out) {
+        if (item?.type === 'message' && Array.isArray(item.content)) {
+          for (const c of item.content) if (typeof c?.text === 'string') parts.push(c.text);
+        }
+      }
+      if (parts.length) return parts.join('\n');
+    }
+    return '';
+  }
+  if (mode === 'completions') {
+    return ((data as { choices?: Array<{ text?: string }> }).choices?.[0]?.text || '');
+  }
+  return ((data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content || '');
+}
+
+async function callOpenAICompatible(provider: ModelProvider, model: string, messages: ApiMessage[], toolDefs: typeof TOOL_DEFS = []): Promise<ModelReply> {
   const apiKey = decryptKey(provider.apiKeyEnc);
   if (!apiKey) throw new Error(`提供商「${provider.name}」未配置 API Key，请先在设置页配置`);
   const mode = provider.apiMode || 'chat';
   const base = provider.baseUrl.replace(/\/+$/, '');
-  let url: string, body: Record<string, unknown>;
 
-  if (base.includes('/chat/completions') || base.includes('/responses') || base.includes('/completions')) {
-    url = base;
-    if (mode === 'responses') {
-      body = { model, input: messages.map(m => ({ role: m.role, content: m.content })).filter(m => m.role === 'user').map(m => m.content).join('\n') || messages.at(-1)?.content || '' };
-    } else if (mode === 'completions') {
-      body = { model, prompt: messages.map(m => m.content).join('\n'), max_tokens: 1024 };
-    } else {
-      body = { model, messages, stream: false };
+  // 只有 chat 形态支持 OpenAI function calling；responses/completions 不发 tools。
+  const canUseTools = mode === 'chat' && toolDefs.length > 0;
+  // 逐级降级：完整 → 不带 tool_choice → 完全不带 tools（部分网关不支持会 400/404/422）。
+  const attempts: Array<{ tools: boolean; toolChoice: boolean }> = canUseTools
+    ? [{ tools: true, toolChoice: true }, { tools: true, toolChoice: false }, { tools: false, toolChoice: false }]
+    : [{ tools: false, toolChoice: false }];
+
+  let lastErr = '';
+  for (const att of attempts) {
+    const { url, body } = buildRequest(base, mode, model, messages);
+    if (att.tools) {
+      body.tools = toolDefs;
+      if (att.toolChoice) body.tool_choice = 'auto';
     }
-  } else {
-    const clean = base.replace(/\/v1\/?$/, '');
-    if (mode === 'responses') {
-      url = clean + '/v1/responses';
-      body = { model, input: messages.map(m => ({ role: m.role, content: m.content })).filter(m => m.role === 'user').map(m => m.content).join('\n') || messages.at(-1)?.content || '' };
-    } else if (mode === 'completions') {
-      url = clean + '/v1/completions';
-      body = { model, prompt: messages.map(m => m.content).join('\n'), max_tokens: 1024 };
-    } else {
-      url = clean + '/v1/chat/completions';
-      body = { model, messages, stream: false };
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (err) {
+      throw new Error(`请求模型接口失败：${(err as Error).message}`);
     }
-  }
 
-  if (toolDefs.length) {
-    body.tools = toolDefs;
-    body.tool_choice = 'auto';
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`模型 API 返回 HTTP ${res.status}: ${txt.slice(0, 200)}`);
-  }
-  const data = await res.json() as Record<string, unknown>;
-  if ((data as { error?: { message?: string } }).error?.message) throw new Error((data as { error?: { message?: string } }).error!.message!);
-
-  // 检测 OpenAI 格式工具调用
-  const choice = (data as { choices?: Array<{ message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> } }> }).choices?.[0];
-  if (choice?.message?.tool_calls && choice.message.tool_calls.length) {
-    const tc = choice.message.tool_calls[0]!;
-    if (tc.function?.name) {
-      return `<tool:${tc.function.name}>${tc.function.arguments || ''}</tool>`;
+    if (!res.ok) {
+      const txt = await res.text();
+      lastErr = `模型 API 返回 HTTP ${res.status}: ${txt.slice(0, 300)}`;
+      // 工具相关参数被拒绝 → 降级重试；其余错误直接抛出。
+      if (att.tools && [400, 404, 415, 422].includes(res.status)) continue;
+      throw new Error(lastErr);
     }
-  }
 
-  if (mode === 'responses') return ((data as { output_text?: string }).output_text || '');
-  if (mode === 'completions') return ((data as { choices?: Array<{ text?: string }> }).choices?.[0]?.text || '');
-  return ((data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content || '(空回复)');
+    const data = await res.json() as Record<string, unknown>;
+    const errMsg = (data as { error?: { message?: string } }).error?.message;
+    if (errMsg) {
+      lastErr = errMsg;
+      if (att.tools && /tool|function/i.test(errMsg)) continue;
+      throw new Error(errMsg);
+    }
+
+    const choice = (data as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown } }> }).choices?.[0];
+    const toolCalls = normalizeNativeToolCalls(choice?.message?.tool_calls);
+    const content = pickOpenAIContent(data, mode) || choice?.message?.content || '';
+    return {
+      content,
+      toolCalls,
+      source: toolCalls.length ? 'native' : 'none',
+      // 本次是靠「去掉 tools」才成功的 → 告知上层别再下发工具定义。
+      toolsRejected: canUseTools && !att.tools ? true : undefined,
+    };
+  }
+  throw new Error(lastErr || '模型调用失败（未知原因）');
 }
 
 /** 时间戳 helper */
@@ -224,32 +443,19 @@ function nowTime(): string { return new Date().toLocaleTimeString('zh-CN', { hou
 
 // --- 工具执行引擎（Agent Runtime 核心） ---
 
-interface ToolCall {
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-interface ToolResult {
-  name: string;
-  result: string;
-  error?: string;
-}
+// --- 工具执行引擎（Agent Runtime 核心）---
+// 类型（ToolCall / ToolResult / ApiMessage）与工具定义（TOOL_DEFS / ALLOWED_COMMANDS）
+// 统一在 agent-runtime.ts 中定义，便于在 node 下直接单测。
 
 /** 安全沙箱：限制可访问的目录 */
 function isPathAllowed(p: string): boolean {
   const resolved = path.resolve(p);
-  const allowed = [app.getPath('home'), app.getPath('userData'), app.getPath('temp'), process.cwd()];
-  return allowed.some(root => resolved === root || resolved.startsWith(root + path.sep));
+  const roots = [app.getPath('home'), app.getPath('userData'), app.getPath('temp'), dataDir(), process.cwd()];
+  return roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
 }
 
-/** 允许执行的命令白名单 */
-const ALLOWED_COMMANDS = new Set([
-  'dir', 'ls', 'cat', 'type', 'head', 'tail', 'find', 'where', 'grep',
-  'echo', 'pwd', 'cd', 'mkdir', 'rmdir', 'copy', 'xcopy', 'move',
-  'git', 'npm', 'pnpm', 'node', 'python', 'python3', 'pip',
-  'ping', 'ipconfig', 'netstat', 'tasklist', 'curl', 'wget',
-  'notepad', 'code', 'cmd', 'powershell', 'pwsh',
-]);
+/** 允许执行的命令白名单（集合形式，O(1) 判定）。 */
+const ALLOWED_COMMAND_SET = new Set(ALLOWED_COMMANDS);
 
 async function executeTool(tool: ToolCall): Promise<ToolResult> {
   const { name, arguments: args } = tool;
@@ -280,8 +486,8 @@ async function executeTool(tool: ToolCall): Promise<ToolResult> {
       case 'shell_command': {
         const cmd = String(args.command || '');
         const cmdName = (cmd.split(/[\s/\\]+/)[0] || '').toLowerCase();
-        if (!ALLOWED_COMMANDS.has(cmdName)) {
-          return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${[...ALLOWED_COMMANDS].slice(0, 20).join(', ')}...` };
+        if (!ALLOWED_COMMAND_SET.has(cmdName)) {
+          return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${ALLOWED_COMMANDS.slice(0, 20).join(', ')}...` };
         }
         const { execSync } = await import('node:child_process');
         const output = execSync(cmd, { cwd: app.getPath('home'), encoding: 'utf-8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -302,53 +508,18 @@ async function executeTool(tool: ToolCall): Promise<ToolResult> {
   }
 }
 
-/** OpenAI 兼容的工具定义 */
-const TOOL_DEFS: Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }> = [
-  {
-    type: 'function',
-    function: {
-      name: 'file_read',
-      description: '读取本地文件内容（文本文件，最大 50KB）',
-      parameters: { type: 'object', properties: { path: { type: 'string', description: '文件路径（绝对或相对）' } }, required: ['path'] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_write',
-      description: '写入文本文件（自动创建目录）',
-      parameters: { type: 'object', properties: { path: { type: 'string', description: '文件路径' }, content: { type: 'string', description: '文件内容' } }, required: ['path', 'content'] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_list',
-      description: '列出目录内容',
-      parameters: { type: 'object', properties: { path: { type: 'string', description: '目录路径，默认当前目录' } }, required: [] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'shell_command',
-      description: `执行白名单命令（${[...ALLOWED_COMMANDS].slice(0, 15).join(', ')} 等）`,
-      parameters: { type: 'object', properties: { command: { type: 'string', description: '要执行的命令' } }, required: ['command'] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'web_fetch',
-      description: '抓取网页内容（最大 30KB）',
-      parameters: { type: 'object', properties: { url: { type: 'string', description: 'HTTP(S) URL' } }, required: ['url'] },
-    },
-  },
-];
 
 // --- Agent Runtime：模型回合 + 工具调用循环 ---
 
-let toolCallCounter = 0;
+/** 把一次工具执行同步给渲染层（步骤条 + 通知）。 */
+function notifyToolStep(sessionId: string, name: string, ph: 'running' | 'done' | 'error', result?: string): void {
+  try {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('orchdesk:tool-step', { sessionId, name, ph, result: result || '' });
+    }
+  } catch { /* 忽略：窗口可能已关闭 */ }
+}
 
 async function runAgentTurn(sessionId: string, text: string, opts: { models?: string[]; thinkLevel?: string }): Promise<{ text: string; intent: string }> {
   const modelCfg = loadModelConfig();
@@ -360,83 +531,88 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
   const modelPick = availableModels.includes(requested || '') ? requested : (availableModels[0] || modelCfg.defaultModel);
   const model = modelPick || 'qwen3:14b';
 
+  // 会话不存在时先建壳，避免「渲染层尚未持久化会话」导致本轮消息丢失。
+  if (!store[sessionId]) {
+    store[sessionId] = { id: sessionId, msgs: [], created: new Date().toISOString(), updated: new Date().toISOString() };
+  }
+
+  // 历史：只取 user/assistant 正文（tool 步骤消息是 UI 记录，不回灌模型）。
   const sessionMsgs = (store[sessionId] as { msgs?: Array<{ role?: string; text?: string }> } | undefined)?.msgs || [];
-  const apiMessages: Array<{ role: string; content: string }> = sessionMsgs.slice(-20).filter(m => m.role && m.text).map(m => ({ role: m.role as string, content: m.text as string }));
-  // 注入系统提示（工具调用格式约定）
-  apiMessages.unshift({ role: 'system', content: '你可以使用工具来完成任务。调用工具时请严格使用以下格式：\n<tool:工具名>参数（JSON格式）</tool>\n\n可用工具：\n- file_read: 读取本地文件（参数：{"path": "文件路径"}）\n- file_write: 写入文件（参数：{"path": "路径", "content": "内容"}）\n- file_list: 列出目录（参数：{"path": "目录路径"}）\n- shell_command: 执行命令（参数：{"command": "命令"}）\n- web_fetch: 抓取网页（参数：{"url": "URL"}）\n\n示例：<tool:file_list>{"path":"."}</tool>\n一次可以调用多个工具。普通回复不使用工具标签。' });
+  const apiMessages: ApiMessage[] = sessionMsgs
+    .filter(m => (m.role === 'user' || m.role === 'assistant') && m.text)
+    .slice(-20)
+    .map(m => ({ role: m.role as 'user' | 'assistant', content: m.text as string }));
+  apiMessages.unshift({ role: 'system', content: buildSystemPrompt() });
   apiMessages.push({ role: 'user', content: text });
 
   const toolSteps: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }> = [];
-  const toolCallIdSet = new Set<string>();
   let finalReply = '';
   let stepCount = 0;
-  const MAX_ITERATIONS = modelCfg.maxToolIterations || 200;
+  const MAX_ITERATIONS = Math.max(1, Math.min(200, modelCfg.maxToolIterations || 20));
+  // 网关明确拒绝工具协议 → 停止下发 tools，转「文本兜底解析」，
+  // 避免每一轮都重复三次降级重试。
+  let providerRejectsTools = false;
 
   // 工具调用循环
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-    let reply: string;
+    const wantsTools = !providerRejectsTools;
+    let reply: ModelReply;
     try {
-      reply = await callModel(provider, model, apiMessages, TOOL_DEFS);
+      reply = await callModel(provider, model, apiMessages, wantsTools ? TOOL_DEFS : []);
     } catch (err) {
       return { text: `（模型调用失败）${(err as Error).message}`, intent: 'CONFIRM' };
     }
-
-    // 解析工具调用（匹配 <tool:name>args</tool> 格式）
-    const toolCallRegex = /<tool:(\w+)>([\s\S]*?)<\/tool>/g;
-    let match;
-    const toolCalls: ToolCall[] = [];
-    const remainingParts: string[] = [];
-    let lastIndex = 0;
-
-    while ((match = toolCallRegex.exec(reply)) !== null) {
-      if (match.index > lastIndex) remainingParts.push(reply.slice(lastIndex, match.index));
-      toolCalls.push({ name: match[1]!, arguments: { input: (match[2] || '').trim() } });
-      lastIndex = match.index + match[0].length;
+    if (reply.toolsRejected) {
+      providerRejectsTools = true;
+      console.warn(`[orchdesk] 提供商「${provider.name}」不接受工具定义，本轮起转为文本兜底解析。`);
     }
-    if (lastIndex < reply.length) remainingParts.push(reply.slice(lastIndex));
 
-    if (toolCalls.length === 0) {
-      finalReply = reply;
+    // ---- 模式 1：原生 function calling（优先）----
+    if (reply.toolCalls.length) {
+      const assistantMsg = buildAssistantToolCallMessage(reply.content, reply.toolCalls as NativeToolCall[]);
+      apiMessages.push(assistantMsg);
+
+      for (const tc of reply.toolCalls) {
+        stepCount++;
+        notifyToolStep(sessionId, tc.name, 'running');
+        const result = await executeTool(tc);
+        toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
+        notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
+        // OpenAI 规范：工具结果用 role='tool' + tool_call_id 回传。
+        apiMessages.push(buildToolResultMessage(tc, result, 'native'));
+      }
+      continue;
+    }
+
+    // ---- 模式 2：文本兜底（模型不支持 native tool_calls）----
+    const parsed = extractToolCalls(reply.content);
+    const usable = parsed.calls.filter(c => isKnownTool(c.name));
+    if (!usable.length) {
+      finalReply = reply.content || '（模型返回空内容）';
       break;
     }
 
-    // 执行工具
-    for (const tc of toolCalls) {
+    apiMessages.push({ role: 'assistant', content: parsed.stripped || `（调用工具：${usable.map(c => c.name).join(', ')}）` });
+    for (const tc of usable) {
       stepCount++;
-      const callId = `tc-${++toolCallCounter}`;
-      toolCallIdSet.add(callId);
-
-      // 添加到 UI 步骤列表
-      if (store[sessionId]) {
-        const s = store[sessionId] as Record<string, unknown>;
-        const msgs = (s.msgs as Array<Record<string, unknown>>) || [];
-        msgs.push({ role: 'tool', text: `执行工具 ${tc.name}...`, t: nowTime(), tools: [{ n: tc.name, ph: 'running' as const }] });
-      }
-
+      notifyToolStep(sessionId, tc.name, 'running');
       const result = await executeTool(tc);
       toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
-
-      // 通知渲染层（通过主进程事件）
-      try {
-        const win = BrowserWindow.getAllWindows()[0];
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('orchdesk:tool-step', { sessionId, name: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
-        }
-      } catch { /* 忽略 */ }
-
-      apiMessages.push({ role: 'assistant', content: remainingParts.join('') || `[工具 ${tc.name} 已执行]` });
-      apiMessages.push({ role: 'system', content: `工具 "${tc.name}" 执行结果:\n${result.error || result.result}` });
+      notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
+      // 文本兜底模式下 assistant 消息里没有 tool_calls，
+      // 此时若强行发 role='tool' 会被多数网关判定为非法 → 用 user 角色回传。
+      apiMessages.push(buildToolResultMessage({ name: tc.name }, result, 'text'));
     }
   }
 
-  if (!finalReply) finalReply = '（工具执行完成，但未收到最终回复）';
+  if (!finalReply) finalReply = `（已完成 ${stepCount} 个工具步骤，但模型未给出最终总结）`;
 
   // 持久化
   const s = store[sessionId] as Record<string, unknown> | undefined;
   if (s) {
     const msgs = (s.msgs as Array<Record<string, unknown>>) || [];
-    msgs.push({ role: 'user', text, ts: new Date().toISOString() });
-    msgs.push({ role: 'assistant', text: finalReply, model, ts: new Date().toISOString(), tools: toolSteps, steps: stepCount });
+    msgs.push({ role: 'user', text, t: nowTime(), ts: new Date().toISOString() });
+    msgs.push({ role: 'assistant', text: finalReply, model, t: nowTime(), ts: new Date().toISOString(), tools: toolSteps, steps: stepCount });
     s.msgs = msgs;
     s.updated = new Date().toISOString();
     saveStore();
@@ -697,12 +873,12 @@ ipcMain.handle('orchdesk:hub-result', async (_e, taskId: string) => hubClient.ge
 // ---------------------------------------------------------------------------
 function snapshotData(): { ok: boolean; dir?: string; reason?: string } {
   try {
-    const userData = app.getPath('userData');
+    const root = dataDir();
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const snapDir = path.join(userData, 'snapshots', stamp);
-    fs.mkdirSync(path.dirname(snapDir), { recursive: true });
-    const snapshotsDir = path.join(userData, 'snapshots');
-    fs.cpSync(userData, snapDir, { recursive: true, filter: (src) => !src.startsWith(snapshotsDir + path.sep) });
+    const snapshotsDir = path.join(root, 'snapshots');
+    const snapDir = path.join(snapshotsDir, stamp);
+    fs.mkdirSync(snapDir, { recursive: true });
+    fs.cpSync(root, snapDir, { recursive: true, filter: (src) => src === root || !src.startsWith(snapshotsDir) });
     return { ok: true, dir: snapDir };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
@@ -747,7 +923,7 @@ ipcMain.handle('orchdesk:check-updates', async () => checkForUpdates());
 /** 用系统默认文件管理器打开数据目录（项目目录 = userData）。 */
 ipcMain.handle('orchdesk:open-project-dir', async () => {
   try {
-    await shell.openPath(app.getPath('userData'));
+    await shell.openPath(dataDir());
     return { ok: true };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
@@ -770,6 +946,8 @@ ipcMain.handle('orchdesk:pick-folder', async () => {
 });
 
 app.whenReady().then(() => {
+  // BUG-013：先把历史位置的数据合并进规范化目录，再加载会话。
+  try { migrateLegacyData(); } catch (err) { console.warn('[orchdesk] 数据迁移异常:', (err as Error).message); }
   loadStore();
   createWindow();
   createTray();
