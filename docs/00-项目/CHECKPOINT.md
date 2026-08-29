@@ -9,14 +9,14 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.3.1`（released） / `0.4.0`（pending，已提交 main 未发布） | SemVer，pre-1.0 阶段 |
-| **最新 Commit** | `91ae26b` | test: 插件测试覆盖 2/9 → 9/9，并修复暴露的 3 个真 bug（P2-5） |
+| **当前版本** | `0.4.0`（已打 tag `v0.4.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.3.1` 为上一 Release |
+| **最新 Commit** | `c390f29` | chore: release v0.4.0（含版本守卫） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
-| **最新 Release** | [v0.3.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.3.1) | 含 Setup + portable + latest.yml |
+| **最新 Release** | [v0.4.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.0) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
-| **验证套件** | 308/308 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 35 / agent-loop 14 / model-loop 23 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
+| **验证套件** | 310/310 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 35 / agent-loop 14 / model-loop 25 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
 
 ### 1.1 PRD 完成度（FR 维度，2026-08-29 复盘）
 
@@ -117,16 +117,21 @@ electron-updater → 请求 GitHub Releases /latest.yml
 3. **所有代码变更须使用 conventional commits**，否则版本推断失效
 4. **打 tag 前必须有 CHANGELOG.md 条目**（`pnpm run release` 自动保证）
 5. **更新前必须先快照**（`snapshotData` 在 `checkForUpdates` 内自动执行）
+6. **禁止在同一版本号上重复打包**：`build` / `dist*` 前置 `scripts/check-version.cjs`
+   —— 当 `package.json` 版本与最新 tag 相同时直接阻断，必须走 `version:bump`。
+   唯一例外是 release 流程（传 `--allow-tagged`，且 tag 必须指向当前 HEAD）。
+   本条由机器执行，不依赖自觉（2026-08-30 起因「连续多版都打在 0.3.1 上」而立）
 
 ### 2.7 NPM 脚本一览
 
 | 脚本 | 用途 |
 |------|------|
-| `pnpm run version:bump` | 交互式版本递增（bumpp） |
+| `pnpm run version:bump` | 交互式版本递增（bumpp）；CI/脚本环境用 `npx bumpp minor --yes` |
 | `pnpm run changelog` | 手动重新生成 CHANGELOG.md |
+| `pnpm run check-version` | 版本守卫（同版本号重复打包时阻断） |
 | `pnpm run version:show` | 显示当前版本 + 最新 tag |
 | `pnpm run release` | `changelog` → `version:bump` → `dist` 一条龙 |
-| `pnpm run build` | `tsc` → `electron-builder` |
+| `pnpm run build` | 版本守卫(allow-tagged) → `tsc` → `electron-builder` |
 | `pnpm run dist` | `tsc` → `electron-builder --publish never` |
 
 ---

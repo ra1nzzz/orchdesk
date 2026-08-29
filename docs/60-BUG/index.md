@@ -33,6 +33,8 @@ updated: 2026-08-29
 | BUG-W01 | pnpm 11 在 Git Bash / 沙箱下 safe-delete 失败，install 中止 exit 1，node_modules 未生成；需 `--config.safe-delete=false`。另：WorkBuddy CLI 沙箱对「一次删除 >50 文件」有 bulk-delete 守卫，整树 `rmSync` 会抛 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`——构建脚本须用「原地覆盖 + 逐个清陈旧」（见 `vendor-dsh.cjs` `syncDir`） | 高（阻塞 Windows 构建） | open | P0 / T-P0-1 |
 | BUG-W03 | **宿主环境网络间歇不可用**：代理（`HTTP_PROXY=127.0.0.1:7897`）时断时续，直连 TLS 亦间歇失败；electron-builder 打包在 packaging 阶段下载 electron zip 偶发 `Client network socket disconnected`。**对策已验证**：① 挂 `NODE_OPTIONS=--use-system-ca` 绕开 safe-delete shim（否则 CLI 注入的 shim 会把 electron-builder 的整树 rm 转为 trash 并失败）；② 失败重试（3-6 次，网络间歇性恢复）；③ 被杀进程遗留的 `release/win-unpacked.tmp.lock` 须先清（PowerShell `Remove-Item -Force` 可删，shim 的 trash 删不掉）；④ `@deepseek-ai/*` 不能走 `files`/`node_modules` glob（依赖收集器会忽略），须用 `extraFiles` 放包外（插件 ESM 解析已实测可穿透）。构建脚本整树删除须用「原地覆盖 + 逐个清陈旧」（见 `vendor-dsh.cjs` `syncDir`） | 高（本 agent 环境打包需重试；产物已验证） | open | P6 / T-P6-3 |
 
+| BUG-W04 | **conventional-changelog 在本环境静默空输出**：`npx conventional-changelog -p angular` 退出码 0 但产出 0 字节（apps/desktop 与仓库根、加 `--commit-path` 均如此；Node 22 + 重建历史）。导致 0.4.0 的 CHANGELOG 条目按 Keep a Changelog/SemVer 格式**手工撰写**（内容等价于提交摘要）。后续需排查版本/配置；在此之前发布流程须人工核对 CHANGELOG | 中（发布流程需人工兜底） | open | 版本治理 |
+
 ## 已关闭 BUG（v0.4.0 pending，待发布）
 
 | ID | 描述 | 级别 | 关闭版本 | 归属 |
