@@ -255,6 +255,47 @@ export function getService<T>(name: string): T | null {
   return (value ?? null) as T | null;
 }
 
+// ---------------------------------------------------------------------------
+// 挂点桥接（ADR-0008）
+// ---------------------------------------------------------------------------
+// PLAN T-P1-5 原设想主会话完整走 dsh AgentLoop（ctx.agents.followup 事件驱动）。
+// 工程现实：Electron IPC 是请求-响应模型，而 followup 是 fire-and-forget 的 inbox
+// 驱动（见 dsh runtime-types），全量切换需要同步改造工具映射/模型配置/会话体系。
+// v1 裁决：主回合**手动驱动 dsh 的挂点 waterfall**——intent（意图网关）与 trace
+// （遥测）都挂在 `agent/pre-step` 上，此前主会话绕过 AgentLoop 导致这两个 PRD
+// 亮点在主链路上从未触发。完整 AgentLoop 事件化列入路线图（见 ADR-0008）。
+
+export interface PreStepDecisionLike {
+  kind?: string;
+  reason?: string;
+  messages?: unknown[];
+}
+
+/**
+ * 驱动 `agent/pre-step` waterfall（intent 门控 + trace 观测的必经挂点）。
+ * 运行时未启动或 ctx 无 waterfall 能力 → 返回 null（调用方决定放行策略：
+ * 基础设施缺失 ≠ 风险输入放行，执行侧仍有沙箱白名单/命令白名单兜底）。
+ */
+export async function firePreStep(payload: {
+  sessionId: string;
+  text: string;
+  turn?: number;
+  step?: number;
+}): Promise<PreStepDecisionLike | null> {
+  if (!runtime) return null;
+  const wf = (runtime.ctx as unknown as {
+    waterfall?: (ev: string, p: unknown, base: () => Promise<unknown>) => Promise<PreStepDecisionLike | undefined>;
+  }).waterfall;
+  if (typeof wf !== 'function') return null;
+  const decision = await wf.call(runtime.ctx, 'agent/pre-step', {
+    agent: { session: { id: payload.sessionId }, meta: { id: 'orchdesk-main' } },
+    messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: payload.text }] }],
+    turn: payload.turn ?? 0,
+    step: payload.step ?? 0,
+  }, async () => ({ kind: 'enter', messages: [] }));
+  return decision ?? null;
+}
+
 /** 关闭运行时（应用退出前调用，触发全部插件的逆效应）。 */
 export async function stopRuntime(): Promise<void> {
   if (!runtime) return;

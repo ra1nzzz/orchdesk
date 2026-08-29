@@ -626,6 +626,21 @@ function lastAssistant(sessionId) {
   });
 
   // =========================================================================
+  console.log('== O. 意图网关桥接（agent/pre-step waterfall，ADR-0008）==');
+
+  writeModels({ id: 'p-gate', name: '门控网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  responder = () => chat('不应该被调用', undefined);
+  out = await runAgentTurn(null, 's-o', 'rm -rf /', {});
+
+  await check('O1 破坏性意图被 intent 网关硬拒：不调模型、回复含拦截提示并落盘', () => {
+    assert.strictEqual(calls.length, 0, `破坏性请求不应到达模型，实际调用 ${calls.length} 次`);
+    assert.ok(out.text.includes('意图网关拦截'), '实际: ' + out.text);
+    const a = lastAssistant('s-o');
+    assert.ok(String(a.text).includes('意图网关拦截'), '拦截结果应持久化');
+  });
+
+  // =========================================================================
   const ok = summary();
 
   // 收尾：关服务 + 清临时目录

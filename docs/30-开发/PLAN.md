@@ -78,7 +78,7 @@ updated: 2026-08-24
 
 **目标**：Electron 主进程承载 Cordis ctx，渲染进程经 bridge 访问；跑通「桌面窗口里的一次会话」。UI 按 v0.6 原型落地会话页 4 列布局 + composer 基础。
 
-> **P1 状态（2026-08-18）**：T-P1-1 ~ T-P1-5 代码完成并通过 tsc 编译；渲染工程（`apps/desktop/renderer/`）+ 桥接（`main.ts`/`preload.ts`）+ 会话 CRUD 落盘均就绪；Electron 二进制已下载完成（36.9.5，202MB，exe 可执行、包内 `electron` bin 就位）。剩余为**运行期验证**：① 在有显示器机器 `pnpm --filter @orchdesk/desktop start` 实跑 GUI（先 `tsc` 再 `electron .`）；② T-P1-5 真实模型回复需在 `main.ts:runAgentTurn` 接入 `dsh ctx.agents.followup` / Ollama（API Key 或本地 Ollama），本机 headless 无显示器、无 key，故该项为被门控的 seam。防漂移：3 入口不恢复、思维用 slider 不弹 modal、上下文栏收起用 display:none、OrchClaw Hub 延后、fail-closed 不 fail-open —— 全部已在渲染工程中落实。
+> **P1 状态（2026-08-18）**：T-P1-1 ~ T-P1-5 代码完成并通过 tsc 编译；渲染工程（`apps/desktop/renderer/`）+ 桥接（`main.ts`/`preload.ts`）+ 会话 CRUD 落盘均就绪；Electron 二进制已下载完成（36.9.5，202MB，exe 可执行、包内 `electron` bin 就位）。剩余为**运行期验证**：① 在有显示器机器 `pnpm --filter @orchdesk/desktop start` 实跑 GUI（先 `tsc` 再 `electron .`）；② T-P1-5 真实模型回复需在 `main.ts:runAgentTurn` 接入 `dsh ctx.agents.followup` / Ollama（API Key 或本地 Ollama），本机 headless 无显示器、无 key，故该项为被门控的 seam。**2026-08-30 经 [ADR-0008](../70-决策/ADR-0008-model-loop-dsh-bridge.md) 裁决修订**：followup 与 Electron IPC 请求-响应模型不同构，实际落地为「直连工具循环 + firePreStep 挂点桥接」（intent 门控/trace 遥测在主链路生效），AgentLoop 完整事件化列入路线图。防漂移：3 入口不恢复、思维用 slider 不弹 modal、上下文栏收起用 display:none、OrchClaw Hub 延后、fail-closed 不 fail-open —— 全部已在渲染工程中落实。
 
 ### T-P1-1 · Electron 主进程与 ctx bridge
 

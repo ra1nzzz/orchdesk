@@ -9,18 +9,20 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.5.0`（已打 tag `v0.5.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.4.1` 为上一 Release |
-| **最新 Commit** | `d5923fa` | chore: release v0.5.0（feat: dsh memory 接入对话流 + set_cwd 会话工作目录；chore: verify-kit 共享脚手架） |
+| **当前版本** | `0.6.0`（已打 tag `v0.6.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.5.0` 为上一 Release |
+| **最新 Commit** | `<tag 后回填>` | feat: 意图网关/遥测桥接主链路（ADR-0008，agent/pre-step waterfall）；裁决文档漂移修正 |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
-| **验证套件** | 318/318 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 37 / agent-loop 14 / model-loop 31 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
+| **验证套件** | 319/319 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 37 / agent-loop 14 / model-loop 32 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
 
 > **v0.4.1 关键修复**：StepFun / 部分 OpenAI 兼容网关在 chat 模式下带 `tools` 参数时返回 HTTP 200、content/toolCalls 全空（软拒绝），导致「发消息能响应，要求执行任务则报错」。现 `callOpenAICompatible` 识别软拒绝并逐级降级到不带 tools，成功后把 `provider.id|model` 记入进程级记忆，后续会话直接走 `<tool:>` 文本兜底解析。新增 model-loop M 组 3 项回归测试。
 
 > **v0.5.0 关键交付（dsh memory 真实接入对话流，BUG-019/020）**：① 新工具 `memory_save`——用户告知的长期事实写入 dsh memory 插件 global 域，每轮回召回最近 10 条注入 system prompt（此前「我记住了」全是口头应答）；② 新工具 `set_cwd`——会话级工作目录，shell/file 操作以此为基准，system prompt 声明当前目录（此前命令固定跑在 home，`D:\Code\WxTools` 这类项目全被误判「不是 git 仓库」）；③ 工具 5→7，verify 313→318。同轮落地 ponytail audit 削减项：`scripts/verify-kit.cjs` 共享 electron stub + 计分脚手架（5 份 stub / 10 份样板归一，净减 ~160 行）、`scripts/changelog.mjs` 替换静默空输出的 conventional-changelog 链（BUG-W04 根因推翻：git-raw-commits@5 与 parser@6 分隔符契约断裂）。
+
+> **v0.6.0 关键交付（漂移裁决：ADR-0008 挂点桥接）**：用户质询「用 DSH 作为 agent runtime 是不是 PRD/PLAN 设定」暴露文档漂移——PLAN T-P1-5 写明接入 `ctx.agents.followup`，实际代码直连循环且未做显式裁决；更深危害是 **intent 意图网关与 trace 遥测挂在 `agent/pre-step` 上，该事件只有 dsh AgentLoop 驱动才发，主会话绕过 → 两个 PRD 亮点在主链路是死挂点**。裁决（[ADR-0008](../70-决策/ADR-0008-model-loop-dsh-bridge.md) + conflicts C6）：followup 是 fire-and-forget inbox 驱动、与 Electron IPC 请求-响应不同构，全量切换需重写工具/模型/会话三层映射；v1 落地「挂点桥接」——`dsh-runtime.firePreStep` 每回合驱动 waterfall，intent reject 硬拒不调模型（model-loop O1：`rm -rf /` 被拦、0 次模型调用），trace 观测同挂点生效；AgentLoop 完整事件化列 P7 路线图。PLAN/current-state 漂移表述已同步修正。
 
 ### 1.1 PRD 完成度（FR 维度，2026-08-29 复盘）
 

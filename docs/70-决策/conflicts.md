@@ -69,3 +69,15 @@ Decision: Agent 运行时用 dsh；orchclaw 的会话/任务/工作流/记忆等
 Reason: 与 ADR-0001 一致；openclaw CLI 方案与 dsh 插件模型不兼容
 Follow-up gate: P2 评估 orchclaw 各技能向 Cordis 插件的移植清单
 ```
+
+## C6：主会话模型回合 —— dsh AgentLoop(followup) vs 直连工具循环
+
+```text
+Topic: main.ts:runAgentTurn 是否必须走 dsh ctx.agents.followup（PLAN T-P1-5 原文）
+Source A and claim: PLAN T-P1-5 / current-state 关键事实 7 —— 真实模型回复需接入 dsh ctx.agents.followup / Ollama（已接受计划，优先级 ③/⑤）
+Source B and claim: v0.3.1–v0.5.0 实际代码 —— runAgentTurn 为直连 OpenAI 兼容/Ollama 请求-响应工具循环，AgentLoop 从未驱动主会话；且 intent/trace 挂的 agent/pre-step 事件因此从未在主链路触发（可观察的生产行为，优先级 ①）
+Selected authority: 折中裁决，落 ADR-0008
+Decision: v1 采用「挂点桥接」——主回合手动驱动 agent/pre-step waterfall（firePreStep），intent 门控与 trace 遥测在主链路真实生效；模型调用/工具循环维持直连实现；AgentLoop 完整事件化列入路线图（切换前须先出工具/模型映射 ADR）
+Reason: followup 是 fire-and-forget inbox 驱动，与 Electron IPC 请求-响应模型不同构，全量切换需重写工具/模型/会话三层映射并作废 318 项已验证测试；而漂移的真实危害（intent/trace 死挂点）用桥接即可消除，成本一个函数
+Follow-up gate: P7 路线图评估 AgentLoop 全量切换；用户明确要求完全 dsh 会话托管时提前
+```

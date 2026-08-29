@@ -5,7 +5,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
-import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled } from './dsh-runtime';
+import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep } from './dsh-runtime';
 import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
 import { initLogger, mirrorConsole, log, logModel, logFilePath } from './logger';
 import {
@@ -775,6 +775,22 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
 
   // 工具调用循环
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+    // ---- dsh 挂点桥接（ADR-0008）：用户意图必经 agent/pre-step waterfall ----
+    // intent 意图网关（F1-F4 规则漏斗 → reject 硬拒）与 trace 遥测都在该事件上；
+    // 仅对用户输入门控一次（iter=0），后续工具 step 由沙箱白名单/命令白名单兜底。
+    // 运行时未启动 → firePreStep 返回 null → 放行（基础设施缺失不锁死对话）。
+    if (iter === 0) {
+      let gate: { kind?: string; reason?: string } | null = null;
+      try {
+        gate = await firePreStep({ sessionId, text });
+      } catch (err) {
+        log('WARN', 'intent', `pre-step waterfall 异常（放行）: ${(err as Error).message}`);
+      }
+      if (gate?.kind === 'reject') {
+        finalReply = `（意图网关拦截）该请求被判定为高风险操作，已拒绝执行。${gate.reason ? `原因：${gate.reason}` : '可在设置页调整意图识别策略。'}`;
+        break;
+      }
+    }
     const wantsTools = !providerRejectsTools;
     let reply: ModelReply;
     try {
