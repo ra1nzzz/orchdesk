@@ -1,6 +1,0 @@
-{
-  "name": "@orchdesk/dsh-multi",
-  "version": "0.0.0-vendored",
-  "type": "module",
-  "main": "index.js"
-}

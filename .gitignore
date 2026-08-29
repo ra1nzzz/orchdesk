@@ -6,6 +6,9 @@ release/
 *.log
 .DS_Store
 
+# 打包前置生成物：dsh 依赖 + 插件产物（由 scripts/vendor-dsh.cjs 每次重建，不入版本库）
+apps/desktop/vendor/
+
 # dsh vendor（引用仓库，单独 git 管理，不纳入 OrchDesk 提交）
 references/
 
