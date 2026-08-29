@@ -190,6 +190,10 @@ const orchdesk = {
   pickFolder: (): Promise<{ ok: boolean; path?: string; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:pick-folder'),
 
+  /** 打开日志目录（模型调用 / 插件加载诊断留痕）。 */
+  openLogDir: (): Promise<{ ok: boolean; file?: string; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:open-log-dir'),
+
   /** 导出全部业务数据到用户选择的 JSON 备份文件（BUG-013 方案 B）。 */
   exportData: (): Promise<{ ok: boolean; path?: string; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:export-data'),

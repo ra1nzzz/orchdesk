@@ -217,6 +217,7 @@
       checkUpdates: () => Promise.resolve({ snapshot: { ok: false }, update: { available: false, note: '未接入' } }),
       exportData: () => Promise.resolve({ ok: false, reason: '未接入' }),
       importData: () => Promise.resolve({ ok: false, reason: '未接入' }),
+      openLogDir: () => Promise.resolve({ ok: false, reason: '未接入' }),
     };
   })();
 
@@ -1044,7 +1045,7 @@
         <div class="card">
           <div class="row"><span class="mono">%APPDATA%/OrchDesk</span><span class="faint">· 本地优先，数据不出本机</span></div>
           <div class="faint" style="margin-top:6px;font-size:11.5px">包含 sessions.db · memory · plugins · logs · 缓存</div>
-          <div class="row" style="margin-top:8px"><button class="btn sm" data-action="open-project-dir">打开目录</button><button class="btn sm" data-action="snapshot-data">导出快照</button><button class="btn sm primary" data-action="check-updates">检查更新（先快照）</button></div>
+          <div class="row" style="margin-top:8px"><button class="btn sm" data-action="open-project-dir">打开目录</button><button class="btn sm" data-action="open-log-dir">打开日志</button><button class="btn sm" data-action="snapshot-data">导出快照</button><button class="btn sm primary" data-action="check-updates">检查更新（先快照）</button></div>
           <div class="row" style="margin-top:6px"><button class="btn sm" data-action="export-data">导出数据</button><button class="btn sm" data-action="import-data">导入数据</button><span class="faint" style="font-size:11px">跨设备迁移 · 只补齐不覆盖</span></div>
         </div>
         <div class="sec-title" id="settings-section-about"><span class="ico">${ic('at', 14)}</span>关于</div>
@@ -2136,6 +2137,12 @@
       case 'open-project-dir': {
         const r = await bridge.openProjectDir();
         toast(r && r.ok ? '已打开项目目录' : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
+        break;
+      }
+      /* 日志目录（模型调用 / 插件加载诊断留痕） */
+      case 'open-log-dir': {
+        const r = await bridge.openLogDir();
+        toast(r && r.ok ? `已打开日志目录\n当前日志: ${r.file || ''}` : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
         break;
       }
       case 'snapshot-data': { const r = await bridge.snapshotData(); toast(r && r.ok ? `数据快照已生成：${r.dir}` : `快照失败：${(r && r.reason) || ''}`, r && r.ok ? 'ok' : 'danger'); break; }

@@ -7,6 +7,7 @@ import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled } from './dsh-runtime';
 import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
+import { initLogger, mirrorConsole, log, logModel, logFilePath } from './logger';
 import {
   DATA_DIR_NAMES,
   DATA_FILE_NAMES,
@@ -321,11 +322,16 @@ async function callOllama(provider: ModelProvider, model: string, messages: ApiM
   const url = provider.baseUrl.replace(/\/$/, '') + '/api/chat';
   const body: Record<string, unknown> = { model, messages, stream: false };
   if (toolDefs.length) body.tools = toolDefs;
+  const t0 = Date.now();
+  logModel('request', { provider: provider.name, model, apiMode: 'ollama', url, toolCalls: toolDefs.length });
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120_000),
+  }).catch((err) => {
+    logModel('error', { provider: provider.name, model, apiMode: 'ollama', url, ms: Date.now() - t0, error: (err as Error).message });
+    throw err;
   });
   if (!res.ok) throw new Error(`Ollama 返回 HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const rawBody = await res.text();
@@ -343,6 +349,11 @@ async function callOllama(provider: ModelProvider, model: string, messages: ApiM
 
   const toolCalls = normalizeNativeToolCalls(data.message?.tool_calls);
   const content = data.message?.content || '';
+  logModel('response', {
+    provider: provider.name, model, apiMode: 'ollama', url,
+    status: res.status, ms: Date.now() - t0,
+    contentLen: content.length, toolCalls: toolCalls.length,
+  });
   return {
     content,
     toolCalls,
@@ -456,6 +467,12 @@ async function callOpenAICompatible(provider: ModelProvider, model: string, mess
       body.tools = toolDefs;
       if (att.toolChoice) body.tool_choice = 'auto';
     }
+    const t0 = Date.now();
+    logModel('request', {
+      provider: provider.name, model, apiMode: mode, url,
+      toolCalls: att.tools ? toolDefs.length : 0,
+      ...(att.tools ? {} : { error: canUseTools ? `tools 降级（att.tools=${att.tools}）` : undefined }),
+    });
 
     let res: Response;
     try {
@@ -466,12 +483,14 @@ async function callOpenAICompatible(provider: ModelProvider, model: string, mess
         signal: AbortSignal.timeout(120_000),
       });
     } catch (err) {
+      logModel('error', { provider: provider.name, model, apiMode: mode, url, ms: Date.now() - t0, error: (err as Error).message });
       throw new Error(`请求模型接口失败：${(err as Error).message}`);
     }
 
     if (!res.ok) {
       const txt = await res.text();
       lastErr = `模型 API 返回 HTTP ${res.status}: ${txt.slice(0, 300)}`;
+      logModel('error', { provider: provider.name, model, apiMode: mode, url, status: res.status, ms: Date.now() - t0, error: txt.slice(0, 200) });
       // 工具相关参数被拒绝 → 降级重试；其余错误直接抛出。
       if (att.tools && [400, 404, 415, 422].includes(res.status)) continue;
       throw new Error(lastErr);
@@ -495,6 +514,11 @@ async function callOpenAICompatible(provider: ModelProvider, model: string, mess
     const choice = (data as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown } }> }).choices?.[0];
     const toolCalls = normalizeNativeToolCalls(choice?.message?.tool_calls);
     const content = pickOpenAIContent(data, mode) || (typeof choice?.message?.content === 'string' ? choice.message.content : '');
+    logModel('response', {
+      provider: provider.name, model, apiMode: mode, url,
+      status: res.status, ms: Date.now() - t0,
+      contentLen: content.length, toolCalls: toolCalls.length,
+    });
     return {
       content,
       toolCalls,
@@ -1193,6 +1217,18 @@ ipcMain.handle('orchdesk:open-project-dir', async () => {
   }
 });
 
+/** 打开日志目录（诊断模型调用 / 插件加载问题）。 */
+ipcMain.handle('orchdesk:open-log-dir', async () => {
+  try {
+    const dir = path.join(dataDir(), 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    await shell.openPath(dir);
+    return { ok: true, file: logFilePath() ?? undefined };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
+
 /** 打开文件夹选择对话框 */
 ipcMain.handle('orchdesk:pick-folder', async () => {
   try {
@@ -1357,6 +1393,11 @@ ipcMain.handle('orchdesk:import-data', async () => {
 });
 
 app.whenReady().then(async () => {
+  // 日志系统最先初始化：后续迁移 / 运行时启动 / 模型调用全部留痕
+  initLogger(dataDir());
+  mirrorConsole();
+  log('INFO', 'boot', `OrchDesk 启动（版本 ${typeof app.getVersion === 'function' ? app.getVersion() : 'dev'}，数据目录 ${dataDir()}）`);
+
   // BUG-013：先把历史位置的数据合并进规范化目录，再加载会话。
   try { migrateLegacyData(); } catch (err) { console.warn('[orchdesk] 数据迁移异常:', (err as Error).message); }
   loadStore();
