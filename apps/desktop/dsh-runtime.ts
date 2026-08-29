@@ -19,7 +19,7 @@
  */
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { Context } from '@deepseek-ai/cordis';
+import type { Context } from '@deepseek-ai/cordis';
 import { hostServices, getHostServices, type HostServices } from './host-services';
 
 /** 插件名清单（顺序即加载顺序）。 */
@@ -83,10 +83,47 @@ function normalizeInject(mod: Record<string, unknown>): Record<string, unknown> 
   return out;
 }
 
+/**
+ * 定位 vendored cordis 入口。
+ * 关键（打包产物真机崩溃修复）：不能用 CJS 静态 `require('@deepseek-ai/cordis')` ——
+ * asar 内模块的裸说明符解析不会落到包外的 `<approot>/node_modules`（extraFiles），
+ * 真机报 "Cannot find module '@deepseek-ai/cordis'"。改用与插件一致的显式路径
+ * ESM 动态加载（dynamicImport + pathToFileUrl），并惰性缓存构造器。
+ */
+function cordisEntry(): string {
+  // dev：__dirname=apps/desktop/dist → ../node_modules/@deepseek-ai
+  // 打包：__dirname=<approot>/resources/app.asar/dist → ../../../node_modules/@deepseek-ai（extraFiles 放在 app 根）
+  // 逐级向上探测，兼容两种布局（asar 内的 node_modules 不存在，自然跳过）。
+  const candidates = ['..', '../..', '../../..'].map((up) =>
+    path.join(__dirname, up, 'node_modules', '@deepseek-ai', 'cordis', 'lib', 'index.js'),
+  );
+  for (const c of candidates) if (fs.existsSync(c)) return c;
+  return candidates[candidates.length - 1]!;
+}
+
+let contextCtor: (new () => Context) | null = null;
+
+async function loadContext(): Promise<new () => Context> {
+  if (contextCtor) return contextCtor;
+  const entry = cordisEntry();
+  if (!fs.existsSync(entry)) {
+    throw new Error(`未找到 cordis 产物（${entry}），请先运行 node scripts/vendor-dsh.cjs`);
+  }
+  const mod = (await dynamicImport(pathToFileUrl(entry))) as {
+    Context?: unknown;
+    default?: { Context?: unknown };
+  };
+  const C = (mod?.Context ?? mod?.default?.Context) as (new () => Context) | undefined;
+  if (typeof C !== 'function') throw new Error(`cordis 入口异常（缺少 Context 导出）：${entry}`);
+  contextCtor = C;
+  return contextCtor;
+}
+
 /** 启动运行时。幂等：重复调用返回同一实例。 */
 export async function startRuntime(): Promise<OrchDeskRuntime> {
   if (runtime) return runtime;
 
+  const Context = await loadContext();
   const ctx = new Context();
   const plugins: PluginLoadResult[] = [];
 
