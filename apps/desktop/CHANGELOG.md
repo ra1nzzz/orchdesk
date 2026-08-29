@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-30
+
+### Added
+- **dsh/Cordis 运行时接入**：主进程 `startRuntime()` 真实装载 9 个插件（intent / trace / authz / brain / multi / memory / prompt / compensation / evolution），FR-7~FR-13 不再是空壳
+- **数据目录统一**：新增纯逻辑 `data-dir.ts`（零 electron 依赖、可 node 单测）；`guanji.json` / `hub.json` / `skills` 一并纳入 `dataDir()`，凭据类 copy-if-absent 迁移
+- **数据导出 / 导入**（BUG-013 方案 B）：单文件 JSON 备份（`kind: orchdesk-backup`），导入复用启动迁移的「只补齐不覆盖」策略，设置页新增入口
+- **主进程日志系统**：`<dataDir>/logs/main-YYYYMMDD.log`（按天滚动、2MB 截断、留 7 天）；console 全量镜像；模型调用结构化埋点（URL / HTTP 状态 / 耗时 / 正文长度，不记密钥）；设置页「打开日志」
+- **验证套件扩容**：model-loop 25（真 HTTP 线级）/ orchestration 45（SubAgent 派生与三层编排）/ trace-upload 36（脱敏上传）/ data-dir 36 / data-port 10，全套 308 项
+- **版本守卫** `scripts/check-version.cjs`：禁止在已发布版本号上重复打包
+
+### Fixed
+- 便携模式生产失效：`resolveDataDir` 漏传 `existsSync`（缺省恒 false），测试自注入掩盖了该缺陷
+- 导入竞态：persist-sessions 整体重写会冲掉导入数据；伪造备份可写入明文凭据（新增结构校验 + 256MB 上限）
+- `apiMode:'responses'` 丢失 system 提示词与 assistant 历史（工具能力彻底失效）；明文 `apiKey` 被静默删除（改就地加密迁移）
+- `brain.promoteWorkerOutput` 恒 false → FR-10 worker→director 晋升永久断裂（接入 director 过滤 seam，默认仍拒绝）；multi rootId 同毫秒碰撞；委派树只展开一层；失败节点被跨 root 洗白
+- TRACE：30s 定时器路径被批量门控拦截致记录永不上传；splice 误删队首未到期项；无 repoUrl/token 时静默丢单
+- 打包：`vendor-dsh.cjs` 产物写错目录、`exports` 缺 `./` 前缀；`@deepseek-ai/*` 需 `extraFiles` 才会进包
+- **BUG-017 真机启动崩溃** "Cannot find module '@deepseek-ai/cordis'"：asar 内 CJS 裸说明符不落到包外依赖，改显式路径 ESM 动态加载
+- 模型「返回空内容」无法定位：改为带诊断（provider / model / apiMode / HTTP / finish_reason / 响应片段）；兼容 content 为分段数组形态
+
+### Changed
+- 验证入口扩至 11 套件（`npm run verify`），打包产物新增 9/9 插件真实 import 实测
+- 打包脚本前置版本守卫（SemVer 治理：feat→minor / fix→patch）
+
 ## [0.2.0] - 2026-08-28
 
 ### Added
