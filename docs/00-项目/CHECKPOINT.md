@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.6.0`（已打 tag `v0.6.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.5.0` 为上一 Release |
-| **最新 Commit** | `<tag 后回填>` | feat: 意图网关/遥测桥接主链路（ADR-0008，agent/pre-step waterfall）；裁决文档漂移修正 |
+| **最新 Commit** | `59418e2` | chore: release v0.6.0（feat: ADR-0008 挂点桥接 intent/trace 入主链路；修正 PLAN T-P1-5 漂移） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
