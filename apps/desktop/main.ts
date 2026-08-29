@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep } from './dsh-runtime';
+import { getHostServices } from './host-services';
 import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
 import { initLogger, mirrorConsole, log, logModel, logFilePath } from './logger';
 import {
@@ -657,6 +658,25 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
         if (!ALLOWED_COMMAND_SET.has(cmdName)) {
           return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${ALLOWED_COMMANDS.slice(0, 20).join(', ')}...` };
         }
+        // ---- 授权门（PRD L3/L4 / T-P3-2）：命令执行必须过审批 ----
+        // 此前审批 UI 已建但工具链路从不触发（与 intent/trace 同款死挂点，本轮修复）。
+        // 白名单只是准入门槛（含 powershell 等万能命令，兜底不足），因此这里与
+        // ADR-0008 intent 的「基础设施缺失放行」边界**不同**：审批链路不可用一律
+        // fail-closed；paranoid（只读沙箱）直接拒绝。trusted 的白名单放宽待 authz
+        // 补 decide 接口后再接（ponytail: 升级路径 = authz.provide decide(op)）。
+        {
+          let mode = 'default';
+          try { mode = (await authzService?.getMode()) || 'default'; } catch { /* 缺省 default */ }
+          if (mode === 'paranoid') {
+            return { name, result: '', error: 'paranoid（只读）模式下禁止执行命令' };
+          }
+          const approval = getHostServices()?.approval;
+          if (!approval) return { name, result: '', error: '授权审批服务不可用，命令被拒绝（fail-closed）' };
+          const outcome = await approval.request({ toolName: 'shell_command', reason: cmd.slice(0, 200), sessionId: sessionCtx?.sessionId });
+          if (outcome !== 'allowed-once') {
+            return { name, result: '', error: `命令未获批准（${outcome}）` };
+          }
+        }
         // 进程隔离 + 不阻塞主进程：在子进程中异步执行。
         // cwd 用会话工作目录（set_cwd 可切换），缺省回落 resolveShellCwd()。
         const { exec } = await import('node:child_process');
@@ -900,7 +920,12 @@ function createTray(): void {
 // ---------------------------------------------------------------------------
 // 桥接：渲染进程 → 主进程（持久化 + 模型回合）
 // ---------------------------------------------------------------------------
+// 渲染层就绪标记：审批弹窗只在渲染层可应答时才发起（见 uiAnswerer）。
+// 渲染层 init 的首个 IPC（load-sessions）即视为就绪——在那之前不存在用户输入源。
+let rendererReady = false;
+
 ipcMain.handle('orchdesk:load-sessions', async () => {
+  rendererReady = true;
   // 只返回有效会话（有真实消息的）；忽略过期数据
   const all = Object.values(store);
   return all.filter((s: any) => s && s.id && Array.isArray(s.msgs) && s.msgs.length > 0);
@@ -1008,7 +1033,16 @@ async function bootRuntime(): Promise<void> {
     const authz = getService<AuthzServiceLike>('authz');
     if (authz) {
       authzService = authz;
-      authz.setUiAnswerer(async (req) => {
+      // 审批应答方（同一回调注册到两个组件）：
+      // - host-services.approval.request：**实际发起方**（executeTool 授权门走这里）
+      // - authz 插件 setUiAnswerer：接口对称保留
+      // 此前只注册了 authz 侧 → approval.request 的 uiAnswerer 恒 null → 一律
+      // 立即 unavailable（悬空接线，审批 UI 从未收到过真实请求）。
+      const uiAnswererFn = async (req: { toolName?: string; reason?: string; sessionId?: string }) => {
+        // 渲染层未就绪 → 零等待 fail-closed：没有渲染层就没有用户输入源，
+        // 审批弹窗不可能被应答，与其等满超时不如立即拒绝（与 host-services
+        // 「无应答方」同语义的快路径）。
+        if (!rendererReady || !mainWindow || mainWindow.isDestroyed()) return 'unavailable';
         const id = `apr-${++approvalSeq}`;
         return new Promise<string>((resolve) => {
           const timer = setTimeout(() => {
@@ -1022,7 +1056,9 @@ async function bootRuntime(): Promise<void> {
             reason: req.reason,
           });
         });
-      });
+      };
+      authz.setUiAnswerer(uiAnswererFn);
+      runtime.host?.setUiAnswerer(uiAnswererFn as never);
       console.log('[orchdesk] 授权服务已接入（三模式 + L0–L4 + fail-closed）');
     } else {
       console.warn('[orchdesk] authz 服务不可用（插件未激活）');

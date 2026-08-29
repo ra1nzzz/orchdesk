@@ -149,13 +149,16 @@ const cred = require('./dist/credentials.js');
 
   console.log('== C. 沙箱：命令在子进程异步执行 ==');
 
-  await check('shell_command 输出正确且不阻塞主进程', async () => {
-    // 直接测编译产物中的命令白名单与异步执行路径：
-    // 通过 agent-loop 风格 stub 驱动 orchdesk:tool-execute
-    const out = await runToolProbe('shell_command', { command: 'echo hello-sandbox' });
+  await check('shell_command 经审批放行后正确执行（授权门→弹窗→应答→子进程全链路）', async () => {
+    const out = await runToolProbe('shell_command', { command: 'echo hello-sandbox' }, { approve: true });
     assert.ok(out && typeof out.result === 'string', '应返回 result');
     assert.ok(out.result.includes('hello-sandbox'), '应包含命令输出，实际: ' + JSON.stringify(out).slice(0, 200));
     assert.ok(!out.error, '不应有错误，实际: ' + out.error);
+  });
+
+  await check('渲染层未就绪时 shell 被授权门零等待拒绝（fail-closed）', async () => {
+    const out = await runToolProbe('shell_command', { command: 'echo blocked' });
+    assert.ok(out.error && out.error.includes('未获批准'), '应被审批拒绝，实际: ' + JSON.stringify(out).slice(0, 200));
   });
 
   await check('白名单外的命令被拒绝', async () => {
@@ -182,7 +185,9 @@ const cred = require('./dist/credentials.js');
   process.exit(0);
 
   // ---- helper：在子进程里用 stub electron 驱动 orchdesk:tool-execute ----
-  async function runToolProbe(toolName, args) {
+  // opts.approve=true 走完整审批链路：load-sessions（渲染层就绪标记）→ 触发工具 →
+  // 拦截 webContents.send 的审批请求 → 经 authz-submit-decision 应答 allowed-once。
+  async function runToolProbe(toolName, args, opts = {}) {
     const probe = `
       const Module = require('module');
       const path = require('path'), fs = require('fs'), os = require('os');
@@ -198,7 +203,27 @@ const cred = require('./dist/credentials.js');
       Module._load = function (req) { if (req === 'electron') return stub; return orig.apply(this, arguments); };
       require('${path.join(__dirname, 'dist', 'main.js').replace(/\\/g, '\\\\')}');
       (async () => {
-        const r = await ipc.get('orchdesk:tool-execute')(null, ${JSON.stringify({ name: toolName, arguments: args })});
+        // 等 bootRuntime 完成（plugin-runtime handler 注册早于运行时就绪，直接 kick 会竞态）
+        for (let i = 0; i < 100; i++) {
+          const h = ipc.get('orchdesk:plugin-runtime');
+          if (h) {
+            const st = await h(null);
+            if (st && st.ready && st.plugins && st.plugins.length >= 9) break;
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        ${opts.approve ? "await ipc.get('orchdesk:load-sessions')(null);" : ''}
+        const kick = ipc.get('orchdesk:tool-execute')(null, ${JSON.stringify({ name: toolName, arguments: args })});
+        ${opts.approve ? `
+        let approvalReq = null;
+        for (let i = 0; i < 100 && !approvalReq; i++) {
+          approvalReq = stub.webSent.find((w) => w.ch === 'orchdesk:authz-approval-request');
+          if (!approvalReq) await new Promise((r) => setTimeout(r, 20));
+        }
+        if (!approvalReq) { console.log('ERR: 审批请求未发出'); process.exit(1); }
+        stub.ipcListeners.get('orchdesk:authz-submit-decision')(null, approvalReq.payload.id, 'allowed-once');
+        ` : ''}
+        const r = await kick;
         console.log('TOOL_JSON:' + JSON.stringify(r));
         process.exit(0);
       })().catch(e => { console.log('ERR:' + e.message); process.exit(1); });

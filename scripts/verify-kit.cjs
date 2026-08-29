@@ -33,11 +33,14 @@ function makeElectronStub(opts = {}) {
   const home = opts.home || fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-stub-'));
   const ipcHandlers = new Map();
   const ipcListeners = new Map();
+  /** 渲染层收到的所有 webContents.send（审批链路端到端测试用）。 */
+  const webSent = [];
 
   return {
     home,
     ipcHandlers,
     ipcListeners,
+    webSent,
     app: {
       isPackaged: false,
       name: 'OrchDesk',
@@ -51,7 +54,7 @@ function makeElectronStub(opts = {}) {
       on: (ch, fn) => { ipcListeners.set(ch, fn); },
     },
     BrowserWindow: class {
-      constructor() { this.webContents = { send: () => {} }; this.destroyed = false; }
+      constructor() { this.webContents = { send: (ch, payload) => { webSent.push({ ch, payload }); } }; this.destroyed = false; }
       isDestroyed() { return this.destroyed; }
       once() {}
       loadFile() {}
