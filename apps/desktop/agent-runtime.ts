@@ -42,6 +42,11 @@ export interface ModelReply {
    * 并转为「文本兜底解析」模式。
    */
   toolsRejected?: boolean;
+  /**
+   * 内容为空时的诊断信息（HTTP 状态 / apiMode / finish_reason / 响应片段）。
+   * 上层在 content 为空时优先展示，避免「模型返回空内容」这种无法定位的提示。
+   */
+  emptyReason?: string;
 }
 
 export interface ToolResult {

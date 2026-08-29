@@ -540,6 +540,34 @@ function lastAssistant(sessionId) {
   });
 
   // =========================================================================
+  console.log('== L. 空内容诊断 + content 数组形态 ==');
+
+  writeModels({ id: 'p-arr', name: '数组内容网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  responder = () => json(200, { choices: [{ message: { content: [{ type: 'text', text: '第一段' }, { type: 'text', text: '第二段' }] }, finish_reason: 'stop' }] });
+  out = await runAgentTurn(null, 's-l1', '数组内容', {});
+
+  await check('L1 content 为分段数组（[{type:text,text}]) → 正确拼接正文（不再误判为空内容）', () => {
+    assert.strictEqual(out.text, '第一段第二段', '实际: ' + out.text);
+    assert.strictEqual(out.intent, 'ACT');
+  });
+
+  writeModels({ id: 'p-emptydiag', name: '空内容网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  responder = () => json(200, { choices: [{ message: { content: '' }, finish_reason: 'stop' }] });
+  out = await runAgentTurn(null, 's-l2', '空内容', {});
+
+  await check('L2 HTTP 200 但 content 为空 → 回复携带可定位诊断（provider/model/apiMode/HTTP 200/响应片段）', () => {
+    assert.ok(out.text.includes('模型返回空内容'), '实际: ' + out.text);
+    assert.ok(out.text.includes('provider=空内容网关'), '应含 provider 名: ' + out.text);
+    assert.ok(out.text.includes('model=wire-model'), '应含模型名: ' + out.text);
+    assert.ok(out.text.includes('apiMode=chat'), '应含 apiMode: ' + out.text);
+    assert.ok(out.text.includes('HTTP 200'), '应含状态码: ' + out.text);
+    assert.ok(out.text.includes('finish_reason=stop'), '应含 finish_reason: ' + out.text);
+    assert.ok(!out.text.includes(KEY), '诊断不应泄漏密钥: ' + out.text);
+  });
+
+  // =========================================================================
   console.log('\n' + log.join('\n'));
   console.log(`\n结果: ${passed} 通过, ${failed} 失败, 共 ${passed + failed} 项\n`);
 

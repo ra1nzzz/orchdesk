@@ -328,17 +328,35 @@ async function callOllama(provider: ModelProvider, model: string, messages: ApiM
     signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) throw new Error(`Ollama 返回 HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const data = await res.json() as {
+  const rawBody = await res.text();
+  let data: {
     message?: { content?: string; tool_calls?: unknown };
     error?: string;
+    done_reason?: string;
   };
+  try {
+    data = JSON.parse(rawBody) as typeof data;
+  } catch {
+    throw new Error(`Ollama 返回非 JSON 响应（HTTP ${res.status}）: ${rawBody.slice(0, 200)}`);
+  }
   if (data.error) throw new Error(data.error);
 
   const toolCalls = normalizeNativeToolCalls(data.message?.tool_calls);
+  const content = data.message?.content || '';
   return {
-    content: data.message?.content || '',
+    content,
     toolCalls,
     source: toolCalls.length ? 'native' : 'none',
+    emptyReason: (!content && !toolCalls.length)
+      ? emptyContentReason({
+          provider: provider.name,
+          model,
+          mode: 'ollama',
+          status: res.status,
+          finish: data.done_reason,
+          bodySnippet: rawBody.slice(0, 200),
+        })
+      : undefined,
   };
 }
 
@@ -392,7 +410,30 @@ function pickOpenAIContent(data: Record<string, unknown>, mode: 'chat' | 'respon
   if (mode === 'completions') {
     return ((data as { choices?: Array<{ text?: string }> }).choices?.[0]?.text || '');
   }
-  return ((data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content || '');
+  // content 可能是字符串，也可能是分段数组（[{type:'text',text:'…'}]，常见于多模态
+  // 网关 / 新版模型）—— 只按字符串处理会把后者误判为「模型返回空内容」。
+  const raw = (data as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content;
+  if (typeof raw === 'string') return raw;
+  if (Array.isArray(raw)) {
+    return raw.map((c) => (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string'
+      ? (c as { text: string }).text
+      : '')).join('');
+  }
+  return '';
+}
+
+/** HTTP 200 但拿不到正文时，构造可定位的诊断信息（不含密钥，响应体本身无敏感值）。 */
+function emptyContentReason(opts: { provider: string; model: string; mode: string; status: number; finish?: unknown; bodySnippet: string }): string {
+  const parts = [
+    '模型返回空内容',
+    `provider=${opts.provider}`,
+    `model=${opts.model}`,
+    `apiMode=${opts.mode}`,
+    `HTTP ${opts.status}`,
+  ];
+  if (opts.finish !== undefined) parts.push(`finish_reason=${String(opts.finish)}`);
+  if (opts.bodySnippet) parts.push(`响应片段: ${opts.bodySnippet}`);
+  return `（${parts.join(' · ')}）`;
 }
 
 async function callOpenAICompatible(provider: ModelProvider, model: string, messages: ApiMessage[], toolDefs: typeof TOOL_DEFS = []): Promise<ModelReply> {
@@ -436,7 +477,14 @@ async function callOpenAICompatible(provider: ModelProvider, model: string, mess
       throw new Error(lastErr);
     }
 
-    const data = await res.json() as Record<string, unknown>;
+    const rawBody = await res.text();
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(rawBody) as Record<string, unknown>;
+    } catch {
+      // HTTP 200 但非 JSON（如网关返回 HTML 错误页）——给出可定位的诊断而非「空内容」
+      throw new Error(`模型 API 返回非 JSON 响应（HTTP ${res.status} · apiMode=${mode}）: ${rawBody.slice(0, 200)}`);
+    }
     const errMsg = (data as { error?: { message?: string } }).error?.message;
     if (errMsg) {
       lastErr = errMsg;
@@ -446,13 +494,23 @@ async function callOpenAICompatible(provider: ModelProvider, model: string, mess
 
     const choice = (data as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown } }> }).choices?.[0];
     const toolCalls = normalizeNativeToolCalls(choice?.message?.tool_calls);
-    const content = pickOpenAIContent(data, mode) || choice?.message?.content || '';
+    const content = pickOpenAIContent(data, mode) || (typeof choice?.message?.content === 'string' ? choice.message.content : '');
     return {
       content,
       toolCalls,
       source: toolCalls.length ? 'native' : 'none',
       // 本次是靠「去掉 tools」才成功的 → 告知上层别再下发工具定义。
       toolsRejected: canUseTools && !att.tools ? true : undefined,
+      emptyReason: (!content && !toolCalls.length)
+        ? emptyContentReason({
+            provider: provider.name,
+            model,
+            mode,
+            status: res.status,
+            finish: (choice as { finish_reason?: unknown } | undefined)?.finish_reason,
+            bodySnippet: rawBody.slice(0, 200),
+          })
+        : undefined,
     };
   }
   throw new Error(lastErr || '模型调用失败（未知原因）');
@@ -677,7 +735,7 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     const parsed = extractToolCalls(reply.content);
     const usable = parsed.calls.filter(c => isKnownTool(c.name));
     if (!usable.length) {
-      finalReply = reply.content || '（模型返回空内容）';
+      finalReply = reply.content || reply.emptyReason || '（模型返回空内容）';
       break;
     }
 
