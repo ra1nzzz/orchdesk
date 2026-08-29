@@ -29,6 +29,33 @@ const orchdesk = {
   persistSessions: (sessions: Session[]): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('orchdesk:persist-sessions', sessions),
 
+  /** 项目分组：启动时拉取（此前缺失，重启后项目全丢）。 */
+  loadProjects: (): Promise<Array<{ id: string; n?: string; sessions?: string[]; archived?: number }>> =>
+    ipcRenderer.invoke('orchdesk:load-projects'),
+
+  /** 项目分组：变更后落盘。 */
+  persistProjects: (projects: Array<{ id: string; n?: string; sessions?: string[]; archived?: number }>): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('orchdesk:persist-projects', projects),
+
+  /** 工具执行步骤（主进程 runAgentTurn 实时推送；此前无订阅方，步骤条永远为空）。 */
+  onToolStep: (cb: (step: { sessionId: string; name: string; ph: 'running' | 'done' | 'error'; result?: string }) => void): (() => void) => {
+    const listener = (_e: unknown, step: { sessionId: string; name: string; ph: 'running' | 'done' | 'error'; result?: string }): void => cb(step);
+    ipcRenderer.on('orchdesk:tool-step', listener);
+    return () => ipcRenderer.removeListener('orchdesk:tool-step', listener);
+  },
+
+  /** 插件运行时：真实装载状态（替代渲染层硬编码常量）。 */
+  getPluginRuntime: (): Promise<{ ready: boolean; activeCount: number; total: number; plugins: Array<{ name: string; active: boolean; available: boolean; error?: string }> }> =>
+    ipcRenderer.invoke('orchdesk:plugin-runtime'),
+
+  /** 插件真实热插拔（FR-3）：启用注册 effect，停用逆回滚。 */
+  setPluginEnabled: (name: string, enabled: boolean): Promise<{ ok: boolean; active?: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:plugin-set-enabled', name, enabled),
+
+  /** 编排目录（multi 插件）：8 专家 + 3 团的真实数据。 */
+  getOrchestrationCatalog: (): Promise<{ experts?: unknown[]; teams?: unknown[] } | null> =>
+    ipcRenderer.invoke('orchdesk:orchestration-catalog'),
+
   /** 模型回合 seam：主进程在此接入真实 dsh ctx / Ollama（P1-5）。 */
   runAgentTurn: (
     sessionId: string,
@@ -162,6 +189,14 @@ const orchdesk = {
   /** 打开文件夹选择对话框 */
   pickFolder: (): Promise<{ ok: boolean; path?: string; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:pick-folder'),
+
+  /** 导出全部业务数据到用户选择的 JSON 备份文件（BUG-013 方案 B）。 */
+  exportData: (): Promise<{ ok: boolean; path?: string; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:export-data'),
+
+  /** 从备份 JSON 导入（与启动迁移同一套「只补齐不覆盖」合并策略）。 */
+  importData: (): Promise<{ ok: boolean; imported?: Record<string, number>; notes?: string[]; path?: string; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:import-data'),
 
   // ---- FR-5 模型管理（配置持久化 + 连通性测试） ----
   /** 取模型配置（不含明文 API Key）。 */

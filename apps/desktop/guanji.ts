@@ -1,7 +1,8 @@
 /// <reference types="electron" />
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { app, safeStorage } from 'electron';
+import { safeStorage } from 'electron';
+import { DATA_FILE_NAMES, SKILLS_DIR_NAME, getDataDir } from './data-dir';
 
 // ============================================================================
 // 观雅集技能市场客户端（T-P6-1）
@@ -18,7 +19,7 @@ import { app, safeStorage } from 'electron';
 //   POST /api/skills/<slug>/alias               body { alias }
 //
 // 红线（PLAN T-P6-1 防漂移）：
-//   - TOKEN 由用户配置（userData/guanji.json），绝不硬编码。
+//   - TOKEN 由用户配置（规范化数据目录/guanji.json），绝不硬编码。
 //   - 安装前必须能力审查（capabilityReview），不得跳过；L3/L4 强制授权。
 //   - 仅做下载/安装编排，不代替用户判断是否安装第三方 SKILL。
 // ============================================================================
@@ -80,8 +81,9 @@ const LOW_RISK_CAPS = new Set<string>([
   'chart.render', 'role.bind',
 ]);
 
+/** 配置文件：统一落在规范化数据目录（非 userData，避免跨安装形态丢失 TOKEN）。 */
 function configFile(): string {
-  return path.join(app.getPath('userData'), 'guanji.json');
+  return path.join(getDataDir(), DATA_FILE_NAMES.guanji);
 }
 
 function readToken(): string | null {
@@ -186,7 +188,7 @@ export class GuanjiClient {
     return 'allowed';
   }
 
-  /** 下载 .skill 包到本地 skills 目录（userData/skills/<slug>.skill）。 */
+  /** 下载 .skill 包到本地 skills 目录（数据目录/skills/<slug>.skill）。 */
   async installSkill(skill: GuanjiSkill, authorized = false): Promise<InstallResult> {
     const review = this.capabilityReview(skill, authorized);
     if (review === 'needs-auth') {
@@ -205,7 +207,7 @@ export class GuanjiClient {
       if (!res.ok) {
         return { ok: false, review, reason: `下载失败 HTTP ${res.status}` };
       }
-      const dir = path.join(app.getPath('userData'), 'skills');
+      const dir = path.join(getDataDir(), SKILLS_DIR_NAME);
       fs.mkdirSync(dir, { recursive: true });
       const buf = Buffer.from(await res.arrayBuffer());
       const out = path.join(dir, `${skill.slug}.skill`);
@@ -220,8 +222,8 @@ export class GuanjiClient {
   async publishSkill(input: PublishInput): Promise<PublishResult> {
     const token = readToken();
     if (!token) return { ok: false, reason: '请先登录观雅集并配置 TOKEN' };
-    // 路径白名单：仅允许发布 userData/skills 目录内的 .skill 包（防任意文件外传）。
-    const skillsDir = path.resolve(app.getPath('userData'), 'skills');
+    // 路径白名单：仅允许发布数据目录 skills 内的 .skill 包（防任意文件外传）。
+    const skillsDir = path.resolve(getDataDir(), SKILLS_DIR_NAME);
     const resolved = path.resolve(input.filePath);
     if (!resolved.startsWith(skillsDir + path.sep) || !resolved.endsWith('.skill')) {
       return { ok: false, reason: '发布文件必须位于 skills 目录内且为 .skill 包' };

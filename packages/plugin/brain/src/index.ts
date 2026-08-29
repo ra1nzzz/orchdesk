@@ -38,6 +38,47 @@ export const Config: z<BrainConfig> = z.object({
 
 export type SubAgentStatus = 'dispatched' | 'executing' | 'disposed';
 
+/**
+ * Director 过滤回调（FR-10 worker→director 晋升 seam）。
+ * 返回 true 放行；false / 非真 / 抛错 / 超时一律拒绝（fail-closed）。
+ */
+export type DirectorFilter = (output: string) => boolean | Promise<boolean>;
+
+/**
+ * 模块级 director 过滤 seam；null = 默认拒绝（fail-closed）。
+ * 经 setDirectorFilter 注入，或在 apply 时从 config.directorFilter / ctx.directorFilter 读取。
+ */
+let directorFilter: DirectorFilter | null = null;
+
+/** 注入 Director 过滤回调（FR-10 晋升 seam）；传 null 恢复默认拒绝。 */
+export function setDirectorFilter(fn: DirectorFilter | null): void {
+  directorFilter = fn;
+}
+
+/** Director 过滤默认超时（fail-closed：超时即拒绝）。 */
+const DIRECTOR_FILTER_TIMEOUT_MS = 5_000;
+
+/** 给 promise 加超时；超时即 reject（调用方转为拒绝）。 */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('director-filter-timeout')), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e instanceof Error ? e : new Error(String(e))); },
+    );
+  });
+}
+
+/** 安全读取属性（Cordis Context 代理对未知服务属性访问会抛错）。 */
+function safeGet(obj: unknown, key: string): unknown {
+  if (!obj) return undefined;
+  try {
+    return (obj as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
 export interface SubAgentRecord {
   /** 渲染层 inline 芯片 id，如 W-108。 */
   id: string;
@@ -61,13 +102,21 @@ export interface BrainHands {
   dispatchSubAgent(task: { label: string; prompt: string; ref?: string; parentSession?: SessionId }): Promise<SubAgentRecord>;
   disposeSubAgent(id: string, result?: string): Promise<void>;
   /** Worker 输出晋升主会话记忆须经 Director 批准；fail-closed。 */
-  promoteWorkerOutput(output: string): Promise<{ approved: boolean; reason: string }>;
+  promoteWorkerOutput(output: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; reason: string }>;
   listSubAgents(): SubAgentRecord[];
   /** 供桥/渲染层订阅 inline 芯片事件（不占独立区域/弹窗）。 */
   subscribe(cb: (e: SubAgentEvent) => void): () => void;
 }
 
 export function apply(ctx: Context, config: BrainConfig): void {
+  // director 过滤 seam（FR-10）：可经 config.directorFilter / ctx.directorFilter 注入，
+  // 或经模块级 setDirectorFilter 注入；均未提供时保持 fail-closed 默认拒绝。
+  // 注意：Cordis Context 是代理，访问未提供服务属性会抛错 → 必须安全读取。
+  const cfgFilter = safeGet(config, 'directorFilter');
+  const ctxFilter = safeGet(ctx, 'directorFilter');
+  if (typeof cfgFilter === 'function') directorFilter = cfgFilter as DirectorFilter;
+  else if (typeof ctxFilter === 'function') directorFilter = ctxFilter as DirectorFilter;
+
   const registry = new Map<string, SubAgentRecord>();
   const handles = new Map<string, AgentHandle>();
   const subscribers = new Set<(e: SubAgentEvent) => void>();
@@ -135,9 +184,27 @@ export function apply(ctx: Context, config: BrainConfig): void {
   }
 
   // Director 过滤：Worker 输出晋升主会话记忆须经 Director 批准（FR-10 / ADR-0004）。
-  // fail-closed：默认拒绝，避免 Worker 直写全局记忆。真实实现调 Director 子 agent 评估（seam）。
-  async function promoteWorkerOutput(_output: string): Promise<{ approved: boolean; reason: string }> {
-    return { approved: false, reason: 'director-filter-pending' };
+  // fail-closed：默认拒绝（无回调即拒），避免 Worker 直写全局记忆；有回调时：
+  // 放行→晋升；回调抛错 / 超时 / 返回非真→拒绝。真实实现可调 Director 子 agent 评估。
+  async function promoteWorkerOutput(
+    output: string,
+    opts?: { timeoutMs?: number },
+  ): Promise<{ approved: boolean; reason: string }> {
+    const filter = directorFilter;
+    if (!filter) return { approved: false, reason: 'director-filter-pending' };
+    try {
+      const allowed = await withTimeout(
+        Promise.resolve(filter(output)),
+        opts?.timeoutMs ?? DIRECTOR_FILTER_TIMEOUT_MS,
+      );
+      if (allowed === true) return { approved: true, reason: 'director-approved' };
+      return { approved: false, reason: 'director-rejected' };
+    } catch (e) {
+      return {
+        approved: false,
+        reason: `director-filter-error:${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
   }
 
   ctx.effect(() => {
@@ -166,7 +233,7 @@ export function apply(ctx: Context, config: BrainConfig): void {
     // 暴露给桥/其它插件（运行时 seam：main.ts 经 dsh 控制通道调用，渲染层经桥订阅芯片事件）。
     // 若本版本 Cordis 不提供 provide，则退化为仅供同进程订阅（桥经 subscribe 拉取）。
     const anyCtx = ctx as unknown as { provide?: (n: string, v: unknown, b?: boolean) => void };
-    anyCtx.provide?.('brainHands', api, true);
+    anyCtx.provide?.('brainHands', api);
 
     return () => {
       offPreStep();

@@ -194,3 +194,21 @@ Agent Runtime 的核心循环在 `main.ts` `runAgentTurn()` (L353-451)：
   只依据 taskkill 退出码判定成功与否（其中文输出为 GBK，解析会乱码）。
 - **用法**：`pnpm run dist` / `dist:win` / `dist:portable` 已内置该步骤；
   也可单独执行 `node kill-running.cjs`。
+
+---
+
+## 三、单点根因已消除（2026-08-29 补齐）
+
+> 本文档一/二节记录的是「数据持久化」与「Agent Runtime 工具调用」两类问题，均已在 v0.3.1 修复。
+> 但 PRD 差距盘点点出的**真正单点根因**——`apps/` 下 dsh/Cordis 运行时完全缺席、2515 行插件
+> 是死代码——已在 v0.4.0 补齐轮（commit `e820e33`/`2d988c5`/`91ae26b`）消除：
+
+- `dsh-runtime.ts` 真实 `new Context()` 装载 9 插件，`getService()` 可取；
+- `main.ts` 用 `bootRuntime()` 替换 `initAuthzBridge({get:()=>undefined})`，11 个 stub 改为真实 `ctx.get(...)`；
+- 7 个插件 `provide(name,value,true)` 第三参误传修复，9/9 插件 ACTIVE；
+- 凭据升级 AES-256-GCM（`credentials.ts`），沙箱子进程隔离，6 处渲染层缺陷修复；
+- 插件测试 2/9 → 9/9（`scripts/verify-plugins.mjs`），验证套件扩至 158 项全绿。
+
+**PRD 完成度从 ≈ 30% 提升到 ≈ 75%**。剩余 ≈ 25% 为 GUI 实机冒烟（BUG-W02 门控）与
+真实模型 / SubAgent / GitHub 上传的运行期验证。完整复盘见
+[docs/99-归档/PRD差距补齐-2026-08-29.md](99-归档/PRD差距补齐-2026-08-29.md)。

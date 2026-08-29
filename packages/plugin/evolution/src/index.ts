@@ -253,7 +253,7 @@ export function apply(ctx: Context, config: EvolutionConfig): void {
       },
     };
     const anyCtx = ctx as unknown as { provide?: (n: string, v: unknown, b?: boolean) => void };
-    anyCtx.provide?.('evolution', api, true);
+    anyCtx.provide?.('evolution', api);
     return () => {
       plugins.clear();
       subscribers.clear();

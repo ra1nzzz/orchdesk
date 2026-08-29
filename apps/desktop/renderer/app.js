@@ -45,8 +45,42 @@
     code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
   };
   const ic = (n, s = 20) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
+  // 专家 / 专家团：**回落到多 Agent 编排插件（multi）提供的真实目录**。
+  // 编排插件可用时以 catalog 为准（8 专家 + 3 团），不可用时才用下面的兜底清单。
   const EXPERTS = ['Orchestrator（主会话）', '开发总监', '设计总监', '测试总监', '项目管理总监', '文档总监', '艺术总监', '风险控制总监'];
   const TEAMS = [{ n: '预置 · 全栈开发团', m: '开发总监 + 测试总监 + 文档总监' }, { n: '预置 · 写作团', m: '文档总监 + 艺术总监' }, { n: '自定义 · 我的专家团', m: '自编排（拖拽专家）' }];
+
+  /** 专家列表：优先取编排插件真实目录。 */
+  function expertList() {
+    const cat = state.orchestrationCatalog;
+    if (cat && Array.isArray(cat.experts) && cat.experts.length) {
+      return cat.experts.map((e) => e.title || e.name || e.id);
+    }
+    return EXPERTS;
+  }
+
+  /** 团队列表：优先取编排插件真实目录（成员 id 映射为展示名）。 */
+  function teamList() {
+    const cat = state.orchestrationCatalog;
+    if (cat && Array.isArray(cat.teams) && cat.teams.length) {
+      const nameOf = (id) => {
+        const e = (cat.experts || []).find((x) => x.id === id);
+        return e ? (e.title || e.name || e.id) : id;
+      };
+      return cat.teams.map((t) => ({
+        n: t.name || t.id,
+        m: Array.isArray(t.members) ? t.members.map(nameOf).join(' + ') : '',
+        id: t.id,
+      }));
+    }
+    return TEAMS;
+  }
+
+  /** 编排数据是否来自真实插件（否则 UI 标注「未接入」）。 */
+  function orchestrationLive() {
+    const cat = state.orchestrationCatalog;
+    return !!(cat && Array.isArray(cat.experts) && cat.experts.length);
+  }
   const AUTH_MODES = [
     { id: 'default', label: '默认安全', blurb: '工作区可写；L3/L4 操作弹窗确认。' },
     { id: 'trusted', label: '信任模式', blurb: '同默认沙箱，放宽命令/网络白名单；高危操作仍弹窗。' },
@@ -181,6 +215,8 @@
       hubResult: () => Promise.resolve({ status: 'error', result: '未配对' }),
       snapshotData: () => Promise.resolve({ ok: false, reason: '未接入' }),
       checkUpdates: () => Promise.resolve({ snapshot: { ok: false }, update: { available: false, note: '未接入' } }),
+      exportData: () => Promise.resolve({ ok: false, reason: '未接入' }),
+      importData: () => Promise.resolve({ ok: false, reason: '未接入' }),
     };
   })();
 
@@ -199,7 +235,13 @@
     pExpanded: new Set(),
     plugSideExpanded: new Set(['builtin', 'market', 'skills', 'experts', 'connectors']),
     selectedModels: [], thinkLevel: 'standard', modelProviders: [], mpEditing: null, defaultProvider: undefined,
-    maxToolIterations: 200, projects: [], sessions: {}
+    maxToolIterations: 200, projects: [], sessions: {},
+    // 实时工具步骤：sessionId → [{ n, ph, result }]，由主进程 orchdesk:tool-step 推送
+    toolSteps: {},
+    // 插件运行时真实状态（替代 PLUGINS 常量的硬编码 on 字段）
+    pluginRuntime: null,
+    // 编排目录（multi 插件真实数据；null = 未接入，UI 回落兜底清单并标注）
+    orchestrationCatalog: null
   };
 
   const $ = (s) => document.querySelector(s);
@@ -210,7 +252,69 @@
   ];
   const nowTime = () => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
-  function persist() { bridge.persistSessions(Object.values(state.sessions)).catch(() => {}); }
+  // 导入期间挂起 persist：persist-sessions 是「渲染层状态整体重写」，若在
+  // 主进程导入落盘与渲染层重拉之间触发，会把导入数据整体冲掉（审阅阻断项）。
+  let importSuspend = false;
+
+  function persist() { if (importSuspend) return; persistSessions(); persistProjects(); }
+
+  function persistSessions() { bridge.persistSessions(Object.values(state.sessions)).catch(() => {}); }
+
+  /**
+   * 项目分组落盘（BUG：此前只持久化 sessions，重启后项目全丢、会话退化为「任务」组）。
+   * 用 try/catch 兜底：桥不可用时降级为不落盘，不影响会话本身。
+   */
+  let projectsPersistTimer = null;
+  function persistProjects() {
+    if (typeof bridge.persistProjects !== 'function') return;
+    if (projectsPersistTimer) clearTimeout(projectsPersistTimer);
+    projectsPersistTimer = setTimeout(() => {
+      projectsPersistTimer = null;
+      bridge.persistProjects(state.projects).catch((err) => {
+        console.warn('[persist] 项目分组落盘失败:', err && err.message);
+      });
+    }, 250);
+  }
+
+  /**
+   * 插件卡片状态徽章：优先取运行时真实状态（orchdesk:plugin-runtime），
+   * 未接入运行时时回落常量声明并标注「未接入」，不伪造「已启用」。
+   */
+  function pluginBadge(id) {
+    const rt = state.pluginRuntime;
+    if (rt && rt.ready && Array.isArray(rt.plugins)) {
+      const live = rt.plugins.find((x) => x.name === id);
+      if (live) {
+        if (live.active) return '<span class="badge ok">已启用</span>';
+        if (!live.available) return `<span class="badge">未接入</span>`;
+        return `<span class="badge warn" title="${(live.error || '').replace(/"/g, '')}">已停用</span>`;
+      }
+      // 运行时不认识这个插件（如 hub 走独立实现）→ 回落常量
+    }
+    const p = PLUGINS.find((x) => x.id === id);
+    if (!p) return '';
+    if (p.on) return '<span class="badge ok">已启用</span>';
+    return p.deferred ? '<span class="badge">延后 · 需联调</span>' : '<span class="badge">已关闭</span>';
+  }
+
+  /** 插件开关的初始状态：以运行时为准 */
+  function pluginSwitchedOn(id) {
+    const rt = state.pluginRuntime;
+    if (rt && rt.ready && Array.isArray(rt.plugins)) {
+      const live = rt.plugins.find((x) => x.name === id);
+      if (live) return live.active === true;
+    }
+    const p = PLUGINS.find((x) => x.id === id);
+    return !!(p && p.on);
+  }
+
+  /** 深拷贝会话（分叉用）。structuredClone 不可用时回落到 JSON 往返。 */
+  function deepClone(v) {
+    if (typeof structuredClone === 'function') {
+      try { return structuredClone(v); } catch { /* 含不可克隆值时回落 */ }
+    }
+    return JSON.parse(JSON.stringify(v));
+  }
 
   /* ---------- 渲染：导航 ---------- */
   function renderRail() {
@@ -647,12 +751,25 @@
       const builtinSkills = ['intent', 'trace', 'brain', 'multi'];
       builtinSkills.forEach(sk => { if (!seen.has(sk)) usedSkills.unshift(sk); });
 
+      // MCP 连接状态：此前是硬编码常量（含假的 connected:true）。
+      // 现在以插件运行时真实装载状态为准——内置插件即本地能力来源；
+      // 运行时不可用时全部标为「未接入」，不伪造已连接。
+      const rt = state.pluginRuntime;
+      const rtOf = (n) => (rt && Array.isArray(rt.plugins) ? rt.plugins.find((x) => x.name === n) : null);
       const mcps = [
-        { name: 'filesystem', desc: '文件系统', connected: true },
-        { name: 'browser', desc: '浏览器自动化', connected: true },
-        { name: 'git', desc: 'Git 仓库', connected: false },
-        { name: 'memory', desc: '记忆服务', connected: false },
-      ];
+        { name: 'filesystem', desc: '文件系统', plugin: 'brain' },
+        { name: 'intent', desc: '意图识别网关', plugin: 'intent' },
+        { name: 'memory', desc: '记忆服务', plugin: 'memory' },
+        { name: 'orchestration', desc: '多 Agent 编排', plugin: 'multi' },
+      ].map((m) => {
+        const live = rtOf(m.plugin);
+        return {
+          name: m.name,
+          desc: m.desc,
+          connected: rt && rt.ready ? (live ? live.active === true : false) : false,
+          unavailable: !(rt && rt.ready),
+        };
+      });
 
       // ---- Tab 内容 ----
       let bodyHTML = '';
@@ -680,7 +797,9 @@
           const isOn = builtinSkills.includes(sk);
           return '<div class="ctx-skill"><span class="sk-icon builtin">' + sk[0].toUpperCase() + '</span><span class="sk-name">' + esc(sk) + '</span><span class="sk-status ' + (isOn ? 'on' : 'idle') + '">' + (isOn ? '已启用' : '可用') + '</span></div>';
         }).join('') + '</div>';
-        bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接</div>' + mcps.map(m => '<div class="ctx-mcp"><span class="mcp-dot ' + (m.connected ? 'connected' : 'disconnected') + '"></span><span style="flex:1">' + esc(m.name) + '</span><span style="font-size:10px;color:var(--fg-faint)">' + m.desc + ' · ' + (m.connected ? '已连接' : '待连接') + '</span></div>').join('') + '</div>';
+        bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接</div>'
+          + (mcps.length && mcps[0].unavailable ? '<div class="faint" style="font-size:10px;padding:2px 0 6px">运行时未接入 · 以下为待接入能力，非实时连接状态</div>' : '')
+          + mcps.map(m => '<div class="ctx-mcp"><span class="mcp-dot ' + (m.connected ? 'connected' : 'disconnected') + '"></span><span style="flex:1">' + esc(m.name) + '</span><span style="font-size:10px;color:var(--fg-faint)">' + esc(m.desc) + ' · ' + (m.unavailable ? '未接入' : (m.connected ? '已连接' : '待连接')) + '</span></div>').join('') + '</div>';
       }
 
       return '<div class="ctx-header"><div class="ctx-title">' + ic('clipboard', 16) + ' 任务监控</div><div class="ctx-subtitle">' + esc(s.title) + ' · ' + esc(s.expert) + '</div></div><div class="ctx-tabs">' + tabsHTML + '</div><div class="ctx-body">' + bodyHTML + '</div><div id="previewRoot"></div>';
@@ -704,15 +823,18 @@
       const builtIn = PLUGINS.map((p) => `<div class="ss-i ${p.on ? 'on' : ''}" data-action="plug-nav" data-id="${p.id}">
         <span class="id"></span><span class="in">${p.n}</span>
         ${p.on ? '<span class="ib badge ok">启</span>' : p.deferred ? '<span class="ib badge">延后</span>' : '<span class="ib badge">关</span>'}</div>`).join('');
-      const market = PLUGIN_MARKET.map((p) => `<div class="ss-i"><span class="id"></span><span class="in">${p.n}</span>${p.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>'}</div>`).join('');
-      const skills = SKILLS_MARKET.map((s) => `<div class="ss-i"><span class="id"></span><span class="in mono" style="font-size:11.5px">${s.n}</span>${s.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>'}</div>`).join('');
-      const experts = [...EXPERTS.map((e) => `<div class="ss-i"><span class="id"></span><span class="in">${e}</span><span class="ib badge info">专家</span></div>`),
-        ...TEAMS.map((t) => `<div class="ss-i"><span class="id"></span><span class="in">${t.n}</span><span class="ib badge ceo">团</span></div>`)].join('');
-      const connectors = CONNECTORS.map((c) => `<div class="ss-i ${c.on ? 'on' : ''}"><span class="id"></span><span class="in">${c.n}</span>${c.on ? '<span class="ib badge ok">已连</span>' : '<span class="ib badge">未连</span>'}</div>`).join('');
+      // 插件市场 / 连接器：目前无后端注册表，属「规划中」清单。
+      // 明确标注，避免把规划项当成可安装的真实能力（此前显示为「可装」是误导）。
+      const market = PLUGIN_MARKET.map((p) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(p.n)}</span><span class="ib badge">规划中</span></div>`).join('');
+      const skills = SKILLS_MARKET.map((s) => `<div class="ss-i"><span class="id"></span><span class="in mono" style="font-size:11.5px">${esc(s.n)}</span>${s.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>'}</div>`).join('');
+      const experts = [...expertList().map((e) => `<div class="ss-i"><span class="id"></span><span class="in">${e}</span><span class="ib badge info">专家</span></div>`),
+        ...teamList().map((t) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(t.n)}</span><span class="ib badge ceo">团</span></div>`)].join('');
+      // 连接器：尚无后端，全部标「未接入」（此前 GitHub 硬编码 on:1 显示为「已连」，是假状态）
+      const connectors = CONNECTORS.map((c) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(c.n)}</span><span class="ib badge">未接入</span></div>`).join('');
       return sec('builtin', '内置插件', PLUGINS.length, builtIn) +
         sec('market', '插件市场', PLUGIN_MARKET.length, market) +
         sec('skills', '技能市场', SKILLS_MARKET.length, skills) +
-        sec('experts', '专家·专家团', EXPERTS.length + TEAMS.length, experts) +
+        sec('experts', '专家·专家团', expertList().length + teamList().length, experts) +
         sec('connectors', '连接器', CONNECTORS.length, connectors);
     },
     main() {
@@ -721,14 +843,16 @@
           <div class="ph">
             <div style="min-width:0;flex:1">
               <div class="ptitle">${p.n}
-                ${p.on ? '<span class="badge ok">已启用</span>' : p.deferred ? '<span class="badge">延后 · 需联调</span>' : '<span class="badge">已关闭</span>'}
+                ${pluginBadge(p.id)}
                 ${p.model ? `<span class="badge info">${p.model}</span>` : ''}</div>
               <div class="pdesc">${p.d}</div>
               <div class="pmeta">${p.repo ? `<span class="mono">${p.repo}</span>·` : ''}<span class="faint">能力声明</span></div>
               <div class="pcaps">${p.caps.map((c, i) => `<span class="badge cap ${i === 0 ? '' : (c.includes('write') || c.includes('dispose') || c.includes('commit') ? 'warn' : '')}">${c}</span>`).join('')}</div>
             </div>
             <div class="pactions">
-              <div class="switch ${p.on ? 'on' : ''}" data-action="plug-toggle" data-id="${p.id}" onclick="this.classList.toggle('on');toast(this.classList.contains('on')?'已启用 ${p.id}（注册为 effect）':'已停用 ${p.id}（注册已回滚，无残留）',this.classList.contains('on')?'ok':'warn')"></div>
+              <!-- 内联 onclick 里的 toast 在 IIFE 作用域外，点击必抛 ReferenceError；
+                   切换逻辑统一交给下面委托的 case 'plug-toggle'（真实热插拔）。 -->
+              <div class="switch ${pluginSwitchedOn(p.id) ? 'on' : ''}" data-action="plug-toggle" data-id="${p.id}" title="${pluginSwitchedOn(p.id) ? '点击停用' : '点击启用'}"></div>
               <button class="btn sm" data-action="plug-cfg" data-id="${p.id}">配置</button>
             </div>
           </div>
@@ -921,6 +1045,7 @@
           <div class="row"><span class="mono">%APPDATA%/OrchDesk</span><span class="faint">· 本地优先，数据不出本机</span></div>
           <div class="faint" style="margin-top:6px;font-size:11.5px">包含 sessions.db · memory · plugins · logs · 缓存</div>
           <div class="row" style="margin-top:8px"><button class="btn sm" data-action="open-project-dir">打开目录</button><button class="btn sm" data-action="snapshot-data">导出快照</button><button class="btn sm primary" data-action="check-updates">检查更新（先快照）</button></div>
+          <div class="row" style="margin-top:6px"><button class="btn sm" data-action="export-data">导出数据</button><button class="btn sm" data-action="import-data">导入数据</button><span class="faint" style="font-size:11px">跨设备迁移 · 只补齐不覆盖</span></div>
         </div>
         <div class="sec-title" id="settings-section-about"><span class="ico">${ic('at', 14)}</span>关于</div>
         <div class="card">
@@ -950,7 +1075,7 @@
       <div class="mut" style="margin-bottom:14px">打开就是会话。像 DSH 一样，你只需和一个 Agent 对话；脑-手解耦、多Agent编排、意图识别在后台安静运行，需要时再进「插件」或「设置」。</div>
       <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:center"><span class="badge ok">就绪</span><div><b>deepseek-harness 运行时</b><div class="faint mono">基线 99f6f02 · 本地运行</div></div></div>` },
     { t: '选择默认专家', h: `<div style="margin-bottom:10px" class="mut">你想先和谁对话？（之后可随时切换，或用专家团）</div>
-      ${EXPERTS.map((e, i) => `<div class="expert-opt ${state.wzExpert === i ? 'sel' : ''}" data-action="wz-expert" data-i="${i}"><div class="avatar" style="background:${i === 0 ? 'var(--ceo)' : 'var(--director)'}">${e[0]}</div><div><b>${e}</b><div class="faint">${i === 0 ? '主会话：理解/拆解/回收/沉淀' : '领域专家'}</div></div></div>`).join('')}` }
+      ${expertList().map((e, i) => `<div class="expert-opt ${state.wzExpert === i ? 'sel' : ''}" data-action="wz-expert" data-i="${i}"><div class="avatar" style="background:${i === 0 ? 'var(--ceo)' : 'var(--director)'}">${e[0]}</div><div><b>${e}</b><div class="faint">${i === 0 ? '主会话：理解/拆解/回收/沉淀' : '领域专家'}</div></div></div>`).join('')}` }
   ];
   function renderWizard() {
     $('#wzBody').innerHTML = WZ[state.wz].h;
@@ -977,7 +1102,7 @@
         <div class="prov-name"><b>${esc(p.name)}</b><span class="badge info">${p.type === 'ollama' ? 'Ollama 本地' : 'OpenAI 兼容 · ' + (modeLabel[p.apiMode] || 'Chat')}</span></div>
         <div class="prov-detail"><span class="mono faint">${esc(p.baseUrl)}</span><span class="faint">·</span><span class="faint">${(p.models || []).join(', ')}</span></div>
       </div>
-      <div class="prov-actions"><button class="btn sm ghost" data-action="model-test" data-n="${esc(p.name)}">测试</button><button class="btn sm" data-action="model-edit-provider" data-id="${p.id}">编辑</button><button class="btn sm danger" data-action="model-del-provider" data-id="${p.id}">删除</button></div>
+      <div class="prov-actions"><button class="btn sm ghost" data-action="model-test" data-id="${esc(p.id)}" data-n="${esc((p.models || [])[0] || p.name)}">测试</button><button class="btn sm" data-action="model-edit-provider" data-id="${p.id}">编辑</button><button class="btn sm danger" data-action="model-del-provider" data-id="${p.id}">删除</button></div>
     </div>`).join('');
     refreshDefaultModelPicker();
   }
@@ -1077,7 +1202,7 @@
   function createSessionInProject(pid) {
     const id = 's' + Date.now().toString(36);
     const p = state.projects.find((x) => x.id === pid);
-    const s = { id, pid, title: '新会话', expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+    const s = { id, pid, title: '新会话', expert: expertList()[state.wzExpert] || expertList()[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
     state.sessions[id] = s;
     if (p && !p.sessions.includes(id)) p.sessions.push(id);
     state.pExpanded.add(pid);
@@ -1139,11 +1264,21 @@
   async function doFork(sid, name) {
     const src = state.sessions[sid]; if (!src) return;
     const id = 's' + Date.now().toString(36);
-    const s = clone(src);
-    s.id = id; s.title = name || ('分支-' + sid); s.pid = 'p1'; s.updated = '刚刚';
+    // clone() 此前未定义 → 点击「创建分支」必抛异常。改用 deepClone，
+    // 并继承源会话所属项目（此前硬编码 'p1'，会把分支塞进错误的项目组）。
+    const s = deepClone(src);
+    const pid = src.pid && src.pid !== '__task__' ? src.pid : (state.projects.find((p) => !p.archived) || {}).id || '__task__';
+    s.id = id;
+    s.title = name || ('分支-' + (src.title || sid));
+    s.pid = pid;
+    s.updated = '刚刚';
+    s.forkedFrom = sid;
+    s.forkedAt = new Date().toISOString();
+    // 消息深拷贝后仍为独立数组，后续写入互不影响
+    s.msgs = Array.isArray(s.msgs) ? s.msgs : [];
     state.sessions[id] = s;
-    const p1 = state.projects.find((p) => p.id === 'p1');
-    if (p1) p1.sessions.unshift(id);
+    const proj = state.projects.find((p) => p.id === pid);
+    if (proj && !proj.sessions.includes(id)) proj.sessions.unshift(id);
     state.sel = id; persist(); render();
     toast('已创建分支（继承前缀事件，独立写入）', 'ok');
   }
@@ -1407,9 +1542,9 @@
       <div class="mb">
         <div class="faint" style="margin-bottom:8px">@ 引用后，专家将以 <b>SubAgent</b> 形式参与本次回复，不替换主会话。</div>
         <div class="sec-title" style="margin:6px 0">专家</div>
-        ${EXPERTS.map((e) => `<div class="row" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;margin-bottom:5px"><div style="flex:1"><b>${e}</b></div><button class="btn sm" data-action="expert-attach" data-n="${e}">@ 引用</button></div>`).join('')}
+        ${expertList().map((e) => `<div class="row" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;margin-bottom:5px"><div style="flex:1"><b>${esc(e)}</b></div><button class="btn sm" data-action="expert-attach" data-n="${esc(e)}">@ 引用</button></div>`).join('')}
         <div class="sec-title" style="margin:10px 0 6px">专家团</div>
-        ${TEAMS.map((t) => `<div class="row" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;margin-bottom:5px"><div style="flex:1"><b>${t.n}</b><div class="faint" style="font-size:11px">${t.m}</div></div><button class="btn sm primary" data-action="expert-attach" data-n="${t.n}">引用团</button></div>`).join('')}
+        ${teamList().map((t) => `<div class="row" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;margin-bottom:5px"><div style="flex:1"><b>${esc(t.n)}</b><div class="faint" style="font-size:11px">${esc(t.m || '')}</div></div><button class="btn sm primary" data-action="expert-attach" data-n="${esc(t.n)}">引用团</button></div>`).join('')}
       </div>
       <div class="mf"><button class="btn ghost" data-action="modal-cancel">关闭</button></div>`);
   }
@@ -1518,7 +1653,7 @@
         state.projDropdownOpen = false;
         closeModal();
         const id = 's' + Date.now().toString(36);
-        const s = { id, pid: '__task__', title: '任务', expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+        const s = { id, pid: '__task__', title: '任务', expert: expertList()[state.wzExpert] || expertList()[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
         state.sessions[id] = s;
         state.sel = id;
         state.pExpanded.add('__task__');
@@ -1529,7 +1664,7 @@
       case 'welcome-new-proj': doNewConv(); break;
       case 'welcome-task': {
         const id = 's' + Date.now().toString(36);
-        const s = { id, pid: '__task__', title: '任务', expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+        const s = { id, pid: '__task__', title: '任务', expert: expertList()[state.wzExpert] || expertList()[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
         state.sessions[id] = s; state.sel = id;
         persist(); render(); toast('已进入任务模式（无项目）', 'ok');
         break;
@@ -1545,7 +1680,7 @@
         homeInp.value = '';
         if (!state.selProjForComposer || state.selProjForComposer === '__task__') {
           const id = 's' + Date.now().toString(36);
-          const s = { id, pid: '__task__', title: text.slice(0, 20), expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+          const s = { id, pid: '__task__', title: text.slice(0, 20), expert: expertList()[state.wzExpert] || expertList()[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
           state.sessions[id] = s;
           state.sel = id;
           state.selProjForComposer = '__task__';
@@ -1555,7 +1690,7 @@
           const pid = state.selProjForComposer;
           const sid = 's' + Date.now().toString(36);
           const p = state.projects.find(x => x.id === pid);
-          const s = { id: sid, pid, title: text.slice(0, 20), expert: EXPERTS[state.wzExpert] || EXPERTS[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
+          const s = { id: sid, pid, title: text.slice(0, 20), expert: expertList()[state.wzExpert] || expertList()[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
           state.sessions[sid] = s;
           if (p && !p.sessions.includes(sid)) p.sessions.push(sid);
           state.pExpanded.add(pid);
@@ -1718,7 +1853,9 @@
             <div class="mb-row"><label>名称</label><input id="tpName" class="inp" placeholder="如：summarizer"></div>
             <div class="mb-row"><label>代码</label><textarea id="tpCode" class="inp" rows="4" placeholder="export function run(t){ return t; }"></textarea></div>
           </div>
-          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="tp-create" onclick="var n=document.getElementById('tpName')?document.getElementById('tpName').value.trim():'';var c=document.getElementById('tpCode')?document.getElementById('tpCode').value.trim():'';if(!n||!c){toast('请填写名称与代码','warn');return;}try{bridge.createTempPlugin({name:n,code:c}).then(function(r){if(r&&r.ok){state.tempPlugins.unshift(r.plugin);closeModal();render();toast('已创建临时插件「'+n+'」（仅驻内存）','ok');}else{toast('创建被拒：'+(r&&r.reason||'静态门控未通过'),'danger');}}).catch(function(){toast('创建失败（运行时未接入）','warn');});}catch(e){toast('创建失败','warn');}">创建（CONFIRM）</button></div>`);
+          <!-- 内联 onclick 里的 toast/bridge/state 都在 IIFE 作用域外，点击必 ReferenceError；
+               逻辑已由下方委托的 case 'tp-create' 承担。 -->
+          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="tp-create">创建（CONFIRM）</button></div>`);
         break;
       }
       case 'tp-create': {
@@ -1742,7 +1879,19 @@
       }
       case 'sim-subagent': { const sc = $('#msgScroll'); const div = document.createElement('div'); div.className = 'msg agent'; div.innerHTML = `<div class="avatar" style="background:var(--ceo)">AI</div><div class="body"><div class="meta"><b>OrchDesk</b><span>刚刚</span></div><div>已派发 SubAgent 处理该任务。</div><div class="subagent"><span class="badge warn">SubAgent</span><span class="mono">W-108 临时任务</span><span class="faint">执行中…</span></div></div>`; sc.appendChild(div); sc.scrollTop = sc.scrollHeight;
         setTimeout(() => { div.querySelector('.subagent').innerHTML = `<span class="badge info">SubAgent</span><span class="mono">W-108 临时任务</span><span class="faint">已回收并销毁（即用即走）</span>`; toast('脑手解耦：SubAgent 成果已回收，上下文已销毁', 'ok'); }, 2200); break; }
-      case 'trace': { state.feedback.add('s1|' + el.dataset.t); render(); toast('TRACE：反馈已脱敏并遥测至公开 GitHub 仓库', 'ok'); break; }
+      case 'trace': {
+        // key 必须与 renderMsg 的读取口径一致（sid|m.t）；此前硬编码 's1' 导致反馈永远显示不出来。
+        const sid = state.sel || '';
+        const key = sid + '|' + (el.dataset.t || '');
+        if (state.feedback.has(key)) state.feedback.delete(key);
+        else state.feedback.add(key);
+        // 反馈落盘，重启后仍在（此前仅存于内存 Set）
+        const s = state.sessions[sid];
+        if (s) { s.feedback = [...state.feedback].filter((k) => k.startsWith(sid + '|')); persist(); }
+        render();
+        toast('TRACE：反馈已记录（脱敏后遥测）', 'ok');
+        break;
+      }
 
       /* 模型选择 + 思维等级 */
       case 'composer-more-toggle': { state.composerMoreOpen = !state.composerMoreOpen; const cm = document.querySelector('.composer-more-dropdown'); if (cm) cm.classList.toggle('open', state.composerMoreOpen); break; }
@@ -1782,7 +1931,29 @@
 
       /* 插件 */
       case 'pside-toggle': { if (state.plugSideExpanded.has(id)) state.plugSideExpanded.delete(id); else state.plugSideExpanded.add(id); render(); break; }
-      case 'plug-toggle': { el.classList.toggle('on'); toast(el.classList.contains('on') ? `已启用 ${id}（注册为 effect）` : `已停用 ${id}（注册已回滚，无残留）`, el.classList.contains('on') ? 'ok' : 'warn'); break; }
+      case 'plug-toggle': {
+        // 真实热插拔（FR-3）：此前只切 CSS class + toast，插件从未真正加载/卸载。
+        const wantOn = !el.classList.contains('on');
+        el.style.pointerEvents = 'none'; el.style.opacity = '0.6';
+        try {
+          const r = await bridge.setPluginEnabled(id, wantOn);
+          if (r && r.ok) {
+            // 以运行时返回的真实状态为准，不乐观更新
+            const on = r.active === true;
+            el.classList.toggle('on', on);
+            state.pluginRuntime = await bridge.getPluginRuntime().catch(() => state.pluginRuntime);
+            toast(on ? `已启用 ${id}（注册为 effect）` : `已停用 ${id}（注册已回滚，无残留）`, on ? 'ok' : 'warn');
+          } else {
+            toast(`切换失败：${(r && r.reason) || '未知错误'}`, 'danger');
+          }
+        } catch (err) {
+          toast(`切换异常：${(err && err.message) || err}`, 'danger');
+        } finally {
+          el.style.pointerEvents = ''; el.style.opacity = '';
+          render();
+        }
+        break;
+      }
       case 'plug-cfg': { const card = el.closest('.plug'); if (card) card.classList.toggle('open'); break; }
       case 'plug-nav': { const card = document.querySelector(`.plug[data-pid="${id}"]`); if (card) { card.classList.add('open'); card.scrollIntoView({ behavior: 'smooth', block: 'start' }); } break; }
       case 'plug-unload': toast('已卸载并回滚注册（无残留）', 'warn'); break;
@@ -1880,7 +2051,23 @@
       case 'hub-unpair': { state.hubStatus = { paired: false }; state.hubResultText = ''; toast('已解除配对', 'warn'); render(); break; }
 
       /* 设置 */
-      case 'model-test': { el.disabled = true; el.textContent = '测试中…'; setTimeout(() => { el.disabled = false; el.textContent = '测试'; toast(`${el.dataset.n} 连通正常`, 'ok'); }, 800); break; }
+      case 'model-test': {
+        // 此前用 800ms setTimeout 伪造「连通正常」，而真正的 bridge.testModel 从未被调用 —— 假成功。
+        // 改为真实连通性测试：主进程发一次真实请求并计时。
+        const pid = el.dataset.id || '';
+        const model = el.dataset.n || '';
+        el.disabled = true; el.textContent = '测试中…';
+        try {
+          const r = await bridge.testModel(pid, model);
+          if (r && r.ok) toast(`${model} 连通正常（${r.latencyMs != null ? r.latencyMs + 'ms' : '已响应'}）`, 'ok');
+          else toast(`${model} 连通失败：${(r && r.error) || '未知错误'}`, 'danger');
+        } catch (err) {
+          toast(`测试异常：${(err && err.message) || err}`, 'danger');
+        } finally {
+          el.disabled = false; el.textContent = '测试';
+        }
+        break;
+      }
       case 'model-edit-provider': {
         const p = (state.modelProviders || []).find(x => x.id === el.dataset.id);
         if (!p) break;
@@ -1952,6 +2139,46 @@
         break;
       }
       case 'snapshot-data': { const r = await bridge.snapshotData(); toast(r && r.ok ? `数据快照已生成：${r.dir}` : `快照失败：${(r && r.reason) || ''}`, r && r.ok ? 'ok' : 'danger'); break; }
+      /* BUG-013 方案 B：数据导出 / 导入 */
+      case 'export-data': {
+        const r = await bridge.exportData();
+        toast(r && r.ok ? `数据已导出：${r.path}` : (r && r.reason === 'cancelled' ? '已取消导出' : `导出失败：${(r && r.reason) || ''}`), r && r.ok ? 'ok' : (r && r.reason === 'cancelled' ? 'ok' : 'danger'));
+        break;
+      }
+      case 'import-data': {
+        importSuspend = true;
+        try {
+          const r = await bridge.importData();
+          if (r && r.ok) {
+            const parts = [];
+            const im = r.imported || {};
+            if (im.sessions) parts.push(`会话 ×${im.sessions}`);
+            if (im.projects) parts.push(`项目 ×${im.projects}`);
+            if (im.providers) parts.push(`模型提供商 ×${im.providers}`);
+            if (im.guanji) parts.push('观雅集 TOKEN');
+            if (im.hub) parts.push('Hub 凭据');
+            const notes = (r.notes || []).join('\n');
+            const summary = parts.length ? parts.join(' · ') : '本地数据已包含备份内容，无新增';
+            toast(`导入完成：${summary}${notes ? '\n' + notes : ''}`, 'ok');
+            // 重新拉取会话与项目分组（主进程已重载内存态；sessions 是按 id 的 map，需归一化）
+            try {
+              const [sess, projs] = await Promise.all([bridge.loadSessions(), bridge.loadProjects()]);
+              if (Array.isArray(sess) && sess.length) {
+                state.sessions = {};
+                sess.forEach((s) => { state.sessions[s.id] = s; });
+                if (!state.sessions[state.sel]) state.sel = sess[0].id;
+              }
+              if (Array.isArray(projs) && projs.length) state.projects = projs;
+              render();
+            } catch { /* 渲染层自行降级：下次启动生效 */ }
+          } else {
+            toast(r && r.reason === 'cancelled' ? '已取消导入' : `导入失败：${(r && r.reason) || ''}`, r && r.reason === 'cancelled' ? 'ok' : 'danger');
+          }
+        } finally {
+          importSuspend = false; // 任何异常路径都必须恢复落盘，否则后续变更永不持久化
+        }
+        break;
+      }
       case 'check-updates': {
         toast('正在先快照数据目录，然后检查更新…', 'ok');
         const r = await bridge.checkUpdates();
@@ -1981,7 +2208,7 @@
       case 'archive-confirm': doArchiveProject(id); closeModal(); break;
 
       /* 向导 */
-      case 'wz-next': if (state.wz === 0) { state.wz = 1; renderWizard(); } else { $('#wizard').classList.add('hidden'); state.page = 'session'; render(); toast(`已进入会话 · 默认专家：${EXPERTS[state.wzExpert]}`, 'ok'); } break;
+      case 'wz-next': if (state.wz === 0) { state.wz = 1; renderWizard(); } else { $('#wizard').classList.add('hidden'); state.page = 'session'; render(); toast(`已进入会话 · 默认专家：${expertList()[state.wzExpert] || expertList()[0]}`, 'ok'); } break;
       case 'wz-skip': $('#wizard').classList.add('hidden'); state.page = 'session'; render(); break;
       case 'wz-open': state.wz = 0; renderWizard(); $('#wizard').classList.remove('hidden'); break;
       case 'wz-expert': state.wzExpert = +el.dataset.i; renderWizard(); break;
@@ -2035,6 +2262,16 @@
     // 立即渲染空壳（用户先看到界面，不等数据）
     render();
 
+    // 第零步：加载项目分组（此前只加载会话 → 重启后项目全丢、会话退化为「任务」组）
+    try {
+      if (typeof bridge.loadProjects === 'function') {
+        const remoteProjects = await bridge.loadProjects();
+        if (Array.isArray(remoteProjects) && remoteProjects.length) {
+          state.projects = remoteProjects.map((p) => ({ ...p, sessions: Array.isArray(p.sessions) ? p.sessions : [] }));
+        }
+      }
+    } catch (err) { console.warn('[init] 项目分组加载失败:', err); }
+
     // 第一步：加载会话（决定走 wizard 还是主界面）
     try {
       const remote = await bridge.loadSessions();
@@ -2042,11 +2279,42 @@
       if (remote && remote.length) {
         state.sessions = {};
         remote.forEach((s) => { state.sessions[s.id] = s; });
-        state.projects.forEach((p) => { p.sessions = remote.filter((s) => s.pid === p.id).map((s) => s.id); });
+        // 项目分组优先用落盘的成员关系，缺失时按 pid 重建（兼容旧数据）
+        const known = new Set();
+        state.projects.forEach((p) => { p.sessions.forEach((id) => known.add(id)); });
+        state.projects.forEach((p) => {
+          const owned = remote.filter((s) => s.pid === p.id).map((s) => s.id);
+          p.sessions = p.sessions.filter((id) => state.sessions[id]);
+          owned.forEach((id) => { if (!p.sessions.includes(id)) p.sessions.push(id); });
+        });
+        // 恢复 TRACE 反馈（此前反馈只存内存，刷新即丢）
+        Object.values(state.sessions).forEach((s) => {
+          if (Array.isArray(s.feedback)) s.feedback.forEach((k) => state.feedback.add(k));
+        });
         if (!state.sessions[state.sel]) state.sel = remote[0].id;
       }
       console.log('[init] state.sel:', state.sel, 'total sessions:', Object.keys(state.sessions).length);
     } catch (err) { console.error('[init] error:', err); }
+
+    // 订阅工具执行步骤（此前主进程发 orchdesk:tool-step 但无人订阅 → 步骤条永远为空）
+    try {
+      if (typeof bridge.onToolStep === 'function') {
+        bridge.onToolStep((step) => {
+          const s = state.sessions[step.sessionId];
+          if (!s || !step) return;
+          state.toolSteps[step.sessionId] = state.toolSteps[step.sessionId] || [];
+          const list = state.toolSteps[step.sessionId];
+          if (step.ph === 'running') {
+            list.push({ n: step.name, ph: 'running' });
+          } else {
+            const rec = [...list].reverse().find((x) => x.n === step.name && x.ph === 'running');
+            if (rec) { rec.ph = step.ph; rec.result = step.result || ''; }
+            else list.push({ n: step.name, ph: step.ph, result: step.result || '' });
+          }
+          if (state.sel === step.sessionId) render();
+        });
+      }
+    } catch (err) { console.warn('[init] 工具步骤订阅失败:', err); }
 
     // 第二步：并行加载所有元数据（互不依赖，同时发起）
     const results = await Promise.allSettled([
@@ -2061,6 +2329,16 @@
       bridge.getMemoryStats().then(r => { if (r) state.memoryStats = r; }).catch(() => {}),
       bridge.getCompensationAudit().then(r => { if (Array.isArray(r)) state.compAudit = r; }).catch(() => {}),
       bridge.listTempPlugins().then(r => { if (Array.isArray(r)) state.tempPlugins = r; }).catch(() => {}),
+      // 插件运行时真实状态（插件页开关据此显示，而非硬编码的 p.on）
+      (typeof bridge.getPluginRuntime === 'function'
+        ? bridge.getPluginRuntime().then(r => { if (r) state.pluginRuntime = r; })
+        : Promise.resolve()).catch(() => {}),
+      // 编排目录（8 专家 + 3 团的真实数据，替代渲染层硬编码常量）
+      (typeof bridge.getOrchestrationCatalog === 'function'
+        ? bridge.getOrchestrationCatalog().then(r => {
+            if (r && Array.isArray(r.experts) && r.experts.length) state.orchestrationCatalog = r;
+          })
+        : Promise.resolve()).catch(() => {}),
       // 模型管理
       bridge.getModelConfig().then(async (mc) => {
         if (mc && mc.providers && mc.providers.length) {

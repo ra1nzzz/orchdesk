@@ -2,7 +2,7 @@
 id: orch-cur-001
 title: OrchDesk 当前状态
 status: canonical
-updated: 2026-08-28
+updated: 2026-08-29
 ---
 
 # OrchDesk 当前状态
@@ -156,7 +156,9 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 
 ## 下一步
 
-- **P1–P6 全部代码与配置已就绪**：六阶段（底座/桌面壳/内置插件/安全底座/智能层/补偿自进化/生态发布）的插件、桥接、渲染 UI、打包配置均落地并通过 tsc 编译（EXIT=0）+ app.js 语法检查 + 插件真实逻辑 node 直驱验证（verify-p5 23/23）+ 知识库审计 0 issues。**打包已产出**：electron-builder 成功生成 nsis Setup（`release/OrchDesk Setup 0.0.0.exe`，84MB）+ portable（`release/OrchDesk 0.0.0.exe`）+ `latest.yml` + `win-unpacked/`（asar 结构校验完整）。剩余动作是**运行期验证**（与 P1 同源门控）：① 本 agent 环境 Electron 阻断（BUG-W02 open：binding 未链接 + `ELECTRON_RUN_AS_NODE=1`），GUI 实跑须在**正常 Windows 桌面**直接双击产物 exe 或执行 `pnpm --filter @orchdesk/desktop start`；② 真实模型闭环需在 `main.ts:runAgentTurn` 接入 `dsh ctx.agents.followup` 或本地 Ollama（配置 API Key / `ORCHDESK_MODEL_PROVIDER`）；③ 观雅集真实列表/安装/发布需用户配置 TOKEN + 网络；④ OrchClaw Hub 端到端联调需可达远程 Hub；⑤ 正式发布分发需补 `publish`/`repository` 真实仓库信息后走 GitHub Releases。
+- **[2026-08-29 补齐] dsh/Cordis 运行时已真实接入**：此前 [差距盘点](../99-归档/PRD差距盘点-2026-08-29.md) 指出 2515 行插件是「写完了没接线」的死代码（单点根因 = 运行时缺席）。现 `apps/desktop/dsh-runtime.ts` 在主进程 `new Context()` 装载全部 9 插件（9/9 ACTIVE，`getService()` 可取）、`main.ts` 用 `bootRuntime()` 替换 `initAuthzBridge({get:()=>undefined})`、11 个 `dshBridgeStub` 改为真实 `ctx.get(...)`、7 插件 `provide(name,value,true)` 第三参误传修复；凭据升级 AES-256-GCM（`credentials.ts`）、沙箱子进程隔离、6 处渲染层缺陷修复；插件测试 2/9 → 9/9（`scripts/verify-plugins.mjs`），验证套件扩至 158 项全绿。**PRD 完成度从 ≈ 30% 升至 ≈ 75%**。完整复盘见 [归档/PRD差距补齐-2026-08-29](../99-归档/PRD差距补齐-2026-08-29.md)。三笔提交（`e820e33`/`2d988c5`/`91ae26b`）已落 `main`，未打 tag / 未发布（预期 v0.4.0）。
+
+- **P1–P6 全部代码与配置已就绪**：六阶段（底座/桌面壳/内置插件/安全底座/智能层/补偿自进化/生态发布）的插件、桥接、渲染 UI、打包配置均落地并通过 tsc 编译（EXIT=0）+ app.js 语法检查 + 插件真实逻辑 node 直驱验证（verify-p5 23/23，现扩至 verify-plugins 9/9）+ 知识库审计 0 issues。**打包已产出**：electron-builder 成功生成 nsis Setup（`release/OrchDesk-Setup-0.3.1.exe`，84MB）+ portable（`release/OrchDesk-0.3.1.exe`）+ `latest.yml` + `win-unpacked/`（asar 结构校验完整）。剩余动作是**运行期验证**（与 P1 同源门控）：① 本 agent 环境 Electron 阻断（BUG-W02 open：binding 未链接 + `ELECTRON_RUN_AS_NODE=1`），GUI 实跑须在**正常 Windows 桌面**直接双击产物 exe 或执行 `pnpm --filter @orchdesk/desktop start`；② 真实模型闭环需在 `main.ts:runAgentTurn` 接入 `dsh ctx.agents.followup` 或本地 Ollama（配置 API Key / `ORCHDESK_MODEL_PROVIDER`）；③ 观雅集真实列表/安装/发布需用户配置 TOKEN + 网络；④ OrchClaw Hub 端到端联调需可达远程 Hub；⑤ 正式发布分发需补 `publish`/`repository` 真实仓库信息后走 GitHub Releases。
 - **本机门控**：本 agent 宿主环境（WorkBuddy CLI）无法启动任何 Electron GUI（BUG-W02 open，2026-08-24 早间「误用 node」结案已推翻）；打包/联调/发布实跑须在正常 Windows 桌面 + 网络/远程环境完成。代码正确性已通过 tsc 编译（EXIT=0）+ app.js 语法检查 + verify-p5（真实插件逻辑）+ asar 结构校验 + 知识库 audit 0 issues。
 - 铁律：每个 Phase 端到端可用，不重演 OrchStar「后端先行、UI 荒废」。P6 为路线图收口阶段，生态（观雅集/Hub）与发布（electron-builder/更新前快照）均按 PLAN 落地、不任务漂移。
 
@@ -175,3 +177,22 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 | **电灯白屏防护** | `BrowserWindow` 加 `backgroundColor: '#1E1E1E'` |
 | **Emoji → SVG 全覆盖** | 全部 emoji 图标已迁移到 `ic()` SVG 映射（含 ctx-empty 💬→clipboard） |
 | **E2E 测试** | Playwright 脚本 26/29 PASS（3 项为 mock bridge 消息收发限制，预期内） |
+
+## 第二轮补齐（2026-08-29 晚 · yt-dev-review 并发审阅工作流）
+
+> 流程：主会话推进 + 解耦模块委派并行子代理开发；每模块完成后由 `yt-dev-review` 技能派 3 个并行审阅子代理（质量/效率/可复用性）→ 交叉比对 → 交叉修复 → 全量复验。本轮共 12 个开发/审阅子代理。
+
+| 模块 | 交付 | 审阅发现的真问题（已修复） |
+|---|---|---|
+| M1 数据目录统一 | 新纯逻辑 `apps/desktop/data-dir.ts`（`resolveDataDir`/`migrateDataFiles`/`mergeSessionsData` 等，零 electron 依赖）；guanji.json/hub.json/skills 接入 `dataDir()`；凭据类 copy-if-absent 迁移；`data-dir-verify.cjs` 36 项 | **P0**：`main.ts` 调 `resolveDataDir` 漏传 `existsSync`（缺省恒 false）→ 便携模式生产失效（测试自注入 so 全绿，「测试过、生产坏」）；每次启动重写整份 sessions（merge 对已存在 id 计 added）；候选目录未规范化去重；copyTree 每文件 mkdir |
+| M2 导出/导入 JSON | BUG-013 方案 B：`orchdesk:export-data/import-data` + preload 桥 + 设置页按钮；备份单文件（kind: orchdesk-backup，白名单 5 段）；`data-port-verify.cjs` 10 项 | **P0**：导入竞态——`persist-sessions` 是渲染层状态整体重写，导入落盘与渲染层重拉之间触发 persist 会冲掉导入数据（修：渲染层 `importSuspend` 挂起 persist，finally 恢复）；伪造备份可写入明文凭据（修：`credentialSectionValid` 校验 enc/tokenCipher）；大文件无上限（修：256MB 拒绝）；pick-folder 非空断言 |
+| M3 模型闭环线级验证 | `apps/desktop/model-loop-verify.cjs` 23 项：`node:http` 真 mock 服务（OpenAI chat/responses/completions + Ollama 四形态、一轮多 tool_calls、降级、401/429 canary 防泄漏、迭代上限、结果裁剪） | **P0**：`apiMode:'responses'` 的 `input` 只拼 user 消息 → 丢 system 提示词与 assistant 历史，工具能力彻底失效（修：按规范传完整消息数组，system→developer）；明文 apiKey 被静默删除（修：就地加密迁移）；Ollama 错误正文未截断；maxToolIterations 保存 500 运行 200 的静默不符 |
+| M4 编排闭环验证 | `scripts/verify-orchestration.mjs` 45 项：真实 brain/multi 插件产物 + mock Cordis ctx（SubAgent 派生/即用即走/背压/晋升 fail-closed/三层编排/委派树） | **P0**：`brain.promoteWorkerOutput` 恒 false → FR-10 worker→director 晋升永久断裂（修：接入 director 过滤 seam，默认仍拒绝）；multi rootId `ceo-${Date.now()}` 同毫秒碰撞（修：自增序号）；`getDelegationTree` 只展开一层（修：递归）；失败节点被跨 root「置 done」洗白（修：failed 状态 + 只遍历本次 root） |
+| M5 TRACE 上传验证 | `scripts/verify-trace-upload.mjs` 36 项：真 `node:http` mock + 传输层重写 api.github.com→127.0.0.1（脱敏断言喂真实样串） | **P0**：30s 定时器路径在 `pending<batchSize` 时被批量门控拦截 → 低流量记录永不上传、进程退出即丢（修：定时器/dispose 走 `flushNow`）；`splice` 误删队首未到期项；无 repoUrl/token 静默丢单（修：记录留队列）；明文凭据结构可导入 |
+| M6 vendor 修复 | `scripts/vendor-dsh.cjs` 三处修复：DESKTOP 路径少算一级（产物写 `apps/vendor` 而打包配置期望 `apps/desktop/vendor`）；shim `exports` 目标缺 `./` 前缀（require 直接抛 Invalid exports target）；build.files 补 `node_modules/@deepseek-ai/**/*`。重跑后 7 dsh 包 + 9 插件物化，`@deepseek-ai/cordis` 等 require 探测通过 | 前一轮会话遗留的脚本 bug 正是「重跑确认」要抓的问题 |
+
+**验证**：`npm run verify` 扩至 **11 套件 308 项全绿**（EXIT=0）；`tsc -p apps/desktop/tsconfig.json` EXIT=0；`node --check app.js` OK。
+
+**流程产物**：`yt-dev-review` 技能已建（`~/.workbuddy/skills/yt-dev-review/SKILL.md`，实现三方并发审阅 + 交叉修复 + 复验门禁 SOP）。
+
+**遗留（与此前同源门控）**：打包产物 asar 校验（dist:win 进行中）；GUI 实机冒烟（BUG-W02）；真实模型/SubAgent/TRACE 实测（须 API Key、Ollama、GitHub repoUrl+TOKEN）；代码签名；审阅建议中未采纳的低成本项（electron stub 公共化、导出缩进、readJsonFile 下沉）已记录在案。

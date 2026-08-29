@@ -8,5 +8,5 @@
     "moduleResolution": "node",
     "target": "ES2022"
   },
-  "include": ["main.ts", "preload.ts", "guanji.ts", "hub.ts", "agent-runtime.ts"]
+  "include": ["main.ts", "preload.ts", "guanji.ts", "hub.ts", "agent-runtime.ts", "host-services.ts", "dsh-runtime.ts", "credentials.ts"]
 }

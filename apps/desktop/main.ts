@@ -2,8 +2,23 @@
 import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, safeStorage, shell } from 'electron';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
+import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled } from './dsh-runtime';
+import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
+import {
+  DATA_DIR_NAMES,
+  DATA_FILE_NAMES,
+  candidateLegacyDirs,
+  mergeProvidersData,
+  mergeSessionsData,
+  migrateDataDirs,
+  migrateDataFiles,
+  resolveDataDir,
+  setDataDirResolver,
+  type MigrateFileSpec,
+} from './data-dir';
 import {
   ALLOWED_COMMANDS,
   TOOL_DEFS,
@@ -54,113 +69,77 @@ let store: Record<string, unknown> = {};
 //
 // 由于 NSIS 的 userData 本身就是 %APPDATA%\OrchDesk，第 3 条让 **portable 与
 // NSIS 天然共用同一目录**，重装 / 换安装包类型不再丢数据。
-// 启动时会从所有历史候选路径「按 key 合并」（不覆盖目标侧已有的更新数据）。
+// 启动时会从所有历史候选路径迁移：会话/模型配置按 key 合并，凭据类文件与
+// skills 目录「目标侧缺失才搬运」（只在乎不丢，绝不覆盖目标侧已有数据）。
+// 目录解析与迁移逻辑全在 data-dir.ts（纯逻辑、无 electron 依赖、可单测）。
 // ---------------------------------------------------------------------------
 
-const DATA_DIR_NAME = 'OrchDesk';
-const DATA_FILES = ['orchdesk-sessions.json', 'models.json'] as const;
+const DATA_FILES: MigrateFileSpec[] = [
+  { name: DATA_FILE_NAMES.sessions, mode: 'merge-json', merge: mergeSessionsData },
+  { name: DATA_FILE_NAMES.models, mode: 'merge-json', merge: mergeProvidersData },
+  // 凭据类：整份搬运，禁止深合并——合并会破坏 safeStorage 密文结构。
+  { name: DATA_FILE_NAMES.guanji, mode: 'copy-if-absent' },
+  { name: DATA_FILE_NAMES.hub, mode: 'copy-if-absent' },
+];
+const DATA_DIRS = [DATA_DIR_NAMES.skills];
 
-/** 检测便携模式数据目录（exe 同目录），未启用返回 null。 */
-function detectPortableDataDir(): string | null {
-  if (!app.isPackaged) return null;
-  try {
-    const exeDir = path.dirname(app.getPath('exe'));
-    const dataDir = path.join(exeDir, 'orchdesk-data');
-    const marker = path.join(exeDir, 'PORTABLE');
-    if (fs.existsSync(dataDir) || fs.existsSync(marker)) return dataDir;
-  } catch { /* exe 路径不可用则视为非便携 */ }
-  return null;
+/** 读取 electron 路径；app 未就绪时返回 undefined（不影响候选目录枚举）。 */
+function safeGetPath(name: Parameters<typeof app.getPath>[0]): string | undefined {
+  try { return app.getPath(name); } catch { return undefined; }
+}
+
+/** exe 所在目录（便携模式判定用）。 */
+function safeExeDir(): string | undefined {
+  try { return path.dirname(app.getPath('exe')); } catch { return undefined; }
 }
 
 let resolvedDataDir: string | null = null;
 
 function dataDir(): string {
   if (resolvedDataDir) return resolvedDataDir;
-  const envHome = (process.env.ORCHDESK_HOME || '').trim();
-  let dir: string;
-  if (envHome) {
-    dir = path.resolve(envHome);
-  } else {
-    dir = detectPortableDataDir() || path.join(app.getPath('appData'), DATA_DIR_NAME);
-  }
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch (err) {
-    console.error('[orchdesk] 数据目录不可用，回退 userData:', (err as Error).message);
-    dir = app.getPath('userData');
-    try { fs.mkdirSync(dir, { recursive: true }); } catch { /* 尽力而为 */ }
-  }
+  const userData = safeGetPath('userData');
+  const dir = resolveDataDir({
+    envHome: process.env.ORCHDESK_HOME,
+    isPackaged: app.isPackaged,
+    exeDir: safeExeDir(),
+    appData: safeGetPath('appData'),
+    userData,
+    // 必须显式注入：缺省是 () => false，会让便携模式探测恒失败而永远落 %APPDATA%。
+    existsSync: (p) => {
+      try { return fs.existsSync(p); } catch { return false; }
+    },
+    canUse: (d) => {
+      try {
+        fs.mkdirSync(d, { recursive: true });
+        return true;
+      } catch (err) {
+        // 兜底目录（userData）即使创建失败也照原样返回，交由上层报错。
+        if (userData && d === userData) return true;
+        console.error('[orchdesk] 数据目录不可用，回退 userData:', (err as Error).message);
+        return false;
+      }
+    },
+  });
   resolvedDataDir = dir;
   console.log(`[orchdesk] 数据目录: ${dir}`);
   return dir;
 }
 
+// guanji / hub 与主进程共用同一目录：由 data-dir 模块转发（惰性闭包，app 就绪
+// 后才真正解析），避免它们反向 import main 造成循环依赖。
+setDataDirResolver(() => dataDir());
+
 /** 所有历史可能的数据目录（用于迁移）。 */
 function legacyDataDirs(): string[] {
-  const out = new Set<string>();
-  const push = (p: string | undefined) => { if (p) out.add(p); };
-  try { push(app.getPath('userData')); } catch { /* ignore */ }
-  try { push(path.join(app.getPath('appData'), DATA_DIR_NAME)); } catch { /* ignore */ }
-  try { push(path.join(app.getPath('appData'), 'orchdesk')); } catch { /* ignore */ }
-  try { push(path.join(app.getPath('userData'), '..')); } catch { /* ignore */ }
-  // portable 历史位置：exe 同目录
-  try { if (app.isPackaged) push(path.join(path.dirname(app.getPath('exe')), 'orchdesk-data')); } catch { /* ignore */ }
-  // dev 历史位置：apps/desktop 与仓库根
-  try { push(path.resolve(__dirname, '..')); } catch { /* ignore */ }
-  try { push(path.resolve(__dirname, '../..')); } catch { /* ignore */ }
-  try { push(path.join(path.resolve(__dirname, '..'), '.orchdesk-home')); } catch { /* ignore */ }
-  return [...out];
-}
-
-function readJson(file: string): unknown | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf-8'));
-  } catch { return null; }
-}
-
-function mergeSessions(targetFile: string, srcData: unknown): number {
-  const src = (srcData && typeof srcData === 'object' ? srcData : {}) as Record<string, Record<string, unknown>>;
-  let merged = 0;
-  const dst = (readJson(targetFile) || {}) as Record<string, Record<string, unknown>>;
-  for (const [id, s] of Object.entries(src)) {
-    if (!s || typeof s !== 'object' || !Array.isArray(s.msgs)) continue;
-    const cur = dst[id];
-    if (!cur) { dst[id] = s; merged++; continue; }
-    // 同 id：保留 updated 较新的一份，并把对方独有的消息并入
-    const curT = String(cur.updated || '');
-    const srcT = String(s.updated || '');
-    const newer = srcT > curT ? s : cur;
-    const older = srcT > curT ? cur : s;
-    const newerMsgs = Array.isArray(newer.msgs) ? newer.msgs : [];
-    const olderMsgs = Array.isArray(older.msgs) ? older.msgs : [];
-    const base = newerMsgs.length >= olderMsgs.length ? newerMsgs : olderMsgs;
-    dst[id] = { ...older, ...newer, msgs: base };
-    merged++;
-  }
-  if (merged) fs.writeFileSync(targetFile, JSON.stringify(dst), 'utf-8');
-  return merged;
-}
-
-function mergeModels(targetFile: string, srcData: unknown): number {
-  const src = (srcData && typeof srcData === 'object' ? srcData : {}) as { providers?: Array<Record<string, unknown>> };
-  const srcProviders = Array.isArray(src.providers) ? src.providers : [];
-  if (!srcProviders.length) return 0;
-  const dst = (readJson(targetFile) || { providers: [] }) as { providers?: Array<Record<string, unknown>>; [k: string]: unknown };
-  const dstProviders = Array.isArray(dst.providers) ? dst.providers : [];
-  let added = 0;
-  for (const p of srcProviders) {
-    if (!p || typeof p !== 'object') continue;
-    const id = String(p.id ?? p.name ?? '');
-    if (!id || dstProviders.some((d) => String(d?.id ?? '') === id)) continue;
-    dstProviders.push(p);
-    added++;
-  }
-  if (added) {
-    dst.providers = dstProviders;
-    fs.writeFileSync(targetFile, JSON.stringify(dst, null, 2), 'utf-8');
-  }
-  return added;
+  return candidateLegacyDirs({
+    userData: safeGetPath('userData'),
+    appData: safeGetPath('appData'),
+    isPackaged: app.isPackaged,
+    exeDir: safeExeDir(),
+    moduleDir: __dirname,
+    // 排除目标目录本身：候选里可能含同址路径（大小写/尾分隔符不同），自我迁移无意义。
+    exclude: [dataDir()],
+  });
 }
 
 /**
@@ -170,30 +149,42 @@ function mergeModels(targetFile: string, srcData: unknown): number {
 function migrateLegacyData(): void {
   const target = dataDir();
   const sources = legacyDataDirs();
-  for (const src of sources) {
-    if (!src || src === target) continue;
-    for (const f of DATA_FILES) {
-      const srcFile = path.join(src, f);
-      const data = readJson(srcFile);
-      if (data == null) continue;
-      try {
-        if (f === 'orchdesk-sessions.json') {
-          const n = mergeSessions(path.join(target, f), data);
-          if (n) console.log(`[orchdesk] 迁移会话 ${n} 条：${srcFile}`);
-        } else {
-          const n = mergeModels(path.join(target, f), data);
-          if (n) console.log(`[orchdesk] 迁移模型配置 ${n} 个提供商：${srcFile}`);
-        }
-      } catch (err) {
-        console.warn(`[orchdesk] 迁移 ${srcFile} 失败:`, (err as Error).message);
-      }
-    }
+  for (const r of migrateDataFiles({ targetDir: target, sourceDirs: sources, files: DATA_FILES })) {
+    if (r.moved) console.log(`[orchdesk] 迁移 ${r.file}（${r.added} 项）：${r.from}`);
+  }
+  for (const r of migrateDataDirs({ targetDir: target, sourceDirs: sources, dirs: DATA_DIRS })) {
+    if (r.moved) console.log(`[orchdesk] 迁移目录 ${r.dir}（${r.copied} 个文件）：${r.from}`);
   }
 }
 
 function sessionsFile(): string {
   // 惰性获取：app.getPath 需在 app ready 之后才稳定可用。
-  return path.join(dataDir(), 'orchdesk-sessions.json');
+  return path.join(dataDir(), DATA_FILE_NAMES.sessions);
+}
+
+function projectsFile(): string {
+  return path.join(dataDir(), 'orchdesk-projects.json');
+}
+
+/** 项目分组（侧栏层级）持久化；此前缺失导致重启后项目全丢。 */
+function loadProjects(): Array<Record<string, unknown>> {
+  try {
+    const file = projectsFile();
+    if (!fs.existsSync(file)) return [];
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return Array.isArray(raw) ? raw : [];
+  } catch (err) {
+    console.error('[orchdesk] 读取项目分组失败:', (err as Error).message);
+    return [];
+  }
+}
+
+function saveProjects(projects: Array<Record<string, unknown>>): void {
+  try {
+    fs.writeFileSync(projectsFile(), JSON.stringify(projects), 'utf-8');
+  } catch (err) {
+    console.error('[orchdesk] 写入项目分组失败:', (err as Error).message);
+  }
 }
 
 function loadStore(): void {
@@ -237,16 +228,24 @@ interface ModelConfig {
   maxToolIterations?: number;
 }
 
-const MODELS_FILE = () => path.join(dataDir(), 'models.json');
+const MODELS_FILE = () => path.join(dataDir(), DATA_FILE_NAMES.models);
 
 function loadModelConfig(): ModelConfig {
   try {
     const file = MODELS_FILE();
     if (!fs.existsSync(file)) return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' };
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
+    let migrated = false;
     const providers = (raw.providers as Array<Record<string, unknown>> | undefined)?.map(p => {
       const { apiKey: _k, ...rest } = p;
-      return rest as unknown as ModelProvider;
+      const prov = rest as unknown as ModelProvider;
+      // 明文 key（用户手改 models.json 塞入）就地加密迁移为 apiKeyEnc，不再静默丢弃。
+      // 注意：任何分支都禁止把明文写进日志。
+      if (typeof p.apiKey === 'string' && p.apiKey) {
+        const enc = encryptKey(p.apiKey);
+        if (enc) { prov.apiKeyEnc = enc; migrated = true; }
+      }
+      return prov;
     }) || [];
     const cfg: ModelConfig = {
       providers,
@@ -254,7 +253,7 @@ function loadModelConfig(): ModelConfig {
       defaultModel: (raw.defaultModel as string | undefined) || 'qwen3:14b',
       maxToolIterations: (raw.maxToolIterations as number | undefined) || 200,
     };
-    const hasPlainKey = (raw.providers as Array<Record<string, unknown>> | undefined)?.some(p => 'apiKey' in p);
+    const hasPlainKey = migrated;
     if (hasPlainKey) saveModelConfig(cfg);
     return cfg;
   } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: 200 }; }
@@ -264,19 +263,47 @@ function saveModelConfig(cfg: ModelConfig): void {
   fs.writeFileSync(MODELS_FILE(), JSON.stringify(cfg, null, 2), 'utf-8');
 }
 
-/** 解密 API Key（safeStorage）；无加密后端返回空串。 */
+/**
+ * 加密 API Key。
+ * 优先用 PRD 要求的 AES-256-GCM + 机器指纹派生（credentials.ts）；
+ * 若该路径失败（极老版本 safeStorage 密文），回落 safeStorage 以保兼容。
+ * 无加密后端时**不**写明文，返回空串并告警（PRD NFR：凭据必须加密）。
+ */
+function encryptKey(key: string): string {
+  if (!key) return '';
+  try {
+    const enc = encryptSecret(key);
+    if (enc) return enc;
+  } catch (err) {
+    console.warn('[orchdesk] AES-256-GCM 加密失败，回落 safeStorage:', (err as Error).message);
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    console.error('[orchdesk] 无可用加密后端，API Key 未保存（拒绝明文落盘）');
+    return '';
+  }
+  return safeStorage.encryptString(key).toString('base64');
+}
+
+/**
+ * 解密 API Key。
+ * v1 密文走 AES-256-GCM；历史 safeStorage 密文自动兼容，并在下次保存时升级。
+ */
 function decryptKey(encB64?: string): string {
   if (!encB64) return '';
+  // 1) 新格式：AES-256-GCM（机器指纹派生）
+  if (isV1Cipher(encB64)) {
+    const v = decryptSecret(encB64);
+    if (v) return v;
+    console.warn('[orchdesk] AES-256-GCM 密文解密失败（可能换过机器），请在设置页重新填写 API Key');
+    return '';
+  }
+  // 2) 历史格式：safeStorage
   try {
     if (!safeStorage.isEncryptionAvailable()) return '';
     return safeStorage.decryptString(Buffer.from(encB64, 'base64')) as unknown as string;
-  } catch { return ''; }
-}
-
-/** 加密 API Key（safeStorage）。 */
-function encryptKey(key: string): string {
-  if (!safeStorage.isEncryptionAvailable()) return key;
-  return safeStorage.encryptString(key).toString('base64');
+  } catch {
+    return '';
+  }
 }
 
 // ---- 真实模型调用（OpenAI 兼容 + Ollama，支持 function calling）----
@@ -300,7 +327,7 @@ async function callOllama(provider: ModelProvider, model: string, messages: ApiM
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120_000),
   });
-  if (!res.ok) throw new Error(`Ollama 返回 HTTP ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Ollama 返回 HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const data = await res.json() as {
     message?: { content?: string; tool_calls?: unknown };
     error?: string;
@@ -321,10 +348,13 @@ function buildRequest(base: string, mode: 'chat' | 'responses' | 'completions', 
   const clean = base.replace(/\/v1\/?$/, '');
 
   if (mode === 'responses') {
-    const input = messages
-      .filter(m => m.role === 'user')
-      .map(m => m.content || '')
-      .join('\n') || messages.at(-1)?.content || '';
+    // OpenAI Responses 规范：input 接受完整消息数组。system 角色映射为 developer，
+    // 并保留 assistant 历史 —— 此前只拼 user 文本，导致 responses 模式丢失系统提示词
+    // （含 <tool:> 兜底格式说明）与多轮上下文，多轮对话直接断裂。
+    const input = messages.map(m => ({
+      role: m.role === 'system' ? 'developer' as const : m.role,
+      content: m.content || '',
+    }));
     return {
       url: isFullEndpoint ? base : clean + '/v1/responses',
       body: { model, input },
@@ -447,10 +477,43 @@ function nowTime(): string { return new Date().toLocaleTimeString('zh-CN', { hou
 // 类型（ToolCall / ToolResult / ApiMessage）与工具定义（TOOL_DEFS / ALLOWED_COMMANDS）
 // 统一在 agent-runtime.ts 中定义，便于在 node 下直接单测。
 
+/**
+ * 命令执行的工作目录：必须是**存在**的目录，否则子进程 spawn 直接 ENOENT。
+ * 依次尝试 user home → 数据目录 → 当前工作目录 → 系统临时目录。
+ */
+function resolveShellCwd(): string {
+  const candidates: string[] = [];
+  try { candidates.push(app.getPath('home')); } catch { /* ignore */ }
+  try { candidates.push(os.homedir()); } catch { /* ignore */ }
+  try { candidates.push(dataDir()); } catch { /* ignore */ }
+  candidates.push(process.cwd(), os.tmpdir());
+  for (const c of candidates) {
+    try {
+      if (c && fs.existsSync(c) && fs.statSync(c).isDirectory()) return c;
+    } catch { /* 继续尝试下一个 */ }
+  }
+  return os.tmpdir();
+}
+
+// app.getPath 结果缓存：isPathAllowed 是工具执行热路径（每个 file_* 工具一次），
+// 历史实现每次调用都跑 3 次 getPath。app 未就绪时拿不到路径，此时不缓存，下次再试。
+let cachedAllowedRoots: string[] | null = null;
+function allowedRoots(): string[] {
+  if (!cachedAllowedRoots) {
+    const roots: string[] = [];
+    for (const name of ['home', 'userData', 'temp'] as const) {
+      const p = safeGetPath(name);
+      if (p) roots.push(path.resolve(p));
+    }
+    if (roots.length) cachedAllowedRoots = roots;
+  }
+  return cachedAllowedRoots ?? [];
+}
+
 /** 安全沙箱：限制可访问的目录 */
 function isPathAllowed(p: string): boolean {
   const resolved = path.resolve(p);
-  const roots = [app.getPath('home'), app.getPath('userData'), app.getPath('temp'), dataDir(), process.cwd()];
+  const roots = [...allowedRoots(), dataDir(), process.cwd()];
   return roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
 }
 
@@ -486,12 +549,38 @@ async function executeTool(tool: ToolCall): Promise<ToolResult> {
       case 'shell_command': {
         const cmd = String(args.command || '');
         const cmdName = (cmd.split(/[\s/\\]+/)[0] || '').toLowerCase();
+        if (!cmdName) return { name, result: '', error: '命令为空' };
         if (!ALLOWED_COMMAND_SET.has(cmdName)) {
           return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${ALLOWED_COMMANDS.slice(0, 20).join(', ')}...` };
         }
-        const { execSync } = await import('node:child_process');
-        const output = execSync(cmd, { cwd: app.getPath('home'), encoding: 'utf-8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] });
-        return { name, result: output.slice(0, 50000) };
+        // 进程隔离 + 不阻塞主进程：在子进程中异步执行。
+        // 此前用 execSync 直接在主进程跑 —— 30 秒超时内整个 UI 无响应，
+        // 且命令崩溃会连带主进程。改 exec（异步、独立进程、超时可杀）。
+        const { exec } = await import('node:child_process');
+        const cwd = resolveShellCwd();
+        try {
+          const output = await new Promise<string>((resolve, reject) => {
+            const child = exec(cmd, {
+              cwd,
+              encoding: 'utf-8',
+              timeout: 30_000,
+              maxBuffer: 8 * 1024 * 1024,
+              windowsHide: true,
+            }, (err, stdout, stderr) => {
+              if (err) {
+                // 超时被杀也要把已产出的输出交回，便于诊断
+                const partial = `${stdout || ''}${stderr ? '\n[stderr]\n' + stderr : ''}`;
+                reject(new Error(`${(err as Error).message}${partial ? '：' + partial.slice(0, 500) : ''}`));
+                return;
+              }
+              resolve(`${stdout || ''}${stderr ? '\n[stderr]\n' + stderr : ''}`);
+            });
+            child.on('error', reject);
+          });
+          return { name, result: output.slice(0, 50000) };
+        } catch (err) {
+          return { name, result: '', error: (err as Error).message.slice(0, 2000) };
+        }
       }
       case 'web_fetch': {
         const url = String(args.url || '');
@@ -668,10 +757,28 @@ ipcMain.handle('orchdesk:load-sessions', async () => {
   const all = Object.values(store);
   return all.filter((s: any) => s && s.id && Array.isArray(s.msgs) && s.msgs.length > 0);
 });
+
+// 插件真实热插拔（FR-3）：启用 = 注册 effect，停用 = 逆回滚，不重启、无残留
+ipcMain.handle('orchdesk:plugin-set-enabled', async (_e, name: string, enabled: boolean) => {
+  try {
+    const state = await setPluginEnabled(String(name || ''), enabled === true);
+    return { ok: true, ...state };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
 ipcMain.handle('orchdesk:persist-sessions', async (_e, sessions: unknown[]) => {
   store = {};
   (sessions || []).forEach((s: any) => { if (s && s.id && Array.isArray(s.msgs)) store[s.id] = s; });
   saveStore();
+  return { ok: true };
+});
+
+// 项目分组持久化（BUG：此前只存 sessions，重启后项目全丢、会话退化为「任务」组）
+ipcMain.handle('orchdesk:load-projects', async () => loadProjects());
+ipcMain.handle('orchdesk:persist-projects', async (_e, projects: unknown[]) => {
+  if (!Array.isArray(projects)) return { ok: false, reason: 'projects 必须是数组' };
+  saveProjects(projects as Array<Record<string, unknown>>);
   return { ok: true };
 });
 ipcMain.handle('orchdesk:run-agent-turn', async (_e, sessionId: string, text: string, opts: unknown) => {
@@ -696,7 +803,8 @@ ipcMain.handle('orchdesk:models-save', async (_e, config: unknown) => {
     });
     if (incoming.defaultProvider) current.defaultProvider = incoming.defaultProvider;
     if (incoming.defaultModel) current.defaultModel = incoming.defaultModel;
-    if (incoming.maxToolIterations) current.maxToolIterations = Math.max(1, Math.min(500, incoming.maxToolIterations));
+    // 与运行时钳制一致（1–200，见 runAgentTurn 的 MAX_ITERATIONS），保证所见即所得。
+    if (incoming.maxToolIterations) current.maxToolIterations = Math.max(1, Math.min(200, incoming.maxToolIterations));
     saveModelConfig(current);
     return { ok: true };
   } catch (err) {
@@ -718,13 +826,13 @@ ipcMain.handle('orchdesk:models-test', async (_e, providerId: string, model: str
 });
 
 // ---------------------------------------------------------------------------
-// 授权桥（T-P3-2）：authz 插件经 dsh ctx 暴露 AuthzService；主进程在 dsh ctx
-// 就绪后注入 UI 应答回调（把 GUI 弹窗经 IPC 转发渲染层，回传 outcome），
-// 并暴露模式读取/切换/分级/审计给渲染层。
+// 授权桥（T-P3-2 + BUG-014 接线）：authz 插件由 dsh-runtime 真实装载后，
+// 经 ctx.get('authz') 取得 AuthzService。主进程把 GUI 应答回调注入该服务：
+// dsh 工具管道在回合内经 approval/request 等待应答 → 推渲染层弹窗 →
+// 用户操作后 submitDecision 回传 outcome（fail-closed：超时/异常 → unavailable）。
 //
-// 设计：审批弹窗是 GUI 异步参与 —— dsh 工具管道在 open turn 内经 approval/request
-// 等待应答；主进程持有 pending resolver map，经 IPC 把请求推给渲染层弹窗，
-// 渲染层用户操作后 submitDecision 回传 outcome（fail-closed：超时/异常 → unavailable）。
+// 关键修复：此前这里传入占位 ctx（{get: () => undefined}），导致 authzService
+// 恒为 null，L0–L4 矩阵 / 审计日志 / 审批弹窗 / 模式切换四块 UI 全部空转。
 // ---------------------------------------------------------------------------
 type AuthzServiceLike = {
   getMode(sessionId?: string): Promise<string>;
@@ -732,37 +840,59 @@ type AuthzServiceLike = {
   getLevels(): Array<{ level: number; label: string; scope: string; requiresApproval: boolean }>;
   getAuditLog(): Array<{ kind: string; ts: number; mode?: string; outcome?: string; toolName?: string; reason?: string; sessionId?: string }>;
   setUiAnswerer(fn: ((req: { toolName: string; reason?: string; sessionId?: string }) => Promise<string>) | null): void;
+  getModes?(): Array<{ id: string; label: string; sandboxMode: string; approvalPolicy: string }>;
+  subscribe?(cb: (evt: unknown) => void): () => void;
 };
 
 let authzService: AuthzServiceLike | null = null;
 const pendingApprovals = new Map<string, { resolve: (o: string) => void; timer: NodeJS.Timeout }>();
 let approvalSeq = 0;
 
-/** 在 dsh ctx 就绪后调用（P1-5 接入点）；把 GUI 应答回调注入 authz 插件。 */
-export function initAuthzBridge(dshCtx: { get(service: string): unknown }): void {
-  const svc = dshCtx.get('authz') as AuthzServiceLike | undefined;
-  if (!svc) {
-    console.warn('[orchdesk] authz 服务未在 dsh ctx 就绪（authz 插件未加载？）');
-    return;
-  }
-  authzService = svc;
-  // 注入 UI 应答回调：dsh approval/request → 推渲染层弹窗 → 等 submitDecision。
-  svc.setUiAnswerer(async (req) => {
-    const id = `apr-${++approvalSeq}`;
-    const outcome = await new Promise<string>((resolve) => {
-      const timer = setTimeout(() => {
-        pendingApprovals.delete(id);
-        resolve('unavailable'); // fail-closed：超时不开门
-      }, 120000);
-      pendingApprovals.set(id, { resolve, timer });
-      mainWindow?.webContents.send('orchdesk:authz-approval-request', {
-        id,
-        toolName: req.toolName,
-        reason: req.reason,
+/**
+ * 启动 dsh 运行时并把 GUI 应答方 / SubAgent 运行器注入宿主服务。
+ * 失败不阻断启动（应用仍可用），但会明确记录，不静默降级。
+ */
+async function bootRuntime(): Promise<void> {
+  try {
+    const runtime = await startRuntime();
+
+    // 1) 授权服务
+    const authz = getService<AuthzServiceLike>('authz');
+    if (authz) {
+      authzService = authz;
+      authz.setUiAnswerer(async (req) => {
+        const id = `apr-${++approvalSeq}`;
+        return new Promise<string>((resolve) => {
+          const timer = setTimeout(() => {
+            pendingApprovals.delete(id);
+            resolve('unavailable'); // fail-closed：超时不开门
+          }, 120000);
+          pendingApprovals.set(id, { resolve, timer });
+          mainWindow?.webContents.send('orchdesk:authz-approval-request', {
+            id,
+            toolName: req.toolName,
+            reason: req.reason,
+          });
+        });
       });
+      console.log('[orchdesk] 授权服务已接入（三模式 + L0–L4 + fail-closed）');
+    } else {
+      console.warn('[orchdesk] authz 服务不可用（插件未激活）');
+    }
+
+    // 2) SubAgent 运行器：复用现有 callModel + 工具循环
+    runtime.host?.setAgentRunner(async ({ messages }) => {
+      const cfg = loadModelConfig();
+      if (!cfg.providers.length) return { text: '（未配置模型）SubAgent 无法执行' };
+      const provider = cfg.providers[0]!;
+      const model = (provider.models || [])[0] || cfg.defaultModel || 'qwen3:14b';
+      const reply = await callModel(provider, model, messages as ApiMessage[]);
+      return { text: reply.content };
     });
-    return outcome;
-  });
+    console.log('[orchdesk] SubAgent 运行器已接入');
+  } catch (err) {
+    console.error('[orchdesk] dsh 运行时启动失败，插件能力不可用:', (err as Error).message);
+  }
 }
 
 ipcMain.handle('orchdesk:authz-get-mode', async () => {
@@ -791,58 +921,133 @@ ipcMain.on('orchdesk:authz-submit-decision', (_e, id: string, outcome: string) =
 });
 
 // ---------------------------------------------------------------------------
-// T-P4/T-P5 智能层 + 补偿 + 自进化桥（dsh 服务 seam：ctx.memory / ctx.promptLib /
-// ctx.compensation / ctx.evolution）
-// 说明：这些服务运行在 dsh in-process ctx（P1-5 runProfile 接入后经 ctx.get 获取，
-// 见 runAgentTurn 注释）。当前 dsh ctx 未接入 → 返回与渲染层浏览器预览一致的静态
-// 占位值 + warn 日志（不伪造 dsh 数据、不静默）；接入点即 P1-5 runProfile seam。
-// ---------------------------------------------------------------------------
-function dshBridgeStub(channel: string): void {
-  console.warn(`[orchdesk] dsh 服务桥接 ${channel} 未接入（P1-5 runProfile seam），返回静态占位。`);
+// T-P4/T-P5 智能层 + 补偿 + 自进化桥
+// ----------------------------------------------------------------------------
+// BUG-014 接线：此前这些 handler 统一调用 dshBridgeStub 返回静态占位（11 个），
+// 导致记忆/提示词/补偿/自进化四块 UI 永久空转。现在改为调用 dsh-runtime 中
+// 真实装载的插件服务；服务不可用时返回 null 并明确告知渲染层「未接入」，
+// 而不是塞一份假数据（项目铁律：不伪造、不静默）。
+// ----------------------------------------------------------------------------
+
+/** 服务不可用时统一返回结构（渲染层据此显示「未接入」，不显示假数据）。 */
+function unavailable(reason: string): { ok: false; unavailable: true; reason: string } {
+  return { ok: false, unavailable: true, reason };
+}
+
+// ---- 分层记忆（memory 插件）----
+interface MemoryServiceLike {
+  getStats(): unknown;
+  dump(sessionId: string, msgs: unknown[], opts?: unknown): Promise<unknown>;
+  recall(query: string, opts?: unknown): Promise<unknown>;
+  listDomain?(domain: string): unknown;
 }
 ipcMain.handle('orchdesk:memory-stats', () => {
-  dshBridgeStub('memory');
-  return null;
+  const svc = getService<MemoryServiceLike>('memory');
+  return svc ? svc.getStats() : null;
 });
+ipcMain.handle('orchdesk:memory-recall', async (_e, query: string, opts: unknown) => {
+  const svc = getService<MemoryServiceLike>('memory');
+  if (!svc) return null;
+  return svc.recall(String(query || ''), opts || {});
+});
+
+// ---- 系统提示词库（prompt 插件）----
+interface PromptServiceLike {
+  list(): unknown;
+  get(id: string): unknown;
+  create(input: unknown): unknown;
+  update(id: string, patch: unknown): unknown;
+  remove(id: string): unknown;
+  mergeForAgent(agentId: string): unknown;
+}
 ipcMain.handle('orchdesk:prompt-list', () => {
-  dshBridgeStub('prompt');
-  return [];
+  const svc = getService<PromptServiceLike>('promptLib');
+  return svc ? svc.list() : [];
 });
-ipcMain.handle('orchdesk:prompt-merge', () => {
-  dshBridgeStub('prompt');
-  return { sections: [], conflicts: [] };
+ipcMain.handle('orchdesk:prompt-merge', (_e, agentId: string) => {
+  const svc = getService<PromptServiceLike>('promptLib');
+  return svc ? svc.mergeForAgent(String(agentId || '')) : { sections: [], conflicts: [] };
 });
-ipcMain.handle('orchdesk:prompt-save', () => {
-  dshBridgeStub('prompt');
-  return { ok: false };
+ipcMain.handle('orchdesk:prompt-save', (_e, input: unknown) => {
+  const svc = getService<PromptServiceLike>('promptLib');
+  if (!svc) return unavailable('提示词库插件未接入');
+  try {
+    const doc = input as { id?: string } & Record<string, unknown>;
+    return doc.id ? svc.update(String(doc.id), doc) : svc.create(doc);
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
 });
-ipcMain.handle('orchdesk:prompt-delete', () => {
-  dshBridgeStub('prompt');
-  return { ok: false };
+ipcMain.handle('orchdesk:prompt-delete', (_e, id: string) => {
+  const svc = getService<PromptServiceLike>('promptLib');
+  if (!svc) return unavailable('提示词库插件未接入');
+  return svc.remove(String(id || ''));
 });
-ipcMain.handle('orchdesk:comp-withhold', () => {
-  dshBridgeStub('compensation');
-  return { needsConfirm: false, category: 'other', reason: '', warning: '' };
+
+// ---- 边界外补偿层（compensation 插件）----
+interface CompensationServiceLike {
+  classify(text: string): unknown;
+  requiresWithhold(category: string): unknown;
+  withhold(input: unknown): Promise<unknown>;
+  compensate(input: unknown): unknown;
+  getAudit(): unknown;
+}
+ipcMain.handle('orchdesk:comp-withhold', async (_e, text: string) => {
+  const svc = getService<CompensationServiceLike>('compensation');
+  if (!svc) return unavailable('补偿层插件未接入');
+  return svc.withhold({ text: String(text || '') });
 });
-ipcMain.handle('orchdesk:comp-compensate', () => {
-  dshBridgeStub('compensation');
-  return { id: 'cmp-' + Date.now().toString(36), ts: Date.now(), text: '', note: '', action: '' };
+ipcMain.handle('orchdesk:comp-compensate', (_e, input: unknown) => {
+  const svc = getService<CompensationServiceLike>('compensation');
+  if (!svc) return unavailable('补偿层插件未接入');
+  return svc.compensate(input || {});
 });
 ipcMain.handle('orchdesk:comp-audit', () => {
-  dshBridgeStub('compensation');
-  return [];
+  const svc = getService<CompensationServiceLike>('compensation');
+  return svc ? svc.getAudit() : [];
 });
-ipcMain.handle('orchdesk:evol-create', () => {
-  dshBridgeStub('evolution');
-  return { ok: false, reason: '未接入' };
+
+// ---- 自进化（evolution 插件）----
+interface EvolutionServiceLike {
+  createTempPlugin(spec: unknown, opts?: unknown): Promise<unknown>;
+  list(): unknown;
+  disposeTempPlugin(id: string): Promise<unknown>;
+  getAudit(): unknown;
+}
+ipcMain.handle('orchdesk:evol-create', async (_e, spec: unknown, opts: unknown) => {
+  const svc = getService<EvolutionServiceLike>('evolution');
+  if (!svc) return unavailable('自进化插件未接入');
+  return svc.createTempPlugin(spec, opts || {});
 });
 ipcMain.handle('orchdesk:evol-list', () => {
-  dshBridgeStub('evolution');
-  return [];
+  const svc = getService<EvolutionServiceLike>('evolution');
+  return svc ? svc.list() : [];
 });
-ipcMain.handle('orchdesk:evol-dispose', () => {
-  dshBridgeStub('evolution');
-  return { ok: false, reason: '未接入' };
+ipcMain.handle('orchdesk:evol-dispose', async (_e, id: string) => {
+  const svc = getService<EvolutionServiceLike>('evolution');
+  if (!svc) return false;
+  return svc.disposeTempPlugin(String(id || ''));
+});
+
+// ---- 编排目录（multi 插件）：替换渲染层硬编码的 8 专家 + 3 团 ----
+interface OrchestrationServiceLike {
+  getCatalog(): unknown;
+  getDelegationTree(): unknown;
+}
+ipcMain.handle('orchdesk:orchestration-catalog', () => {
+  const svc = getService<OrchestrationServiceLike>('orchestration');
+  return svc ? svc.getCatalog() : null;
+});
+
+// ---- 插件运行时状态（供设置页状态条与插件页展示真实数据，替代硬编码常量）----
+ipcMain.handle('orchdesk:plugin-runtime', () => {
+  const rt = getRuntime();
+  return {
+    ready: !!rt,
+    activeCount: rt?.activeCount ?? 0,
+    total: rt?.plugins.length ?? 0,
+    plugins: getPluginStates(),
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -934,10 +1139,9 @@ ipcMain.handle('orchdesk:open-project-dir', async () => {
 ipcMain.handle('orchdesk:pick-folder', async () => {
   try {
     const { dialog } = await import('electron');
-    const result = await dialog.showOpenDialog(mainWindow!, {
-      properties: ['openDirectory'],
-      title: '选择项目本地文件夹'
-    });
+    const opts = { properties: ['openDirectory' as const], title: '选择项目本地文件夹' };
+    // 主窗可能尚未创建（托盘/菜单触发），勿用非空断言
+    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, opts) : await dialog.showOpenDialog(opts);
     if (!result.canceled && result.filePaths.length) return { ok: true, path: result.filePaths[0] };
     return { ok: false, reason: 'cancelled' };
   } catch (err) {
@@ -945,16 +1149,169 @@ ipcMain.handle('orchdesk:pick-folder', async () => {
   }
 });
 
-app.whenReady().then(() => {
+// ---------------------------------------------------------------------------
+// BUG-013 方案 B：数据导出 / 导入（跨机器迁移 + 手动备份，单文件 JSON）
+// ----------------------------------------------------------------------------
+// 导出 = 数据目录内全部业务数据打包为一个可读 JSON（kind: orchdesk-backup）。
+// 导入 = 与启动迁移同一套「只补齐不覆盖」合并策略：
+//   sessions/models 走 merge-json（同 id 保留较新），guanji/hub 凭据类走
+//   copy-if-absent（不深合并，避免破坏密文结构），projects 按 id 补齐。
+// 注意：apiKeyEnc / hub tokenCipher 是机器绑定的密文，跨机器导入后解密会失败
+// ——此时对应凭据视为未配置，需在设置页重新填写（导入摘要中提示，不静默）。
+// ---------------------------------------------------------------------------
+const BACKUP_KIND = 'orchdesk-backup';
+
+/** 备份包内允许出现的数据键（白名单，防止导入包夹带任意文件写入）。 */
+const BACKUP_SECTIONS = ['sessions', 'projects', 'models', 'guanji', 'hub'] as const;
+
+/** 导入备份体积上限：超出按无效文件拒绝，防止主进程被超大 JSON 阻塞。 */
+const MAX_IMPORT_BYTES = 256 * 1024 * 1024;
+
+/**
+ * 凭据类结构校验（fail-closed）：伪造备份不得绕过「无加密后端拒绝明文落盘」。
+ * guanji.json = { enc: base64密文 }；hub.json = { url, tokenCipher }。
+ */
+function credentialSectionValid(name: string, data: unknown): boolean {
+  const d = data as Record<string, unknown>;
+  if (!d || typeof d !== 'object') return false;
+  if (name === DATA_FILE_NAMES.guanji) return typeof d.enc === 'string' && d.enc.length > 0;
+  if (name === DATA_FILE_NAMES.hub) {
+    return typeof d.url === 'string' && d.url.length > 0 && typeof d.tokenCipher === 'string' && d.tokenCipher.length > 0;
+  }
+  return false;
+}
+
+function readJsonFile(file: string): unknown | null {
+  try {
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, 'utf-8'));
+  } catch { return null; }
+}
+
+/** 把备份包内的凭据类（guanji/hub）搬进数据目录：目标不存在才写，绝不覆盖。 */
+function importCredentialSection(root: string, name: string, data: unknown, imported: Record<string, number>): boolean {
+  if (data == null || typeof data !== 'object') return false;
+  const target = path.join(root, name);
+  if (fs.existsSync(target)) return false; // 目标侧已有凭据：保留，不覆盖
+  fs.writeFileSync(target, JSON.stringify(data), 'utf-8');
+  imported[name.replace(/\.json$/, '')] = 1;
+  return true;
+}
+
+ipcMain.handle('orchdesk:export-data', async () => {
+  try {
+    const { dialog } = await import('electron');
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const opts = {
+      title: '导出 OrchDesk 数据',
+      defaultPath: `orchdesk-backup-${stamp}.json`,
+      filters: [{ name: 'OrchDesk 备份', extensions: ['json'] }],
+    };
+    // 主窗可能尚未创建（如托盘菜单触发）：electron 允许无窗调用，勿用非空断言
+    const result = mainWindow ? await dialog.showSaveDialog(mainWindow, opts) : await dialog.showSaveDialog(opts);
+    if (result.canceled || !result.filePath) return { ok: false, reason: 'cancelled' };
+    const root = dataDir();
+    const bundle: Record<string, unknown> = {
+      kind: BACKUP_KIND,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+    };
+    for (const section of BACKUP_SECTIONS) {
+      const file = section === 'projects' ? projectsFile() : path.join(root, DATA_FILE_NAMES[section]);
+      bundle[section] = readJsonFile(file);
+    }
+    fs.writeFileSync(result.filePath, JSON.stringify(bundle, null, 2), 'utf-8');
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
+
+ipcMain.handle('orchdesk:import-data', async () => {
+  try {
+    const { dialog } = await import('electron');
+    const openOpts = {
+      title: '导入 OrchDesk 数据',
+      properties: ['openFile' as const],
+      filters: [{ name: 'OrchDesk 备份', extensions: ['json'] }],
+    };
+    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, openOpts) : await dialog.showOpenDialog(openOpts);
+    if (result.canceled || !result.filePaths.length) return { ok: false, reason: 'cancelled' };
+    const srcFile = result.filePaths[0]!;
+    try {
+      const stat = fs.statSync(srcFile);
+      if (stat.size > MAX_IMPORT_BYTES) {
+        return { ok: false, reason: `备份文件过大（${Math.round(stat.size / 1024 / 1024)}MB，上限 256MB）` };
+      }
+    } catch { /* 文件此刻不可读时交给后续 readJsonFile 报错 */ }
+    const raw = readJsonFile(srcFile);
+    if (!raw || typeof raw !== 'object' || (raw as Record<string, unknown>).kind !== BACKUP_KIND) {
+      return { ok: false, reason: '不是有效的 OrchDesk 备份文件（缺少 kind 标识）' };
+    }
+    const bundle = raw as Record<string, unknown>;
+    const root = dataDir();
+    const imported: Record<string, number> = { sessions: 0, projects: 0, providers: 0 };
+
+    // sessions / models：与启动迁移同一套合并器（只补齐不覆盖）
+    const sessionsFile = path.join(root, DATA_FILE_NAMES.sessions);
+    const sessOutcome = mergeSessionsData(readJsonFile(sessionsFile), bundle.sessions);
+    if (sessOutcome && sessOutcome.changed) {
+      fs.writeFileSync(sessionsFile, JSON.stringify(sessOutcome.data), 'utf-8');
+      imported.sessions = sessOutcome.added;
+    }
+    const modelsFile = path.join(root, DATA_FILE_NAMES.models);
+    const modelOutcome = mergeProvidersData(readJsonFile(modelsFile), bundle.models);
+    if (modelOutcome && modelOutcome.changed) {
+      fs.writeFileSync(modelsFile, JSON.stringify(modelOutcome.data), 'utf-8');
+      imported.providers = modelOutcome.added;
+    }
+
+    // projects：按 id 补齐（目标侧已有的项目保持不变）
+    const curProjects = loadProjects();
+    const srcProjects = Array.isArray(bundle.projects) ? bundle.projects as Array<Record<string, unknown>> : [];
+    const known = new Set(curProjects.map((p) => String(p.id ?? '')));
+    const addProjects = srcProjects.filter((p) => p && p.id && !known.has(String(p.id)));
+    if (addProjects.length) {
+      saveProjects([...curProjects, ...addProjects]);
+      imported.projects = addProjects.length;
+    }
+
+    // 凭据类：copy-if-absent + 结构校验（伪造备份不得写入明文凭据）
+    const notes: string[] = [];
+    for (const [key, fileName] of [['guanji', DATA_FILE_NAMES.guanji], ['hub', DATA_FILE_NAMES.hub]] as const) {
+      const section = bundle[key];
+      if (section == null) continue;
+      if (!credentialSectionValid(fileName, section)) {
+        notes.push(`${key === 'hub' ? 'Hub' : '观雅集'}凭据结构无效，已跳过（拒绝明文凭据落盘）`);
+        continue;
+      }
+      if (importCredentialSection(root, fileName, section, imported)) {
+        notes.push(`${key === 'hub' ? 'Hub 配对凭据' : '观雅集 TOKEN'} 已导入（跨机器时密文不可解，需重新配置）`);
+      }
+    }
+
+    // 内存态重载（渲染层随后自行拉取新会话/项目）
+    loadStore();
+    return { ok: true, imported, notes, path: srcFile };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
+
+app.whenReady().then(async () => {
   // BUG-013：先把历史位置的数据合并进规范化目录，再加载会话。
   try { migrateLegacyData(); } catch (err) { console.warn('[orchdesk] 数据迁移异常:', (err as Error).message); }
   loadStore();
+
+  // 数据目录确定后告知宿主服务（沙箱状态落盘位置）。
+  process.env.ORCHDESK_DATA_DIR = dataDir();
+
+  // BUG-014 根因修复：启动真实 Cordis 运行时（宿主服务 + 9 个插件），
+  // 此前 packages/plugin/* 从未被加载，FR-7/9/10/11/12/13 在应用内全是空壳。
+  await bootRuntime();
+
   createWindow();
   createTray();
-  // T-P3-2 授权桥 seam：真实 dsh ctx（P1-5 runProfile）接入后，把这里的占位 ctx 换成
-  // 真实 in-process ctx（ctx.get('authz') 返回 AuthzService）。当前阶段调用以确保
-  // seam 可见性：ctx 未就绪 → 打印 warn，不静默。
-  initAuthzBridge({ get: () => undefined });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -962,4 +1319,9 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  // 触发全部插件的逆效应（卸载无残留）
+  void stopRuntime();
 });

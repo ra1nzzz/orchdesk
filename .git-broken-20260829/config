@@ -1,0 +1,13 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+[user]
+	name = my
+	email = my@orchdesk.local
+[remote "origin"]
+	url = https://github.com/ra1nzzz/orchdesk.git
+	fetch = +refs/heads/*:refs/remotes/origin/*

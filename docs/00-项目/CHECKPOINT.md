@@ -9,32 +9,35 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.2.0` | SemVer，pre-1.0 阶段 |
-| **最新 Commit** | `2de3d07` | feat: UI/UX 迭代 + marked.js + 启动并行化 + 模型管理增强 |
+| **当前版本** | `0.3.1`（released） / `0.4.0`（pending，已提交 main 未发布） | SemVer，pre-1.0 阶段 |
+| **最新 Commit** | `91ae26b` | test: 插件测试覆盖 2/9 → 9/9，并修复暴露的 3 个真 bug（P2-5） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
-| **最新 Release** | [v0.2.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.2.0) | 含 Setup + portable + latest.yml |
-| **文档审计** | 21 files, 0 issues | canonical 文档与代码保持一致 |
+| **最新 Release** | [v0.3.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.3.1) | 含 Setup + portable + latest.yml |
+| **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
-| **E2E** | 26/29 PASS | 3 项为 mock bridge 限制（预期内） |
+| **验证套件** | 308/308 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 35 / agent-loop 14 / model-loop 23 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
 
-### 1.1 六阶段完成度
+### 1.1 PRD 完成度（FR 维度，2026-08-29 复盘）
 
-| 阶段 | 完成度 | 说明 |
-|------|--------|------|
-| P0 底座打通 | ✅ 100% | deepseek-harness 基线 99f6f02 |
-| P1 桌面壳 + 会话优先 UI | ✅ 100% | 4 列布局、会话 CRUD、模型多选、composer |
-| P2 内置插件 | ✅ 100% | 意图识别/TRACE/脑手解耦/多Agent编排 |
-| P3 安全底座 | ✅ 100% | authz 三模式 + L0-L4 分级 + fail-closed |
-| P4 智能层 | ✅ 100% | 记忆分层 + 提示词库 + 四域隔离 |
-| P5 补偿层 + 自进化 | ✅ 100% | withhold/compensate + staticGate + temp plugin |
-| P6 生态与发布 | ✅ 100% | 观雅集 + Hub + electron-builder + 自动更新 |
+> 判定口径同 [差距盘点](../99-归档/PRD差距盘点-2026-08-29.md)：「已接线」= 有真实数据流。
+> 补齐前 ≈ 30%（单点根因：dsh/Cordis 运行时缺席）；补齐后 ≈ 75%。
+
+| 层 | 权重 | 完成度（补齐后） | 说明 |
+|------|--------|------|------|
+| P0 功能（FR-1~9） | 70% | ~80% | 会话/模型/打包真；运行时接入后 FR-7a/FR-9 激活，FR-3/FR-4 缺陷修复 |
+| P1 功能（FR-10~12 + 编排） | 25% | ~70% | 9 插件全部装载激活，记忆/提示词/补偿/编排逻辑已接线 |
+| P2 功能（自进化 + Hub） | 5% | ~60% | evolution 装载；Hub 真实客户端已就绪 |
+| **加权合计** | | **≈ 75%** | 剩余 ≈ 25% 为 GUI 实机 + 真实模型/SubAgent/上传验证 |
+
+> 详细：差距盘点（30%）见 [PRD差距盘点-2026-08-29](../99-归档/PRD差距盘点-2026-08-29.md)；
+> 补齐复盘（75%）见 [PRD差距补齐-2026-08-29](../99-归档/PRD差距补齐-2026-08-29.md)。
 
 ### 1.2 环境门控
 
-- **本机（WorkBuddy CLI）**：无法启动 Electron GUI（BUG-W02，binding 未链接）
-- **正常 Windows 桌面**：双击 `release/OrchDesk 0.2.0.exe` 即可运行
-- **真实模型闭环**：需配置 API Key（OpenAI 兼容）或本地 Ollama
+- **本机（WorkBuddy CLI）**：无法启动 Electron GUI（BUG-W02，binding 未链接）—— 业务逻辑验证走 node 直驱（verify 套件）
+- **正常 Windows 桌面**：双击 `release/OrchDesk-0.3.1.exe` 即可运行
+- **真实模型闭环**：需配置 API Key（OpenAI 兼容）或本地 Ollama；`runAgentTurn` 已接真实工具循环
 
 ---
 
@@ -144,32 +147,46 @@ electron-updater → 请求 GitHub Releases /latest.yml
 
 ## 4. 当前里程碑
 
-### v0.2.0（当前，2026-08-28）
+### v0.3.1（已发布，2026-08-29）
 
-**主题**：UI/UX 迭代 + 开发体验
+**主题**：Agent Runtime 工具调用稳定化 + 数据目录统一
 
-- [x] 启动并行化（init Promise.allSettled）
-- [x] 智能推荐按钮
-- [x] 动态时段问候语
-- [x] 欢迎页垂直居中布局
-- [x] marked.js Markdown 渲染
-- [x] 模型管理默认模型下拉
-- [x] 下拉浮窗层级修复
-- [x] 项目选择器点击修复
-- [x] 白屏防护（backgroundColor）
-- [x] Emoji → SVG 全覆盖
-- [x] 版本治理方案落地（bumpp + changelog + electron-updater + CI）
-- [x] docs 知识库 + CHECKPOINT 更新
+- [x] BUG-014 工具调用参数构造根因修复（`agent-runtime.ts` 纯逻辑 + 双模式适配）
+- [x] BUG-013 数据目录统一与迁移（`dataDir()` + `migrateLegacyData()`）
+- [x] BUG-015 未选模型自动跳转设置页
+- [x] BUG-016 打包前 `kill-running.cjs` 结束进程防 EBUSY
+- [x] 验证体系 78 项全绿（agent-runtime 35 / agent-loop 14 / e2e 29）
 
-### v0.3.0（下一版本，待规划）
+### v0.4.0（已提交 main，未发布；2026-08-29 第二轮补齐）
 
-- [ ] 真实模型闭环（dsh ctx.agents.followup 接入）
-- [ ] 意图识别本地模型接入（Ollama qwen3:14b F1-F4）
-- [ ] TRACE 脱敏遥测真实上传（GitHub Gist/ Releases）
-- [ ] 插件热加载（无需重启）
-- [ ] 多语言 i18n（中文/英文）
-- [ ] 主题系统扩展（自定义 accent 色）
-- [ ] 会话搜索 + 标签
+**主题**：接入 dsh/Cordis 运行时，激活全部 9 插件（PRD 差距补齐）
+
+- [x] P0-1 接入 dsh/Cordis 运行时，`startRuntime()` 装载 9 插件（commit `e820e33`）
+- [x] P0-2 修复 `provide(name,value,true)` 误传第三参（7 插件）
+- [x] P1-3 凭据改 AES-256-GCM + 机器指纹（`credentials.ts`）
+- [x] P1-4 沙箱子进程隔离 + 清理 6 个 mock 常量
+- [x] P2-5 插件测试 2/9 → 9/9（`scripts/verify-plugins.mjs` 51 项）+ 修复 3 真 bug
+- [x] 6 处渲染层缺陷修复（clone→deepClone / 插件开关 / model-test / tool-step / TRACE key / 项目落盘）
+- [x] 验证体系扩至 158 项全绿（新增 dsh-runtime 15 / credentials 14 / verify-plugins 51）
+
+**第二轮补齐（2026-08-29 晚，yt-dev-review 三方审阅 + 交叉修复流程）**：
+
+- [x] M1 guanji.json / hub.json / skills 统一数据目录（新纯逻辑 `data-dir.ts` + 凭据 copy-if-absent 迁移；审阅修复「便携模式生产失效」BLOCKER：`resolveDataDir` 漏传 `existsSync`）
+- [x] M2 导出 / 导入 JSON 数据功能（BUG-013 方案 B：`orchdesk:export-data/import-data` + 设置页按钮；审阅修复「导入竞态被 persist 整体冲掉」BLOCKER + 明文凭据结构校验）
+- [x] M3 真实模型闭环线级验证（`model-loop-verify.cjs` 23 项，真 HTTP mock；审阅修复 responses 模式丢 system/assistant 历史）
+- [x] M4 SubAgent 派生 / 编排闭环验证（`scripts/verify-orchestration.mjs` 45 项；修复 `promoteWorkerOutput` 恒 false（FR-10 晋升断裂）/ rootId 同毫秒碰撞 / 委派树只展开一层 / 失败节点被洗白）
+- [x] M5 TRACE 脱敏上传离线验证（`scripts/verify-trace-upload.mjs` 36 项；修复 30s 定时器永不上传 / splice 误删队首 / 无配置静默丢单 / 明文凭据可导入）
+- [x] M6 vendor 脚本修复（`apps/vendor` → `apps/desktop/vendor` + exports `./` 前缀 + 原地覆盖同步绕开沙箱 bulk-delete 守卫 + build.files 补 `node_modules/@deepseek-ai`），`@deepseek-ai/*` require 探测通过
+- [x] 验证体系扩至 **308 项全绿**（11 套件，`npm run verify` EXIT=0）
+- [x] 打包 v0.4.0 产物验证（`release/OrchDesk Setup 0.3.1.exe` 82M + portable 81M + latest.yml；asar 含 9 插件 + 包外 `node_modules/@deepseek-ai`；**打包产物内 9/9 插件真实 import 通过**，经 `ELECTRON_RUN_AS_NODE=1 OrchDesk.exe -e "import('app.asar/vendor/plugins/...')"` 实测）
+- [ ] GUI 实机冒烟（BUG-W02 门控，须正常 Windows 桌面双击 exe）
+- [ ] 真实模型闭环 + SubAgent 派生 + TRACE 上传实测（须 API Key / Ollama / GitHub repoUrl + TOKEN）
+- [ ] 代码签名
+
+### v0.3.0 / v0.2.0（历史）
+
+- v0.2.0 主题：UI/UX 迭代 + 开发体验（启动并行化、marked.js、模型管理、版本治理）
+- 历史发布见 [99-归档](../99-归档/index.md)
 
 ---
 
@@ -202,12 +219,13 @@ git push origin main --follow-tags  # 推送 + 触发 CI
 | 问题 | 解决 |
 |------|------|
 | Electron 启动白屏 | 正常现象（mock bridge），正常桌面环境会加载真实桥 |
-| E2E 3 项失败 | mock bridge 限制，非 bug |
+| 验证套件某项 FAIL | 先 `tsc -p apps/desktop/tsconfig.json` 确认编译，再 `npm run verify` |
 | BUG-W02 | 本机 WorkBuddy 环境无法启动 Electron，须正常桌面 |
-| 插件编译失败 | 确认 `references/deepseek-harness` 已构建 |
+| 插件编译失败 | 确认 `references/deepseek-harness` 已构建、`scripts/vendor-dsh.cjs` 已跑 |
 | 快照失败 | 检查 `userData` 目录权限 |
+| `@deepseek-ai/*` require 失败 | 重跑 `node apps/desktop/scripts/vendor-dsh.cjs` 物化依赖到 `apps/vendor/` |
 
 ---
 
-*最后更新：2026-08-29 by接力 assistant（v0.3.1 发布登记）*
-*上游文档：[current-state.md](./current-state.md) | [VERSION-GOVERNANCE.md](./VERSION-GOVERNANCE.md) | 变更日志 `apps/desktop/CHANGELOG.md`（仓库根，docs 外）*
+*最后更新：2026-08-29（第二轮补齐：数据目录统一 / 导出导入 / 模型闭环线级验证 / 编排与 TRACE 真实闭环验证 / vendor 路径修复，验证 158→308）*
+*上游文档：[current-state.md](./current-state.md) | [VERSION-GOVERNANCE.md](./VERSION-GOVERNANCE.md) | [PRD差距补齐复盘](../99-归档/PRD差距补齐-2026-08-29.md) | 变更日志 `apps/desktop/CHANGELOG.md`（仓库根，docs 外）*

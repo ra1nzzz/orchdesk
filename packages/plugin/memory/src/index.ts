@@ -131,7 +131,36 @@ function cosine(a: Record<string, number>, b: Record<string, number>): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-function estTokens(text: string): number {
+/**
+ * 从消息中提取纯文本。
+ *
+ * 缺陷修复：此前各处直接把 `m.content` 当字符串用（`.match` / `.slice`），
+ * 但 dsh UserMessage.content 的原生形状是 `ContentBlock[]`
+ * （`{ type: 'text', text: string }`）—— 遇到结构化消息会直接抛
+ * "text.match is not a function"，让整个 agent/pre-step 链崩掉。
+ * 这里统一做宽容解析（string / ContentBlock 数组 / 其它 → ''）。
+ */
+function messageText(msg: unknown): string {
+  const content = (msg as { content?: unknown } | null)?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => {
+        if (typeof b === 'string') return b;
+        if (b && typeof b === 'object' && (b as { type?: string }).type === 'text') {
+          const t = (b as { text?: unknown }).text;
+          return typeof t === 'string' ? t : '';
+        }
+        return '';
+      })
+      .join('\n');
+  }
+  return '';
+}
+
+function estTokens(input: unknown): number {
+  // 容错：非字符串一律按空处理，不让 token 估算成为崩溃源。
+  const text = typeof input === 'string' ? input : messageText(input);
   // 启发式：英文 ~4 字符/token，CJK ~1.6 字符/token。
   const cjk = (text.match(/[一-鿿]/g) ?? []).length;
   const rest = text.length - cjk;
@@ -143,10 +172,7 @@ function summarizeExtractive(messages: UserMessage[]): string {
   if (messages.length === 0) return '(empty)';
   const head = messages.slice(0, 3);
   const tail = messages.slice(-3);
-  const parts = [...head, ...tail].map((m) => {
-    const c = (m as unknown as { content?: string }).content ?? '';
-    return c.slice(0, 200);
-  });
+  const parts = [...head, ...tail].map((m) => messageText(m).slice(0, 200));
   return `摘要（抽取式）：${parts.join(' | ')}`;
 }
 
@@ -327,7 +353,8 @@ export function apply(ctx: Context, config: MemoryConfig): void {
         next: () => Promise<PreStepDecision>,
       ): Promise<PreStepDecision> => {
         const msgs = payload.messages ?? [];
-        const total = msgs.reduce((s, m) => s + estTokens((m as unknown as { content?: string }).content ?? ''), 0);
+        // estTokens 内部已处理 string / ContentBlock[] 两种形状
+        const total = msgs.reduce((s, m) => s + estTokens(m), 0);
         const ratio = total / (config.maxContextTokens || 1);
         if (ratio >= config.dumpThreshold && Date.now() - lastDumpAt > 30_000) {
           // 触发转储（fire-and-forget；异常不影响本次 pre-step 放行）。
@@ -341,7 +368,7 @@ export function apply(ctx: Context, config: MemoryConfig): void {
     );
 
     const anyCtx = ctx as unknown as { provide?: (n: string, v: unknown, b?: boolean) => void };
-    anyCtx.provide?.('memory', api, true);
+    anyCtx.provide?.('memory', api);
 
     return () => {
       offPreStep();

@@ -91,6 +91,13 @@ let activeConfig: TraceConfig | null = null;
 const pending: TraceRecord[] = [];
 /** 上传失败的重试队列（指数退避）。 */
 const retryQueue: { rec: TraceRecord; attempt: number; nextAt: number }[] = [];
+/**
+ * 显式失败记录（如不支持的上传端点）：保留原因、可查询，不静默丢失。
+ * 与 retryQueue 的区别：这类错误重试无意义（配置性问题），不参与退避重试。
+ */
+const errorQueue: { rec: TraceRecord; reason: string; at: number }[] = [];
+/** 最近一次上送/重试的真实异常文本（脱敏：只含状态码/原因，绝不含 token）。 */
+let lastError: string | null = null;
 let flushing = false;
 
 /** 每个 agent 最近一次 Loop 前观测到的意图标签（供用户反馈关联，可选）。 */
@@ -166,32 +173,92 @@ function enqueue(rec: TraceRecord): void {
   void scheduleFlush();
 }
 
-/** 触发批量上传（不阻塞调用方）。 */
+/** 触发批量上传（不阻塞调用方；仅当 pending 满足 batchSize 才发——enqueue 路径）。 */
 async function scheduleFlush(): Promise<void> {
   if (flushing || !activeConfig) return;
   if (pending.length < activeConfig.batchSize) return;
   await flush();
 }
 
-/** 批量上传待发队列；失败移入重试队列（指数退避）。 */
-export async function flush(): Promise<void> {
-  if (flushing || !activeConfig) return;
+export interface FlushResult {
+  /** 本次成功上送的记录数。 */
+  uploaded: number;
+  /** 未上送、仍保留在队列中的记录数。 */
+  kept: number;
+  /** 未上送原因（无 repoUrl / 无 token / 端点不支持等）；null = 无滞留。 */
+  skippedReason: string | null;
+  /** 最近一次真实异常文本（脱敏，不含 token）。 */
+  lastError: string | null;
+}
+
+/**
+ * 批量上传待发队列；失败移入重试队列（指数退避）。
+ * 无 repoUrl / 无 token 时**不做出队**：记录保留在队列（不静默丢单），
+ * 并在返回结果中体现未上送原因。
+ */
+export async function flush(): Promise<FlushResult> {
+  const result: FlushResult = {
+    uploaded: 0,
+    kept: pending.length,
+    skippedReason: null,
+    lastError: null,
+  };
+  if (flushing || !activeConfig) {
+    result.skippedReason = activeConfig ? 'flush-in-progress' : 'plugin-inactive';
+    return result;
+  }
   flushing = true;
+  lastError = null;
   try {
     while (pending.length > 0) {
+      // 未配置仓库：不做出队，记录保留在队列（仓库不硬编码，防漂移③）。
+      if (!activeConfig.repoUrl) {
+        result.skippedReason = 'repo-url-not-configured';
+        break;
+      }
+      // 非 github.com 端点：显式错误——记录进入 error 状态（可查询），不静默。
+      const parsed = parseGitHubRepo(activeConfig.repoUrl);
+      if ('error' in parsed) {
+        const bad = pending.splice(0, pending.length);
+        for (const rec of bad) errorQueue.push({ rec, reason: parsed.error, at: Date.now() });
+        result.skippedReason = parsed.error;
+        break;
+      }
+      // 无 token：不做出队，记录保留在队列（公开仓库写操作需 token）。
+      const token = activeConfig.token || env.ORCHDESK_TRACE_TOKEN || '';
+      if (!token) {
+        result.skippedReason = 'token-not-configured';
+        break;
+      }
       const batch = pending.splice(0, activeConfig.batchSize);
       try {
         await uploadBatch(batch);
-      } catch {
-        // 失败时整批转入重试队列（不丢数据、不阻塞会话）。
+        result.uploaded += batch.length;
+      } catch (e) {
+        // 失败时整批转入重试队列（不丢数据、不阻塞会话）；异常文本脱敏可查。
+        lastError = e instanceof Error ? e.message : String(e);
+        result.lastError = lastError;
         const nextAt = Date.now() + 30_000;
         for (const rec of batch) retryQueue.push({ rec, attempt: 1, nextAt });
       }
     }
+    result.kept = pending.length;
     await drainRetry();
+    // drainRetry 内的真实异常也回填（flush 主循环未出错时以此为准）
+    if (!result.lastError) result.lastError = lastError;
   } finally {
     flushing = false;
   }
+  return result;
+}
+
+/**
+ * 兜底上送（30s 定时器 / dispose 路径专用）：绕过 batchSize 门控，
+ * 只受「无 repoUrl / 无 token」约束——低流量时滞留记录也能最终落网，
+ * 进程退出不丢数据。
+ */
+export function flushNow(): Promise<FlushResult> {
+  return flush();
 }
 
 /** 处理重试队列（最多退避若干次，超限丢弃单条以免无限重试）。 */
@@ -200,11 +267,18 @@ async function drainRetry(): Promise<void> {
   const MAX_ATTEMPTS = 5;
   const now = Date.now();
   const due = retryQueue.filter((r) => r.nextAt <= now);
-  retryQueue.splice(0, due.length);
+  if (due.length === 0) return;
+  // 只移除已到期项，未到期项保留原次序（修复 splice(0, due.length) 误删队首未到期项）。
+  const dueSet = new Set(due);
+  for (let i = retryQueue.length - 1; i >= 0; i--) {
+    const item = retryQueue[i];
+    if (item && dueSet.has(item)) retryQueue.splice(i, 1);
+  }
   for (const item of due) {
     try {
       await uploadBatch([item.rec]);
-    } catch {
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
       if (item.attempt < MAX_ATTEMPTS) {
         retryQueue.push({
           rec: item.rec,
@@ -218,22 +292,33 @@ async function drainRetry(): Promise<void> {
 }
 
 /**
+ * 解析 GitHub repoUrl → { owner, repo }。
+ * 仅支持 github.com 端点；其它端点返回显式 error（调用方据此进入记录 error 状态），
+ * 不静默失败。
+ */
+function parseGitHubRepo(repoUrl: string): { owner: string; repo: string } | { error: string } {
+  const m = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+?)(?:\.git)?(?:[/#]|$)/i);
+  const owner = m?.[1];
+  const repo = m?.[2];
+  if (!owner || !repo) return { error: 'unsupported repoUrl: only github.com endpoints are supported' };
+  return { owner, repo };
+}
+
+/**
  * 上传一批记录到用户配置的公开 GitHub 仓库（REST，无额外依赖；
  * octokit 可在 dsh 依赖层替换）。
  * 防漂移②③：repoUrl 必须用户配置；token 取 config/env，**绝不**进日志/payload。
  */
 async function uploadBatch(batch: TraceRecord[]): Promise<void> {
   const cfg = activeConfig;
-  if (!cfg || !cfg.repoUrl) return; // 未配置仓库：只缓存不上传
-  const m = cfg.repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+?)(?:\.git)?(?:[/#]|$)/i);
-  if (!m) throw new Error('invalid repoUrl');
-  const owner = m[1];
-  const repo = m[2];
+  if (!cfg) throw new Error('plugin-inactive');
+  const parsed = parseGitHubRepo(cfg.repoUrl);
+  if ('error' in parsed) throw new Error(parsed.error); // 显式失败，不静默
   const token = cfg.token || env.ORCHDESK_TRACE_TOKEN || '';
-  if (!token) return; // 无 token：只缓存不上传（公开仓库写操作需 token）
+  if (!token) throw new Error('token-not-configured'); // 显式失败，不静默
 
   const body = batch.map((b) => JSON.stringify(b)).join('\n');
-  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues`, {
+  const res = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -277,9 +362,14 @@ export function recordFeedback(
   });
 }
 
-/** 供控制通道查询当前待发/重试队列长度（可观测，不暴露内容）。 */
-export function queueSize(): { pending: number; retry: number } {
-  return { pending: pending.length, retry: retryQueue.length };
+/** 供控制通道查询当前待发/重试/显式失败队列长度（可观测，不暴露内容）。 */
+export function queueSize(): { pending: number; retry: number; errors: number } {
+  return { pending: pending.length, retry: retryQueue.length, errors: errorQueue.length };
+}
+
+/** 查询显式失败记录（如不支持的上传端点）：保留原因，可审计，不静默丢失。 */
+export function errorRecords(): { rec: TraceRecord; reason: string; at: number }[] {
+  return errorQueue.map((e) => ({ rec: { ...e.rec }, reason: e.reason, at: e.at }));
 }
 
 // ---- 插件入口 ----
@@ -316,11 +406,16 @@ export function apply(ctx: Context, config: TraceConfig): void {
   // dsh 生命周期结束时（fiber dispose）可调用 flush() 确保未发记录落网。
   // 低流量兜底：batchSize 不满足时 scheduleFlush 直接返回，需定时器保证最终上送
   // （30s 间隔，仅在有 pending 时实际发送，避免空轮询）。
+  // 定时器/dispose 路径走 flushNow()：绕过 batchSize 门控，只受「无 repoUrl/token」约束。
   const flushTimer = setInterval(() => {
-    if (pending.length > 0 || retryQueue.length > 0) void scheduleFlush();
+    if (pending.length > 0 || retryQueue.length > 0) void flushNow();
   }, 30_000);
   ctx.effect(() => {
-    return () => clearInterval(flushTimer);
+    return () => {
+      clearInterval(flushTimer);
+      // dispose 兜底：会话/进程退出前尽力上送滞留记录（不阻塞 dispose）。
+      if (pending.length > 0 || retryQueue.length > 0) void flushNow();
+    };
   }, 'orchdesk-trace.flush-timer()');
   void ctx;
 }

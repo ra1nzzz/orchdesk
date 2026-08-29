@@ -1,7 +1,8 @@
 /// <reference types="electron" />
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { app, safeStorage } from 'electron';
+import { safeStorage } from 'electron';
+import { DATA_FILE_NAMES, getDataDir } from './data-dir';
 
 // ============================================================================
 // OrchClaw Hub 联调客户端（T-P6-2）
@@ -9,7 +10,8 @@ import { app, safeStorage } from 'electron';
 // 真实联调：配对远程 Agent、主会话发任务、回收结果。不在本地 mock 绕过。
 //
 // 凭据安全（PLAN 红线）：配对凭据经 electron safeStorage 加密存储于
-// userData/hub.json（仅密文落盘）；无可用加密后端时拒绝存储明文。
+// 规范化数据目录/hub.json（非 userData，避免换安装形态后丢失）；仅密文落盘；
+// 无可用加密后端时拒绝存储明文。
 //
 // 协议（须与部署的 OrchClaw Hub 对齐；此处为真实 REST 客户端形态）：
 //   POST <hubUrl>/api/pair        { token }            → { handle, agentName }
@@ -49,8 +51,9 @@ export interface HubStatus {
   agentName?: string;
 }
 
+/** 配置文件：统一落在规范化数据目录（由 main 注入解析器，见 data-dir.ts）。 */
 function configFile(): string {
-  return path.join(app.getPath('userData'), 'hub.json');
+  return path.join(getDataDir(), DATA_FILE_NAMES.hub);
 }
 
 function encryptionAvailable(): boolean {
@@ -86,13 +89,25 @@ function writeConfig(cfg: HubConfig): void {
 }
 
 export class HubClient {
-  private cfg: HubConfig | null = readConfig();
+  // 惰性读取：模块加载时 main 还没注入数据目录解析器（getDataDir 会抛错），
+  // 推迟到首次访问再读，确保读到的是规范化目录里的凭据。
+  private cfg: HubConfig | null = null;
+  private cfgLoaded = false;
   private handle: string | null = null;
   private agentName: string | null = null;
 
+  private config(): HubConfig | null {
+    if (!this.cfgLoaded) {
+      this.cfgLoaded = true;
+      this.cfg = readConfig();
+    }
+    return this.cfg;
+  }
+
   status(): HubStatus {
-    const paired = !!(this.cfg && this.cfg.tokenCipher && this.handle);
-    return { paired, url: this.cfg?.url, agentName: this.agentName || undefined };
+    const cfg = this.config();
+    const paired = !!(cfg && cfg.tokenCipher && this.handle);
+    return { paired, url: cfg?.url, agentName: this.agentName || undefined };
   }
 
   /** 配对远程 Agent（凭据加密存储）。 */
@@ -123,6 +138,7 @@ export class HubClient {
       const data = (await res.json()) as { handle?: string; agentName?: string };
       if (!data.handle) return { ok: false, reason: '配对响应缺少 handle' };
       this.cfg = { url: url.trim(), tokenCipher: cipher };
+      this.cfgLoaded = true;
       this.handle = data.handle;
       this.agentName = data.agentName || null;
       writeConfig(this.cfg);
@@ -133,9 +149,10 @@ export class HubClient {
   }
 
   private authHeaders(): Record<string, string> {
-    if (!this.cfg || !this.cfg.tokenCipher) return {};
+    const cfg = this.config();
+    if (!cfg || !cfg.tokenCipher) return {};
     try {
-      return { Authorization: `Bearer ${decryptToken(this.cfg.tokenCipher)}` };
+      return { Authorization: `Bearer ${decryptToken(cfg.tokenCipher)}` };
     } catch {
       return {};
     }
@@ -143,11 +160,12 @@ export class HubClient {
 
   /** 主会话向远程 Agent 发任务。 */
   async sendTask(text: string): Promise<SendResult> {
-    if (!this.status().paired || !this.cfg || !this.handle) {
+    const cfg = this.config();
+    if (!this.status().paired || !cfg || !this.handle) {
       return { ok: false, reason: '尚未配对或配对已失效' };
     }
     try {
-      const res = await fetch(`${this.cfg.url.replace(/\/$/, '')}/api/agent/${encodeURIComponent(this.handle)}/task`, {
+      const res = await fetch(`${cfg.url.replace(/\/$/, '')}/api/agent/${encodeURIComponent(this.handle)}/task`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
         body: JSON.stringify({ text }),
@@ -163,11 +181,12 @@ export class HubClient {
 
   /** 回收远程 Agent 回传结果。 */
   async getResult(taskId: string): Promise<TaskResult> {
-    if (!this.status().paired || !this.cfg || !this.handle) {
+    const cfg = this.config();
+    if (!this.status().paired || !cfg || !this.handle) {
       return { status: 'error', result: '尚未配对' };
     }
     try {
-      const res = await fetch(`${this.cfg.url.replace(/\/$/, '')}/api/agent/${encodeURIComponent(this.handle)}/result/${encodeURIComponent(taskId)}`, {
+      const res = await fetch(`${cfg.url.replace(/\/$/, '')}/api/agent/${encodeURIComponent(this.handle)}/result/${encodeURIComponent(taskId)}`, {
         headers: this.authHeaders(),
         signal: AbortSignal.timeout(10000),
       });

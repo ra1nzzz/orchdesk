@@ -272,4 +272,6 @@ async function check(name, fn) {
 
   if (failed > 0) process.exit(1);
   console.log('Agent 回合管线全部验证通过');
+  // 主进程内的 dsh 运行时持有定时器/句柄，需显式退出，否则进程挂起
+  process.exit(0);
 })();

@@ -50,9 +50,12 @@ interface CategoryRule {
 }
 
 // 顺序即优先级：靠前的先命中。
+// 缺陷修复：中文口语里外发常写成「发给客户」「推送给群里」，早期规则只覆盖
+// 「发送/发邮件/群发」，导致这类明显的外发操作被归为 other → 绕过 withhold
+// 二次确认（PRD FR-12 要求外发默认 CONFIRM）。这里补齐常见说法与英文写法。
 const CATEGORY_RULES: CategoryRule[] = [
-  { pattern: /(删除文件|删除|删掉|删去|清空|格式化|格式化磁盘|rm\s|rmdir|del\s|trash|wipe|drop\s+table|删库|shred)/i, category: 'delete-file' },
-  { pattern: /(发送|发邮件|群发|对外发送|发消息|广播|notify|send\s+email|message-send|broadcast)/i, category: 'external-message' },
+  { pattern: /(删除文件|删除|删掉|删去|清空|格式化|格式化磁盘|rm\s|rmdir|del\s|trash|wipe|drop\s+table|删库|shred|erase|remove\s+all)/i, category: 'delete-file' },
+  { pattern: /(发送|发邮件|群发|对外发送|发消息|广播|发给|发送给|寄给|推送给|转发给|回复给|私信|通知他|通知客户|notify|send\s+(email|message|to)|message-send|broadcast|reply\s+to|forward\s+to)/i, category: 'external-message' },
   { pattern: /(请求接口|调用接口|调用API|网络请求|POST|GET|PUT|http|curl|fetch|api\s+call|webhook|API)/i, category: 'network-egress' },
   { pattern: /(写入共享|上传到共享|保存到共享盘|写共享目录|写共享文件|shared\s+drive|upload\s+to\s+shared)/i, category: 'shared-file-write' },
   { pattern: /(发布|部署|提交|支付|转账|购买|下单|publish|deploy|commit|payment|transfer|purchase)/i, category: 'irreversible' },
@@ -299,7 +302,7 @@ export function apply(ctx: Context, config: CompensationConfig): void {
       },
     };
     const anyCtx = ctx as unknown as { provide?: (n: string, v: unknown, b?: boolean) => void };
-    anyCtx.provide?.('compensation', api, true);
+    anyCtx.provide?.('compensation', api);
     return () => {
       offPre();
       subscribers.clear();

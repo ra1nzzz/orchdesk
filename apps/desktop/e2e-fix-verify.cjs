@@ -46,6 +46,13 @@ async function run() {
     window.orchdesk = {
       loadSessions: () => Promise.resolve([]),
       persistSessions: (arr) => Promise.resolve({ ok: true }),
+      loadProjects: () => Promise.resolve([]),
+      persistProjects: (arr) => Promise.resolve({ ok: true }),
+      onToolStep: () => () => {},
+      getPluginRuntime: () => Promise.resolve({ ready: false, activeCount: 0, total: 0, plugins: [] }),
+      setPluginEnabled: () => Promise.resolve({ ok: false, reason: 'E2E mock' }),
+      getOrchestrationCatalog: () => Promise.resolve(null),
+      testModel: () => Promise.resolve({ ok: true, latencyMs: 12 }),
       runAgentTurn: (sid, text, opts) => Promise.resolve({
         text: '[E2E] 回复：已收到「' + text.slice(0, 30) + '」',
         intent: 'ACT'

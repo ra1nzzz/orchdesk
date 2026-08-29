@@ -164,9 +164,8 @@ export function apply(ctx: Context, config: AuthzConfig): void {
   };
 
   // 调用 dsh 既有服务（inject 声明，运行时由 Cordis 注入）。
-  // 注：dsh sandbox-policy 的 setSandboxMode(session: Session, mode) / resolve 需要**真实 Session**
-  // 对象（读取 session.header.cwd 等）；本插件 seam 无真实 Session 句柄（P1 桥接任务卡未接 dsh ctx），
-  // 传 {id} 假对象会在运行时抛错。故持久化调用以 try/catch 降级为审计，保持 fail-safe，不伪造调用。
+  // OrchDesk 桌面侧由 host-services 提供 sandboxPolicy 的真实实现（白名单 + 模式持久化），
+  // 其 setSandboxMode 接受 { id } 形状，无需 dsh 的完整 Session 对象。
   const sandboxPolicy = (ctx as unknown as { sandboxPolicy?: {
     resolve(req?: { session?: { id: string } }): { mode: string };
     setSandboxMode(session: { id: string }, mode: string): void;
@@ -190,11 +189,24 @@ export function apply(ctx: Context, config: AuthzConfig): void {
 
   async function setMode(mode: AuthzMode, sessionId?: string): Promise<{ ok: boolean; reason?: string }> {
     const spec = modeToSpec(mode);
-    // approval/policy 的 paranoid='never' 由 dsh approval config / session 事件控制；
-    // sandbox/mode 持久化需真实 Session（setSandboxMode 签名），seam 未接入前无法生效。
-    // 返回 { ok: false } 让 UI 层显示"当前不可用"而非乐观更新（fail-closed）。
-    pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId, note: 'persist seam unavailable (no real Session); mode change deferred' });
-    return { ok: false, reason: '沙箱模式持久化 seam 未接入（需 dsh ctx 真实 Session），切换未生效' };
+    // 1) sandbox/mode 持久化：经注入的 sandboxPolicy 落盘（无服务 → 失败，不静默）。
+    if (!sandboxPolicy) {
+      pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId, note: 'sandboxPolicy 服务未注入，切换未生效' });
+      return { ok: false, reason: '沙箱策略服务不可用（sandboxPolicy 未注入），切换未生效' };
+    }
+    try {
+      sandboxPolicy.setSandboxMode({ id: sessionId || '' }, spec.sandboxMode);
+    } catch (err) {
+      pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId, note: `持久化失败: ${(err as Error).message}` });
+      return { ok: false, reason: `沙箱模式持久化失败：${(err as Error).message}` };
+    }
+    // 2) approval/policy：paranoid 对应 'never'（逐项确认），其余为 'ask'。
+    try {
+      approval?.setPolicy(undefined, spec.approvalPolicy);
+    } catch { /* 策略同步失败不阻断模式切换，已落审计 */ }
+
+    pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId });
+    return { ok: true };
   }
 
   function setUiAnswerer(fn: UiAnswerer | null): void {
@@ -272,7 +284,7 @@ export function apply(ctx: Context, config: AuthzConfig): void {
       getAuditLog: () => [...audit],
     };
     const anyCtx = ctx as unknown as { provide?: (n: string, v: unknown, b?: boolean) => void };
-    anyCtx.provide?.('authz', api, true);
+    anyCtx.provide?.('authz', api);
 
     return () => {
       offApproval();

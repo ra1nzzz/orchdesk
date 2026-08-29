@@ -1,0 +1,30 @@
+0000000000000000000000000000000000000000 b63137175a044deb394b4b6d198f7e36a81f5061 my <my@orchdesk.local> 1787538275 +0800	commit (initial): feat: OrchDesk P1-P6 全阶段落地（首次提交）
+b63137175a044deb394b4b6d198f7e36a81f5061 de10f0c5c8c551cc6a315bb57405444e10b550f5 my <my@orchdesk.local> 1787539190 +0800	commit: fix: REVIEW 三方审计修复（XSS/approval 契约/fail-closed 门控）
+de10f0c5c8c551cc6a315bb57405444e10b550f5 cfa09fcfbe90b232a7adb47c028cc05b04ff8ad1 my <my@orchdesk.local> 1787546022 +0800	commit: build: 打包 EXE 落地 + BUG-W02 结案纠正
+cfa09fcfbe90b232a7adb47c028cc05b04ff8ad1 e5a5cafb4c53e455622a99a2aae8760f683edc45 my <my@orchdesk.local> 1787572774 +0800	commit: release: v0.1.0 图标 + publish 配置 + GitHub Releases 发布
+e5a5cafb4c53e455622a99a2aae8760f683edc45 5b22ffa7628d9990a2a894e24ba7d92a4247bd55 my <my@orchdesk.local> 1787768003 +0800	commit: fix: review 三方审计修复（安全/类型/资源）
+5b22ffa7628d9990a2a894e24ba7d92a4247bd55 5b22ffa7628d9990a2a894e24ba7d92a4247bd55 my <my@orchdesk.local> 1787768023 +0800	reset: moving to HEAD
+5b22ffa7628d9990a2a894e24ba7d92a4247bd55 2399daf12c9dc00f70453daf127323239a45a7cb my <my@orchdesk.local> 1787768030 +0800	pull origin main --rebase (start): checkout 2399daf12c9dc00f70453daf127323239a45a7cb
+2399daf12c9dc00f70453daf127323239a45a7cb a15da763e6a95ceb5bf9ef82db4f2856af7455fa my <my@orchdesk.local> 1787768030 +0800	pull origin main --rebase (pick): feat: OrchDesk P1-P6 全阶段落地（首次提交）
+a15da763e6a95ceb5bf9ef82db4f2856af7455fa 8b8d11f940b88e09f2a837981e22ebb9fa807d6c my <my@orchdesk.local> 1787768031 +0800	pull origin main --rebase (pick): fix: REVIEW 三方审计修复（XSS/approval 契约/fail-closed 门控）
+8b8d11f940b88e09f2a837981e22ebb9fa807d6c 3c8e9de7cad6d67823f5508299932d65749885f1 my <my@orchdesk.local> 1787768031 +0800	pull origin main --rebase (pick): build: 打包 EXE 落地 + BUG-W02 结案纠正
+3c8e9de7cad6d67823f5508299932d65749885f1 9b5fc18360fc6fa9a71f06a68cbea271bee90b57 my <my@orchdesk.local> 1787768031 +0800	pull origin main --rebase (pick): release: v0.1.0 图标 + publish 配置 + GitHub Releases 发布
+9b5fc18360fc6fa9a71f06a68cbea271bee90b57 f03865a0625b3364e9d708cf58035be8d9450c07 my <my@orchdesk.local> 1787768031 +0800	pull origin main --rebase (pick): fix: review 三方审计修复（安全/类型/资源）
+f03865a0625b3364e9d708cf58035be8d9450c07 f03865a0625b3364e9d708cf58035be8d9450c07 my <my@orchdesk.local> 1787768031 +0800	pull origin main --rebase (finish): returning to refs/heads/main
+f03865a0625b3364e9d708cf58035be8d9450c07 2de3d07fc707da6f3fecf7d58c8abb37bc521874 my <my@orchdesk.local> 1787929924 +0800	commit: feat: UI/UX 迭代 + marked.js Markdown 渲染 + 启动并行化 + 模型管理增强
+2de3d07fc707da6f3fecf7d58c8abb37bc521874 708948b904885f815bc4e80e86ef85174ddf8f0d my <my@orchdesk.local> 1787930746 +0800	commit: feat(v0.2.0): 版本治理 + 自动更新 + CI/CD + CHECKPOINT
+708948b904885f815bc4e80e86ef85174ddf8f0d 0e8b3ac405a8e477abbd38a9830c107b71896d57 my <my@orchdesk.local> 1787936244 +0800	commit: feat(v0.3.0): Agent Runtime 工具执行引擎 + 状态栏动态 Commit + 架构审计
+0e8b3ac405a8e477abbd38a9830c107b71896d57 c8dcdbb4e5462a12fac03bfea11cb97fc9314f97 my <my@orchdesk.local> 1787937684 +0800	commit: chore: add app icon (orchstar.png)
+c8dcdbb4e5462a12fac03bfea11cb97fc9314f97 642afec940d496592cef687e820dfeff080b3d07 my <my@orchdesk.local> 1787937900 +0800	commit: chore: icon.ico auto-generated from orchstar.png by electron-builder
+642afec940d496592cef687e820dfeff080b3d07 24a1ccb01e19bbac080aaf3a295cc0c352c4417f my <my@orchdesk.local> 1787938379 +0800	commit: feat: maxToolIterations config (default 200) + settings UI slider
+24a1ccb01e19bbac080aaf3a295cc0c352c4417f a88ca8514fa3db99e98ca7af7d9168984bb08f0c my <my@orchdesk.local> 1787939789 +0800	commit: feat: model-call pipeline + agents runtime + E2E fix
+a88ca8514fa3db99e98ca7af7d9168984bb08f0c dc57cd508f523e58c5e7d08a1ccf2a6ab54aff54 my <my@orchdesk.local> 1787940929 +0800	commit: fix: tool-call regex + ICON config + version 0.3.0 + docs
+dc57cd508f523e58c5e7d08a1ccf2a6ab54aff54 55a39d92430fafff4779c13849831825fde591c1 my <my@orchdesk.local> 1787941958 +0800	commit: docs: add BUG knowledge base and agent handoff prompt
+55a39d92430fafff4779c13849831825fde591c1 df71e726a1df49ad3f26f397031a047cf422a2d2 my <my@orchdesk.local> 1787944471 +0800	commit: fix(agent): 工具调用稳定化 + 数据目录统一 + 构建防 EBUSY（v0.3.1）
+df71e726a1df49ad3f26f397031a047cf422a2d2 3b588e73b112126debc5dab7178d0b454226a944 my <my@orchdesk.local> 1787944683 +0800	commit: docs: v0.3.1 发布登记 + 修复 CHECKPOINT 断链（知识库审计 0 issues）
+3b588e73b112126debc5dab7178d0b454226a944 95b20f142dd23637eb6331b2fcf0bc192666c144 my <my@orchdesk.local> 1787944738 +0800	commit: chore: 追加 2026-08-29 工作记忆（v0.3.1 修复与验证体系）
+95b20f142dd23637eb6331b2fcf0bc192666c144 27db1b4d7154636b34bbf56da19de11be4ddef1a my <my@orchdesk.local> 1787947590 +0800	commit: docs: PRD 差距盘点（v0.3.1 时点，完成度约 30%）
+27db1b4d7154636b34bbf56da19de11be4ddef1a e820e33a622dd6e5b298b3b921d82b712cf44c24 my <my@orchdesk.local> 1787954227 +0800	commit: feat: 接入 dsh/Cordis 运行时，激活全部 9 个插件（PRD 差距 #1）
+e820e33a622dd6e5b298b3b921d82b712cf44c24 2d988c5b902dbe4d73c90d07d4783d3a55204d11 my <my@orchdesk.local> 1787954792 +0800	commit: fix: 凭据改 AES-256-GCM/机器指纹 + 沙箱子进程隔离 + 清理 mock 常量（P1-3/P1-4）
+2d988c5b902dbe4d73c90d07d4783d3a55204d11 91ae26b250c3b57dee820f717bf831c28a664f28 my <my@orchdesk.local> 1787955449 +0800	commit: test: 插件测试覆盖 2/9 → 9/9，并修复暴露的 3 个真 bug（P2-5）
+91ae26b250c3b57dee820f717bf831c28a664f28 29047cccacf154b11d9ac0650ec87a370c58e091 my <my@orchdesk.local> 1787972145 +0800	commit: docs: 更新进度到 /docs（v0.4.0 差距补齐复盘，完成度 30%→75%）

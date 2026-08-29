@@ -105,8 +105,25 @@ export function apply(ctx: Context, config: PromptConfig): void {
   const docs = new Map<string, PromptDoc>();
   let resolver: SkillResolver | null = null;
 
+  /**
+   * 补全文档默认字段。
+   * 缺陷修复：create/update 原样透传入参，若调用方未提供 agents/priority 等字段，
+   * 后续 mergeForAgent 的 `d.agents.includes(...)` 会直接崩溃（undefined 访问）。
+   */
+  function normalizeDoc(doc: Omit<PromptDoc, 'id' | 'updatedAt'>): PromptDoc {
+    const d = doc as PromptDoc;
+    return {
+      ...d,
+      title: d.title ?? '',
+      body: d.body ?? '',
+      category: d.category ?? 'role',
+      agents: Array.isArray(d.agents) ? d.agents : [],
+      priority: typeof d.priority === 'number' ? d.priority : 0,
+    };
+  }
+
   function create(doc: Omit<PromptDoc, 'id' | 'updatedAt'>): PromptDoc {
-    const d: PromptDoc = { ...doc, id: nextId(), updatedAt: Date.now() };
+    const d: PromptDoc = { ...normalizeDoc(doc), id: nextId(), updatedAt: Date.now() };
     docs.set(d.id, d);
     return { ...d };
   }
@@ -114,7 +131,8 @@ export function apply(ctx: Context, config: PromptConfig): void {
   function update(id: string, patch: Partial<Omit<PromptDoc, 'id' | 'updatedAt'>>): PromptDoc | undefined {
     const cur = docs.get(id);
     if (!cur) return undefined;
-    const next: PromptDoc = { ...cur, ...patch, id: cur.id, updatedAt: Date.now() };
+    const merged = { ...cur, ...patch } as Omit<PromptDoc, 'id' | 'updatedAt'>;
+    const next: PromptDoc = { ...normalizeDoc(merged), id: cur.id, updatedAt: Date.now() };
     docs.set(id, next);
     return { ...next };
   }
@@ -133,7 +151,12 @@ export function apply(ctx: Context, config: PromptConfig): void {
   }
 
   function mergeForAgent(agentId: string): MergeResult {
-    const relevant = [...docs.values()].filter((d) => d.agents.includes(agentId) || d.agents.length === 0);
+    // 防御式读取：历史文档可能缺 agents 字段（见 normalizeDoc 说明），
+    // 不能用 d.agents.includes 直接访问，否则整个合并崩溃、提示词全部丢失。
+    const relevant = [...docs.values()].filter((d) => {
+      const agents = Array.isArray(d.agents) ? d.agents : [];
+      return agents.includes(agentId) || agents.length === 0;
+    });
     relevant.sort((a, b) => a.priority - b.priority || a.updatedAt - b.updatedAt);
     const conflicts: MergeResult['conflicts'] = [];
     const sectionByCat = new Map<PromptCategory, MergedSection[]>();
@@ -142,7 +165,9 @@ export function apply(ctx: Context, config: PromptConfig): void {
       const existing = sectionByCat.get(d.category) ?? [];
       // 检查与同 category 已有段落的冲突
       for (const sec of existing) {
-        const c = detectConflict(d, docs.get(sec.fromDocId)!);
+        const prev = docs.get(sec.fromDocId);
+        if (!prev) continue; // 文档已被移除，跳过（不崩）
+        const c = detectConflict(d, prev);
         if (c) {
           sec.conflict = true;
           sec.conflictWith = [...(sec.conflictWith ?? []), d.id];
@@ -205,7 +230,7 @@ export function apply(ctx: Context, config: PromptConfig): void {
 
   ctx.effect(() => {
     const anyCtx = ctx as unknown as { provide?: (n: string, v: unknown, b?: boolean) => void };
-    anyCtx.provide?.('promptLib', api, true);
+    anyCtx.provide?.('promptLib', api);
     return () => {
       docs.clear();
     };

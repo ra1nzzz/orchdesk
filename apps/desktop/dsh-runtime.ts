@@ -1,0 +1,255 @@
+/// <reference types="electron" />
+/**
+ * OrchDesk dsh 运行时（Cordis Context + 宿主服务 + 9 个插件）
+ * ----------------------------------------------------------------------------
+ * 这是 PRD 差距盘点中「FR-7 至 FR-13 全部为空壳」的根因修复：
+ * 过去 `packages/plugin/*` 的 2515 行实现从未被 Electron 加载，asar 里 dsh/cordis
+ * 命中数为 0。本模块在主进程启动真实的 Cordis Context，装载：
+ *
+ *   1. orchdesk-host-services —— OrchDesk 自提供的 sandboxPolicy / approval / agents
+ *   2. 9 个插件             —— intent / trace / authz / brain / multi / memory /
+ *                              prompt / compensation / evolution
+ *
+ * 加载后 ctx 上可用的服务：
+ *   authz · memory · orchestration · brainHands · promptLib · compensation · evolution
+ * （intent / trace 无 provide，它们以 agent/pre-step 事件监听形式生效。）
+ *
+ * 注意：所有插件的 lib 产物是 ESM，而主进程编译产物是 CJS —— 用动态 import() 加载，
+ * Node 22 / Electron 36 原生支持（require(esm)），无需改模块系统。
+ */
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { Context } from '@deepseek-ai/cordis';
+import { hostServices, getHostServices, type HostServices } from './host-services';
+
+/** 插件名清单（顺序即加载顺序）。 */
+export const PLUGIN_NAMES = [
+  'intent',
+  'trace',
+  'authz',
+  'brain',
+  'multi',
+  'memory',
+  'prompt',
+  'compensation',
+  'evolution',
+] as const;
+
+export type PluginName = (typeof PLUGIN_NAMES)[number];
+
+export interface PluginLoadResult {
+  name: PluginName;
+  ok: boolean;
+  /** fiber.state === 2 视为已激活 */
+  active: boolean;
+  error?: string;
+}
+
+export interface OrchDeskRuntime {
+  ctx: Context;
+  host: HostServices | null;
+  plugins: PluginLoadResult[];
+  /** 已激活插件数 / 总数 */
+  activeCount: number;
+}
+
+let runtime: OrchDeskRuntime | null = null;
+
+/**
+ * 解析插件产物路径。
+ * - 打包后：`vendor/plugins/<name>/index.js`（由 scripts/vendor-dsh.cjs 物化）
+ * - 开发时：回落到 `packages/plugin/<name>/lib/index.js`（仓库源码树）
+ */
+function pluginEntry(name: string): string | null {
+  const vendored = path.join(__dirname, '..', 'vendor', 'plugins', name, 'index.js');
+  if (fs.existsSync(vendored)) return vendored;
+  const dev = path.join(__dirname, '..', '..', '..', 'packages', 'plugin', name, 'lib', 'index.js');
+  if (fs.existsSync(dev)) return dev;
+  return null;
+}
+
+/**
+ * Cordis 期望 inject 为对象形式（{ name: true }），而插件源码导出的是字符串数组。
+ * 数组会被当成索引键对象（'0','1'），导致依赖永远解析不到 —— 这里统一归一化。
+ */
+function normalizeInject(mod: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...mod };
+  const inject = out.inject;
+  if (Array.isArray(inject)) {
+    const obj: Record<string, boolean> = {};
+    for (const k of inject) if (typeof k === 'string') obj[k] = true;
+    out.inject = obj;
+  }
+  return out;
+}
+
+/** 启动运行时。幂等：重复调用返回同一实例。 */
+export async function startRuntime(): Promise<OrchDeskRuntime> {
+  if (runtime) return runtime;
+
+  const ctx = new Context();
+  const plugins: PluginLoadResult[] = [];
+
+  // 1) 宿主服务必须最先装载：后续 5 个插件注入 sandboxPolicy / approval / agents
+  ctx.plugin(hostServices);
+  await settle();
+
+  // 2) 装载 9 个插件
+  for (const name of PLUGIN_NAMES) {
+    const entry = pluginEntry(name);
+    if (!entry) {
+      plugins.push({ name, ok: false, active: false, error: '未找到编译产物（需先 tsc 或运行 vendor-dsh）' });
+      continue;
+    }
+    try {
+      const mod = (await dynamicImport(pathToFileUrl(entry))) as Record<string, unknown>;
+      const plugin = normalizeInject(mod);
+      const config = typeof plugin.Config === 'function'
+        ? (plugin.Config as (c: unknown) => unknown)({})
+        : undefined;
+      // 插件产物经动态 import 载入，形状由运行时保证；此处做一次收窄以通过 strict 检查。
+      type CordisPlugin = Parameters<Context['plugin']>[0];
+      const fiber = ctx.plugin(plugin as unknown as CordisPlugin, config as never);
+      fibers.set(name, fiber);
+      await settle();
+      const st = (fiber as unknown as { state?: number }).state;
+      const active = st === 2;
+      plugins.push({ name, ok: true, active, error: active ? undefined : `fiber.state=${st}（依赖未满足）` });
+      if (!active) console.warn(`[orchdesk] 插件 ${name} 未激活：fiber.state=${st}`);
+    } catch (err) {
+      const msg = (err as Error).message;
+      plugins.push({ name, ok: false, active: false, error: msg });
+      console.error(`[orchdesk] 插件 ${name} 加载失败:`, msg);
+    }
+  }
+
+  const activeCount = plugins.filter((p) => p.active).length;
+  console.log(`[orchdesk] dsh 运行时就绪：插件 ${activeCount}/${PLUGIN_NAMES.length} 已激活`);
+
+  runtime = { ctx, host: getHostServices(), plugins, activeCount };
+  return runtime;
+}
+
+/** 取已启动的运行时（未启动时返回 null）。 */
+export function getRuntime(): OrchDeskRuntime | null {
+  return runtime;
+}
+
+/** 单个插件的当前状态（供 UI 展示，不伪造）。 */
+export interface PluginState {
+  name: PluginName;
+  active: boolean;
+  /** 运行时是否可用（产物是否存在） */
+  available: boolean;
+  error?: string;
+}
+
+/** 查询全部插件状态。 */
+export function getPluginStates(): PluginState[] {
+  if (!runtime) {
+    return PLUGIN_NAMES.map((name) => ({ name, active: false, available: false, error: '运行时未启动' }));
+  }
+  return runtime.plugins.map((p) => ({
+    name: p.name,
+    active: p.active,
+    available: p.ok,
+    error: p.error,
+  }));
+}
+
+/**
+ * 真实热插拔（FR-3）：启用 = 注册 effect；停用 = 逆回滚（fiber.dispose），不重启、无残留。
+ * @returns 操作后的状态；产物缺失或名字未知时明确报错，不做乐观更新。
+ */
+export async function setPluginEnabled(name: string, enabled: boolean): Promise<PluginState> {
+  if (!runtime) throw new Error('运行时未启动');
+  if (!PLUGIN_NAMES.includes(name as PluginName)) throw new Error(`未知插件: ${name}`);
+
+  const entry = pluginEntry(name);
+  if (!entry) throw new Error(`插件 ${name} 产物缺失（需先编译）`);
+
+  const record = runtime.plugins.find((p) => p.name === name);
+  const fiber = fibers.get(name);
+  const isActive = !!record?.active;
+
+  if (enabled && !isActive) {
+    const mod = (await dynamicImport(pathToFileUrl(entry))) as Record<string, unknown>;
+    const plugin = normalizeInject(mod);
+    const config = typeof plugin.Config === 'function'
+      ? (plugin.Config as (c: unknown) => unknown)({})
+      : undefined;
+    type CordisPlugin = Parameters<Context['plugin']>[0];
+    const f = runtime.ctx.plugin(plugin as unknown as CordisPlugin, config as never) as unknown as FiberLike;
+    fibers.set(name, f);
+    await settle();
+    const st = f.state;
+    if (record) {
+      record.active = st === 2;
+      record.ok = true;
+      record.error = st === 2 ? undefined : `fiber.state=${st}（依赖未满足）`;
+    }
+  } else if (!enabled && isActive && fiber) {
+    if (typeof fiber.dispose === 'function') await Promise.resolve(fiber.dispose());
+    fibers.delete(name);
+    if (record) { record.active = false; record.error = '已停用（逆回滚完成）'; }
+  }
+
+  runtime.activeCount = runtime.plugins.filter((p) => p.active).length;
+  const after = runtime.plugins.find((p) => p.name === name);
+  return {
+    name: name as PluginName,
+    active: !!after?.active,
+    available: !!after?.ok,
+    error: after?.error,
+  };
+}
+
+/** 已装载插件的 fiber 句柄（用于热插拔 dispose）。 */
+interface FiberLike { state?: number; dispose?: () => Promise<void> | void }
+const fibers = new Map<string, FiberLike>();
+
+/**
+ * 取插件注册的服务。插件未激活或服务未注册时返回 null —— 调用方必须判空，
+ * 不允许静默回落到假数据（项目铁律：不伪造、不静默）。
+ */
+export function getService<T>(name: string): T | null {
+  if (!runtime) return null;
+  const value = (runtime.ctx as unknown as Record<string, unknown>)[name];
+  return (value ?? null) as T | null;
+}
+
+/** 关闭运行时（应用退出前调用，触发全部插件的逆效应）。 */
+export async function stopRuntime(): Promise<void> {
+  if (!runtime) return;
+  // Context 类型未声明 dispose；实际由 root fiber 提供（逆效应入口）。
+  const disposable = runtime.ctx as unknown as { fiber?: { dispose?: () => Promise<void> | void } };
+  try {
+    await Promise.resolve(disposable.fiber?.dispose?.());
+  } catch (err) {
+    console.warn('[orchdesk] 运行时关闭异常:', (err as Error).message);
+  }
+  runtime = null;
+}
+
+// ---- helpers ----
+
+/**
+ * 原生动态 import。
+ * 关键：本文件编译为 CJS，TS 会把静态写法的 `import()` 降级成 `require()`，
+ * 而插件产物是 ESM —— require 直接失败。用 new Function 构造可绕过降级，
+ * 保留真正的 ESM 动态加载（Node 22 / Electron 36 均支持）。
+ */
+const dynamicImport = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<unknown>;
+
+/** 让 Cordis 的异步 fiber 状态机推进若干 tick。 */
+function settle(times = 3): Promise<void> {
+  let p: Promise<void> = Promise.resolve();
+  for (let i = 0; i < times; i++) p = p.then(() => new Promise<void>((r) => setTimeout(r, 0)));
+  return p;
+}
+
+/** 把绝对路径转成 file:// URL（Windows 盘符需三斜杠）。 */
+function pathToFileUrl(p: string): string {
+  const normalized = p.replace(/\\/g, '/');
+  return normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`;
+}
