@@ -34,3 +34,7 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 ## 审阅工作流
 - `yt-dev-review` 技能（~/.workbuddy/skills/）：3 并行审阅子代理（质量/效率/可复用性）→ 交叉比对 → 交叉修复 → 复验门禁。2026-08-29 第二轮以此抓到 5 个 P0 真问题（便携模式失效 / 导入竞态 / responses 丢历史 / 晋升恒断 / TRACE 定时器不上传）。
 - 教训：「测试过、生产坏」——verify 自注入依赖会掩盖调用方缺参；审阅时必须对照调用方实参。
+
+## ADR-0008 挂点桥接（长期裁决）
+- 主会话模型回合 = 直连工具循环 + `firePreStep()` 每回合驱动 `agent/pre-step` waterfall（intent 网关 reject 硬拒 / trace 遥测）。**不要**再把「接入 ctx.agents.followup」当待办——那是 P7 路线图项且切换前须新 ADR；fail 边界：runtime 未启动 → 放行 + WARN。详见 docs/70-决策/ADR-0008 与 conflicts C6。
+- 排查口诀：插件挂在 dsh 事件上时，先确认**主链路是否真的 emit 该事件**（AgentLoop 事件只有 dsh 驱动循环才发）。
