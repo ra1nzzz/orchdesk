@@ -33,13 +33,12 @@ updated: 2026-08-30
 | BUG-W01 | pnpm 11 在 Git Bash / 沙箱下 safe-delete 失败，install 中止 exit 1，node_modules 未生成；需 `--config.safe-delete=false`。另：WorkBuddy CLI 沙箱对「一次删除 >50 文件」有 bulk-delete 守卫，整树 `rmSync` 会抛 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`——构建脚本须用「原地覆盖 + 逐个清陈旧」（见 `vendor-dsh.cjs` `syncDir`） | 高（阻塞 Windows 构建） | open | P0 / T-P0-1 |
 | BUG-W03 | **宿主环境网络间歇不可用**：代理（`HTTP_PROXY=127.0.0.1:7897`）时断时续，直连 TLS 亦间歇失败；electron-builder 打包在 packaging 阶段下载 electron zip 偶发 `Client network socket disconnected`。**对策已验证**：① 挂 `NODE_OPTIONS=--use-system-ca` 绕开 safe-delete shim（否则 CLI 注入的 shim 会把 electron-builder 的整树 rm 转为 trash 并失败）；② 失败重试（3-6 次，网络间歇性恢复）；③ 被杀进程遗留的 `release/win-unpacked.tmp.lock` 须先清（PowerShell `Remove-Item -Force` 可删，shim 的 trash 删不掉）；④ `@deepseek-ai/*` 不能走 `files`/`node_modules` glob（依赖收集器会忽略），须用 `extraFiles` 放包外（插件 ESM 解析已实测可穿透）。构建脚本整树删除须用「原地覆盖 + 逐个清陈旧」（见 `vendor-dsh.cjs` `syncDir`） | 高（本 agent 环境打包需重试；产物已验证） | open | P6 / T-P6-3 |
 
-| BUG-W04 | **conventional-changelog 在本环境静默空输出**：`npx conventional-changelog -p angular` 退出码 0 但产出 0 字节（apps/desktop 与仓库根、加 `--commit-path` 均如此；Node 22 + 重建历史）。导致 0.4.0 的 CHANGELOG 条目按 Keep a Changelog/SemVer 格式**手工撰写**（内容等价于提交摘要）。后续需排查版本/配置；在此之前发布流程须人工核对 CHANGELOG | 中（发布流程需人工兜底） | open | 版本治理 |
-
-## 已关闭 BUG（v0.4.1）
+## 已关闭 BUG（v0.4.1 起）
 
 | ID | 描述 | 级别 | 关闭版本 | 归属 |
 |---|---|---|---|---|
 | BUG-018 | **发消息能响应，要求执行任务时报「模型返回空内容」**。用户截图：provider=STEPFUN、model=step-3.7-flash、apiMode=chat、HTTP 200、finish_reason=stop、content 为空。根因：StepFun 等网关在 chat 模式下**接受** `tools`/`tool_choice` 参数（不返 4xx），但实际不返回 `tool_calls`，content 也为空——软拒绝；原代码只在硬 4xx/错误信息含 tool 时降级，空响应被当成最终答案。修复：`callOpenAICompatible` 识别软拒绝并逐级降级到不带 tools；`runAgentTurn` 用进程级 `Map<provider.id\|model, true>` 记忆软拒绝，后续同 provider+model 的会话直接走 `<tool:>` 文本兜底。验证：model-loop M 组 3 项 + verify 313 项全绿 | 高 | v0.4.1 | P1 / Agent Runtime |
+| BUG-W04 | **conventional-changelog 静默空输出**（原归因「Node 22 + 历史重建」为**误判，已推翻**）。真实根因：管线内部 `git-raw-commits@5.0.1` 的输出不再带 `-hash-` 分隔符（实测 274 行中该分隔符出现 0 次），而 `conventional-commits-parser@6.4.0` 仍靠它切分提交 → 整段历史被吞成**一条**提交（header 取最新那条 `chore:`，其余全部落进 body）→ 被 angular preset 按 chore 过滤 → 退出码 0、产出 0 字节。非版本漂移：core v8.0.0 本就声明 `git-raw-commits ^5.0.0`。**修复**：不再依赖该上游链，改用零依赖 `scripts/changelog.mjs`（git `--pretty` 自定义 `\x1f`/`\x1e` 分隔符自行切分，Keep a Changelog 分组 + SemVer 推断 + 幂等写入）；`package.json` 的 `changelog` 脚本已切到它，`release` 链 `changelog → version:bump → dist` 顺序正确（changelog 在打 tag 之前跑）。自带 `--selftest`（开发期即抓到 `rank['']` 为 undefined 致版本推断失效的真 bug） | 中 | v0.4.1+（随下个版本生效） | 版本治理 |
 
 ## 已关闭 BUG（v0.4.0 pending，待发布）
 

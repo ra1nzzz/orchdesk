@@ -29,6 +29,7 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 - electron 依赖套件用 `Module._load` 钩子 stub `electron` 后 require `dist/main.js` 驱动真实 handler；`model-loop-verify.cjs` 用真 `node:http` mock 做线级验证
 - 打包：`npm run dist:win` 会因 BUG-W01 触发 pnpm install 失败 → 绕过方式 `npx tsc -p tsconfig.json && node scripts/vendor-dsh.cjs && node kill-running.cjs && npx electron-builder --win --publish never`
 - 打包前置 `scripts/vendor-dsh.cjs` 把 dsh 包物化到 `apps/desktop/{vendor/plugins,node_modules/@deepseek-ai}`（build.files 已含两处）；改动插件源码后必须先 `tsc` 再 vendor
+- **Changelog 生成**：走零依赖 `node scripts/changelog.mjs [--from <ref>] [--version <v>] [--write] [--selftest]`。**不用** conventional-changelog——其 `git-raw-commits@5` 不再输出 `-hash-` 分隔符，而 `conventional-commits-parser@6` 仍靠它切分，整段历史被吞成一条 `chore:` 后被 angular preset 过滤 → 退出 0、产出 0 字节（BUG-W04，原归因「Node 22/历史重建」已推翻）。`release` 链 = `changelog → version:bump → dist`，changelog 必须在打 tag **之前**跑，否则最新 tag 之后只剩 chore、无米下锅
 
 ## 审阅工作流
 - `yt-dev-review` 技能（~/.workbuddy/skills/）：3 并行审阅子代理（质量/效率/可复用性）→ 交叉比对 → 交叉修复 → 复验门禁。2026-08-29 第二轮以此抓到 5 个 P0 真问题（便携模式失效 / 导入竞态 / responses 丢历史 / 晋升恒断 / TRACE 定时器不上传）。
