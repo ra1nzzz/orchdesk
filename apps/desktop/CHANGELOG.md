@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-30
+
+### Added
+- **runtime**: bridge intent gateway and trace into main dialog flow via agent/pre-step waterfall (ADR-0008); resolve PLAN T-P1-5 drift
+
+
 ## [0.5.0] - 2026-08-30
 
 ### Added
