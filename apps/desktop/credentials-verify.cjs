@@ -85,21 +85,12 @@ const cred = require('./dist/credentials.js');
     const path = require('path'), fs = require('fs'), os = require('os');
     const HOME = ${JSON.stringify(HOME)};
     process.env.ORCHDESK_HOME = HOME;
-    const ipc = new Map();
-    const stub = {
-      app: { isPackaged: false, getPath: (n) => n === 'appData' ? path.join(HOME, 'ad') : path.join(HOME, 'st', n),
-             whenReady: () => Promise.resolve(), on: () => {}, quit: () => {} },
-      ipcMain: { handle: (c, f) => ipc.set(c, f), on: () => {} },
-      BrowserWindow: class { static getAllWindows() { return []; } },
-      Tray: class { setToolTip(){} setContextMenu(){} },
-      Menu: { buildFromTemplate: () => ({}) },
-      nativeImage: { createEmpty: () => ({}) },
-      shell: { openPath: async () => '' },
-      safeStorage: { isEncryptionAvailable: () => true,
-        encryptString: (s) => Buffer.from('enc:' + s, 'utf-8'),
-        decryptString: (b) => Buffer.from(b).toString('utf-8').replace(/^enc:/, '') },
-      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-    };
+    const { makeElectronStub } = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'verify-kit.cjs'))});
+    const stub = makeElectronStub({
+      home: HOME,
+      getPath: (n) => n === 'appData' ? path.join(HOME, 'ad') : path.join(HOME, 'st', n),
+    });
+    const ipc = stub.ipcHandlers;
     const orig = Module._load;
     Module._load = function (req) { if (req === 'electron') return stub; return orig.apply(this, arguments); };
     require('${path.join(__dirname, 'dist', 'main.js').replace(/\\/g, '\\\\')}');
@@ -197,21 +188,12 @@ const cred = require('./dist/credentials.js');
       const path = require('path'), fs = require('fs'), os = require('os');
       const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-tool-'));
       process.env.ORCHDESK_HOME = HOME;
-      const ipc = new Map();
-      const stub = {
-        app: { isPackaged: false, getPath: (n) => n === 'appData' ? path.join(HOME,'ad') : path.join(HOME,'st',n),
-               whenReady: () => Promise.resolve(), on: () => {}, quit: () => {} },
-        ipcMain: { handle: (c,f) => ipc.set(c,f), on: () => {} },
-        BrowserWindow: class { static getAllWindows() { return []; } },
-        Tray: class { setToolTip(){} setContextMenu(){} },
-        Menu: { buildFromTemplate: () => ({}) },
-        nativeImage: { createEmpty: () => ({}) },
-        shell: { openPath: async () => '' },
-        safeStorage: { isEncryptionAvailable: () => true,
-          encryptString: (s) => Buffer.from('enc:'+s,'utf-8'),
-          decryptString: (b) => Buffer.from(b).toString('utf-8').replace(/^enc:/,'') },
-        dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-      };
+      const { makeElectronStub } = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'verify-kit.cjs'))});
+      const stub = makeElectronStub({
+        home: HOME,
+        getPath: (n) => n === 'appData' ? path.join(HOME,'ad') : path.join(HOME,'st',n),
+      });
+      const ipc = stub.ipcHandlers;
       const orig = Module._load;
       Module._load = function (req) { if (req === 'electron') return stub; return orig.apply(this, arguments); };
       require('${path.join(__dirname, 'dist', 'main.js').replace(/\\/g, '\\\\')}');

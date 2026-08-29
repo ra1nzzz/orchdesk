@@ -39,45 +39,16 @@ fs.writeFileSync(
 );
 
 // ---------------------------------------------------------------------------
-// 2. electron stub
+// 2. electron stub（共享脚手架 scripts/verify-kit.cjs，此处只覆盖本脚本差异）
 // ---------------------------------------------------------------------------
-const ipcHandlers = new Map();
-const ipcListeners = new Map();
+const { makeElectronStub, createChecker } = require('../../scripts/verify-kit.cjs');
 
-class FakeBrowserWindow {
-  constructor() { this.webContents = { send: () => {} }; this.destroyed = false; }
-  isDestroyed() { return this.destroyed; }
-  once() {}
-  loadFile() {}
-  show() {}
-  static getAllWindows() { return []; }
-}
-
-const electronStub = {
-  app: {
-    isPackaged: false,
-    name: 'OrchDesk',
-    getPath: (name) => (name === 'userData' ? LEGACY : path.join(os.tmpdir(), 'orchdesk-stub', name)),
-    whenReady: () => Promise.resolve(),
-    on: () => {},
-    quit: () => {},
-  },
-  ipcMain: {
-    handle: (ch, fn) => { ipcHandlers.set(ch, fn); },
-    on: (ch, fn) => { ipcListeners.set(ch, fn); },
-  },
-  BrowserWindow: FakeBrowserWindow,
-  Tray: class { setToolTip() {} setContextMenu() {} },
-  Menu: { buildFromTemplate: () => ({}) },
-  nativeImage: { createEmpty: () => ({}) },
-  shell: { openPath: async () => '' },
-  safeStorage: {
-    isEncryptionAvailable: () => true,
-    encryptString: (s) => Buffer.from('enc:' + s, 'utf-8'),
-    decryptString: (b) => Buffer.from(b).toString('utf-8').replace(/^enc:/, ''),
-  },
-  dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-};
+const electronStub = makeElectronStub({
+  home: path.join(os.tmpdir(), 'orchdesk-stub'),
+  getPath: (name) => (name === 'userData' ? LEGACY : path.join(os.tmpdir(), 'orchdesk-stub', name)),
+});
+const ipcHandlers = electronStub.ipcHandlers;
+const ipcListeners = electronStub.ipcListeners;
 
 const origLoad = Module._load;
 Module._load = function (request, parent, isMain) {
@@ -116,19 +87,7 @@ const nativeFileList = () => [
 // ---------------------------------------------------------------------------
 require('./dist/main.js');
 
-let passed = 0;
-let failed = 0;
-const log = [];
-async function check(name, fn) {
-  try {
-    await fn();
-    passed++;
-    log.push(`  PASS  ${name}`);
-  } catch (err) {
-    failed++;
-    log.push(`  FAIL  ${name}\n        ${(err && err.message) || err}`);
-  }
-}
+const { check, summary } = createChecker();
 
 (async () => {
   // 等 app.whenReady() 的 then 回调跑完（迁移 + loadStore）
@@ -264,13 +223,12 @@ async function check(name, fn) {
   fs.writeFileSync(path.join(HOME, 'models.json'), backup, 'utf-8');
 
   // -------------------------------------------------------------------------
-  console.log('\n' + log.join('\n'));
-  console.log(`\n结果: ${passed} 通过, ${failed} 失败, 共 ${passed + failed} 项\n`);
+  const ok = summary();
 
   try { fs.rmSync(HOME, { recursive: true, force: true }); } catch {}
   try { fs.rmSync(LEGACY, { recursive: true, force: true }); } catch {}
 
-  if (failed > 0) process.exit(1);
+  if (!ok) process.exit(1);
   console.log('Agent 回合管线全部验证通过');
   // 主进程内的 dsh 运行时持有定时器/句柄，需显式退出，否则进程挂起
   process.exit(0);

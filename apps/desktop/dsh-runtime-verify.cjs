@@ -27,41 +27,18 @@ const Module = require('node:module');
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-dsh-'));
 process.env.ORCHDESK_HOME = HOME;
 
-const ipcHandlers = new Map();
+const { makeElectronStub, createChecker } = require('../../scripts/verify-kit.cjs');
+
 let readyResolve;
 const readyPromise = new Promise((r) => { readyResolve = r; });
 
-class FakeBrowserWindow {
-  constructor() { this.webContents = { send: () => {} }; this.destroyed = false; }
-  isDestroyed() { return this.destroyed; }
-  once() {}
-  loadFile() {}
-  show() {}
-  static getAllWindows() { return []; }
-}
-
-const electronStub = {
-  app: {
-    isPackaged: false,
-    name: 'OrchDesk',
-    getPath: (name) => (name === 'appData' ? path.join(HOME, 'appdata') : path.join(HOME, 'stub', name)),
-    whenReady: () => { setImmediate(readyResolve); return Promise.resolve(); },
-    on: () => {},
-    quit: () => {},
-  },
-  ipcMain: { handle: (ch, fn) => { ipcHandlers.set(ch, fn); }, on: () => {} },
-  BrowserWindow: FakeBrowserWindow,
-  Tray: class { setToolTip() {} setContextMenu() {} },
-  Menu: { buildFromTemplate: () => ({}) },
-  nativeImage: { createEmpty: () => ({}) },
-  shell: { openPath: async () => '' },
-  safeStorage: {
-    isEncryptionAvailable: () => true,
-    encryptString: (s) => Buffer.from('enc:' + s, 'utf-8'),
-    decryptString: (b) => Buffer.from(b).toString('utf-8').replace(/^enc:/, ''),
-  },
-  dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-};
+// stub 取 5 份旧实现的并集（见 scripts/verify-kit.cjs），本脚本的差异项在此覆盖。
+const electronStub = makeElectronStub({
+  home: HOME,
+  onReady: () => readyResolve(),
+  getPath: (name) => (name === 'appData' ? path.join(HOME, 'appdata') : path.join(HOME, 'stub', name)),
+});
+const ipcHandlers = electronStub.ipcHandlers;
 
 const origLoad = Module._load;
 Module._load = function (request) {
@@ -74,13 +51,7 @@ global.fetch = async () => ({ ok: true, status: 200, text: async () => '{}', jso
 // ---------------------------------------------------------------------------
 require('./dist/main.js');
 
-let passed = 0;
-let failed = 0;
-const log = [];
-async function check(name, fn) {
-  try { await fn(); passed++; log.push(`  PASS  ${name}`); }
-  catch (err) { failed++; log.push(`  FAIL  ${name}\n        ${(err && err.message) || err}`); }
-}
+const { check, summary } = createChecker();
 
 (async () => {
   await readyPromise;
@@ -230,11 +201,10 @@ async function check(name, fn) {
   });
 
   // -------------------------------------------------------------------------
-  console.log('\n' + log.join('\n'));
-  console.log(`\n结果: ${passed} 通过, ${failed} 失败, 共 ${passed + failed} 项\n`);
+  const ok = summary();
 
   try { fs.rmSync(HOME, { recursive: true, force: true }); } catch {}
-  if (failed > 0) process.exit(1);
+  if (!ok) process.exit(1);
   console.log('dsh 运行时接线全部验证通过');
   // 运行时持有定时器/句柄，需显式退出，否则进程挂起
   process.exit(0);

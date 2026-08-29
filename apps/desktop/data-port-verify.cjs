@@ -29,52 +29,30 @@ const IMPORT_FILE = path.join(os.tmpdir(), `orchdesk-import-test-${Date.now()}.j
 process.env.ORCHDESK_HOME = HOME;
 
 // ---------------------------------------------------------------------------
-// 2. electron stub（对齐 agent-loop-verify.cjs 的技法 + dialog）
+// 2. electron stub（共享脚手架 scripts/verify-kit.cjs，此处只覆盖本脚本差异）
 // ---------------------------------------------------------------------------
-const ipcHandlers = new Map();
+const { makeElectronStub, createChecker } = require('../../scripts/verify-kit.cjs');
 
-const electronStub = {
-  app: {
-    isPackaged: false,
-    name: 'OrchDesk',
-    getPath: (name) => (name === 'userData'
-      ? path.join(os.tmpdir(), 'orchdesk-port-stub', name)
-      : path.join(os.tmpdir(), 'orchdesk-port-stub', String(name))),
-    whenReady: () => Promise.resolve(),
-    on: () => {},
-    quit: () => {},
-  },
-  BrowserWindow: class {
-    constructor() { this.webContents = { send: () => {} }; this.destroyed = false; }
-    isDestroyed() { return this.destroyed; }
-    once() {} loadFile() {} show() {}
-    static getAllWindows() { return []; }
-  },
-  Tray: class { setToolTip() {} setContextMenu() {} },
-  Menu: { buildFromTemplate: () => [] },
-  nativeImage: { createEmpty: () => ({}), createFromPath: () => ({}) },
-  ipcMain: {
-    handle: (name, fn) => { ipcHandlers.set(name, fn); },
-    on: () => {},
-  },
-  contextBridge: { exposeInMainWorld: () => {} },
-  shell: { openPath: async () => '' },
+const electronStub = makeElectronStub({
+  home: path.join(os.tmpdir(), 'orchdesk-port-stub'),
+  getPath: (name) => path.join(os.tmpdir(), 'orchdesk-port-stub', String(name)),
+  // 本脚本用明文桩（不套 enc: 前缀），与导入/导出用例的假设一致
   safeStorage: {
     isEncryptionAvailable: () => true,
     encryptString: (s) => Buffer.from(String(s), 'utf-8'),
     decryptString: (b) => b.toString('utf-8'),
   },
-  // 导入 / 导出对话框：由用例按需改写行为
-  dialog: {
-    mode: 'ok',
-    showSaveDialog: async () => (electronStub.dialog.mode === 'cancel'
-      ? { canceled: true }
-      : { canceled: false, filePath: EXPORT_FILE }),
-    showOpenDialog: async () => (electronStub.dialog.mode === 'cancel'
-      ? { canceled: true }
-      : { canceled: false, filePaths: [IMPORT_FILE] }),
-  },
-};
+});
+const ipcHandlers = electronStub.ipcHandlers;
+
+// 导入 / 导出对话框：由用例按需改写行为
+electronStub.dialog.mode = 'ok';
+electronStub.dialog.showSaveDialog = async () => (electronStub.dialog.mode === 'cancel'
+  ? { canceled: true }
+  : { canceled: false, filePath: EXPORT_FILE });
+electronStub.dialog.showOpenDialog = async () => (electronStub.dialog.mode === 'cancel'
+  ? { canceled: true }
+  : { canceled: false, filePaths: [IMPORT_FILE] });
 
 const originalLoad = Module._load;
 // dsh 运行时是重依赖（真实 Cordis Context + 9 插件），本套件只验数据面，
@@ -102,23 +80,9 @@ const h = (name) => {
 };
 
 // ---------------------------------------------------------------------------
-// 3. 用例
+// 3. 用例（check + 计分走共享 verify-kit；失败附栈帧已内建）
 // ---------------------------------------------------------------------------
-const log = [];
-let passed = 0;
-let failed = 0;
-
-async function check(name, fn) {
-  try {
-    await fn();
-    passed++;
-    log.push(`  PASS  ${name}`);
-  } catch (err) {
-    failed++;
-    const stackLine = err && err.stack ? err.stack.split('\n')[1] : '';
-    log.push(`  FAIL  ${name}\n        ${err && err.message}${stackLine ? '\n        ' + stackLine : ''}`);
-  }
-}
+const { check, summary } = createChecker();
 
 const sessionsOf = () => JSON.parse(fs.readFileSync(path.join(HOME, 'orchdesk-sessions.json'), 'utf-8'));
 const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf-8'));
@@ -245,9 +209,8 @@ const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf-8'));
   } catch { /* 尽力而为 */ }
 
   console.log('\n数据导出/导入闭环验证');
-  console.log(log.join('\n'));
-  console.log(`\n📊 结果: ${passed} 通过, ${failed} 失败, 共 ${passed + failed} 项`);
-  process.exit(failed ? 1 : 0);
+  const ok = summary();
+  process.exit(ok ? 0 : 1);
 })().catch((err) => {
   console.error('验证脚本异常:', err);
   process.exit(1);
