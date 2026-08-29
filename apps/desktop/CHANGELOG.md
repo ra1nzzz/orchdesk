@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-30
+
+### Added
+- **agent**: wire dsh memory into dialog flow (memory_save + recall injection) and add set_cwd session working dir (BUG-019/020)
+
+
 ## [0.4.1] - 2026-08-30
 
 ### Fixed
