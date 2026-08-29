@@ -196,3 +196,14 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 **流程产物**：`yt-dev-review` 技能已建（`~/.workbuddy/skills/yt-dev-review/SKILL.md`，实现三方并发审阅 + 交叉修复 + 复验门禁 SOP）。
 
 **遗留（与此前同源门控）**：打包产物 asar 校验（dist:win 进行中）；GUI 实机冒烟（BUG-W02）；真实模型/SubAgent/TRACE 实测（须 API Key、Ollama、GitHub repoUrl+TOKEN）；代码签名；审阅建议中未采纳的低成本项（electron stub 公共化、导出缩进、readJsonFile 下沉）已记录在案。
+
+## BUG-018 修复（2026-08-30 · v0.4.1）
+
+| 事项 | 证据 |
+|---|---|
+| **问题** | 发消息能响应，要求执行任务（触发 tool_calls）时报「模型返回空内容」。用户截图：provider=STEPFUN、model=step-3.7-flash、apiMode=chat、HTTP 200、finish_reason=stop、content 为空 |
+| **根因** | StepFun 等网关在 chat 模式下**接受** `tools`/`tool_choice` 参数（不返 4xx），但实际不返回 `tool_calls`，content 也为空——软拒绝。原代码只在硬 4xx/错误信息含 tool 时降级，空响应被当成最终答案 |
+| **修复** | `apps/desktop/main.ts` `callOpenAICompatible`：带 tools 时 200 空内容 → 继续降级到去 `tool_choice` → 去 `tools`；降级成功且拿到非空响应后返回 `toolsRejected=true`。`runAgentTurn` 用进程级 `Map<provider.id\|model, true>` 记忆软拒绝，后续同 provider+model 的会话直接走 `<tool:>` 文本兜底 |
+| **附加改进** | 软拒绝路径补 `[softReject]` 模型日志；空内容但去 tools 后仍空时**不**误置 `toolsRejected`，避免把真·空响应误判为网关不支持工具 |
+| **验证** | `model-loop-verify.cjs` 新增 M 组 3 项（M1 逐级降级 / M2 文本兜底完成任务 / M3 跨会话记忆）；`npm run verify` 扩至 **11 套件 313 项全绿**；tsc EXIT=0 |
+| **审阅** | `yt-dev-review` 三维度并发审阅：质量/效率均指出 toolsRejected 应跨会话持久化（已采纳）；质量指出空响应不应误置 toolsRejected（已采纳）；可复用性指出软拒绝分支缺日志与空白 content fail-open（已补日志；空白 content 边界本次未单独抽函数，留后续） |

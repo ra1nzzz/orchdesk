@@ -9,14 +9,16 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.4.0`（已打 tag `v0.4.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.3.1` 为上一 Release |
-| **最新 Commit** | `c390f29` | chore: release v0.4.0（含版本守卫） |
+| **当前版本** | `0.4.1`（已打 tag `v0.4.1`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.4.0` 为上一 Release |
+| **最新 Commit** | `<待提交后回填>` | fix: StepFun 等网关工具软拒绝降级；chore: release v0.4.1 |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
-| **最新 Release** | [v0.4.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.0) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
+| **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
-| **验证套件** | 310/310 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 35 / agent-loop 14 / model-loop 25 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
+| **验证套件** | 313/313 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 35 / agent-loop 14 / model-loop 28 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
+
+> **v0.4.1 关键修复**：StepFun / 部分 OpenAI 兼容网关在 chat 模式下带 `tools` 参数时返回 HTTP 200、content/toolCalls 全空（软拒绝），导致「发消息能响应，要求执行任务则报错」。现 `callOpenAICompatible` 识别软拒绝并逐级降级到不带 tools，成功后把 `provider.id|model` 记入进程级记忆，后续会话直接走 `<tool:>` 文本兜底解析。新增 model-loop M 组 3 项回归测试。
 
 ### 1.1 PRD 完成度（FR 维度，2026-08-29 复盘）
 

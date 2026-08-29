@@ -511,9 +511,19 @@ async function callOpenAICompatible(provider: ModelProvider, model: string, mess
       throw new Error(errMsg);
     }
 
-    const choice = (data as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown } }> }).choices?.[0];
+    const choice = (data as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: unknown }> }).choices?.[0];
     const toolCalls = normalizeNativeToolCalls(choice?.message?.tool_calls);
     const content = pickOpenAIContent(data, mode) || (typeof choice?.message?.content === 'string' ? choice.message.content : '');
+    const finish = choice?.finish_reason;
+
+    // 软拒绝：带 tools 时网关返回 200 但 content/toolCalls 全空（StepFun 等网关行为），
+    // 继续降级到不带 tools，避免把空响应当成最终答案。
+    if (!content && !toolCalls.length && att.tools) {
+      lastErr = emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish, bodySnippet: rawBody.slice(0, 200) });
+      logModel('error', { provider: provider.name, model, apiMode: mode, url, status: res.status, ms: Date.now() - t0, error: `[softReject] ${lastErr}` });
+      continue;
+    }
+
     logModel('response', {
       provider: provider.name, model, apiMode: mode, url,
       status: res.status, ms: Date.now() - t0,
@@ -523,17 +533,11 @@ async function callOpenAICompatible(provider: ModelProvider, model: string, mess
       content,
       toolCalls,
       source: toolCalls.length ? 'native' : 'none',
-      // 本次是靠「去掉 tools」才成功的 → 告知上层别再下发工具定义。
-      toolsRejected: canUseTools && !att.tools ? true : undefined,
+      // 只有「去掉 tools 后成功拿到非空响应」才算真正的工具拒绝，
+      // 若去掉 tools 仍是空响应，则不应把工具能力永久关闭。
+      toolsRejected: canUseTools && !att.tools && content ? true : undefined,
       emptyReason: (!content && !toolCalls.length)
-        ? emptyContentReason({
-            provider: provider.name,
-            model,
-            mode,
-            status: res.status,
-            finish: (choice as { finish_reason?: unknown } | undefined)?.finish_reason,
-            bodySnippet: rawBody.slice(0, 200),
-          })
+        ? emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish, bodySnippet: rawBody.slice(0, 200) })
         : undefined,
     };
   }
@@ -580,6 +584,14 @@ function resolveShellCwd(): string {
 // app.getPath 结果缓存：isPathAllowed 是工具执行热路径（每个 file_* 工具一次），
 // 历史实现每次调用都跑 3 次 getPath。app 未就绪时拿不到路径，此时不缓存，下次再试。
 let cachedAllowedRoots: string[] | null = null;
+
+// 网关软拒绝 tools 的持久化记忆：key = providerId|model。
+// 一旦某 provider+model 在带 tools 时返回 200 空内容或硬 4xx，后续会话直接走文本兜底，
+// 避免每轮都重复三次降级重试。
+const toolRejectMemo = new Map<string, true>();
+function toolRejectKey(provider: ModelProvider, model: string): string {
+  return `${provider.id}|${model}`;
+}
 function allowedRoots(): string[] {
   if (!cachedAllowedRoots) {
     const roots: string[] = [];
@@ -721,8 +733,9 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
   let stepCount = 0;
   const MAX_ITERATIONS = Math.max(1, Math.min(200, modelCfg.maxToolIterations || 20));
   // 网关明确拒绝工具协议 → 停止下发 tools，转「文本兜底解析」，
-  // 避免每一轮都重复三次降级重试。
-  let providerRejectsTools = false;
+  // 避免每一轮都重复三次降级重试。进程级记忆让同 provider+model 的后续会话直接跳过 tools。
+  const rejectKey = toolRejectKey(provider, model);
+  let providerRejectsTools = toolRejectMemo.has(rejectKey);
 
   // 工具调用循环
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
@@ -735,7 +748,8 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     }
     if (reply.toolsRejected) {
       providerRejectsTools = true;
-      console.warn(`[orchdesk] 提供商「${provider.name}」不接受工具定义，本轮起转为文本兜底解析。`);
+      toolRejectMemo.set(rejectKey, true);
+      console.warn(`[orchdesk] 提供商「${provider.name}」不接受工具定义，后续会话转为文本兜底解析。`);
     }
 
     // ---- 模式 1：原生 function calling（优先）----

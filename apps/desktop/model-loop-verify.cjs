@@ -21,6 +21,7 @@
  *       9. 超长工具结果回传模型时被裁剪（阈值以 agent-runtime.ts 为准 = 20000）
  *      10. 未配置 API Key 时不发 HTTP 请求
  *      11. fail-closed：200 但非 JSON 响应 / Ollama 非 200 → 可读错误而非崩溃
+ *      12. 软拒绝（200 空内容但带 tools）→ 降级为文本兜底解析
  *
  * 运行：node model-loop-verify.cjs   （需先 npx tsc -p tsconfig.json）
  */
@@ -565,6 +566,58 @@ function lastAssistant(sessionId) {
     assert.ok(out.text.includes('HTTP 200'), '应含状态码: ' + out.text);
     assert.ok(out.text.includes('finish_reason=stop'), '应含 finish_reason: ' + out.text);
     assert.ok(!out.text.includes(KEY), '诊断不应泄漏密钥: ' + out.text);
+  });
+
+  // =========================================================================
+  console.log('== M. 软拒绝（200 空内容带 tools）→ 降级 + 文本兜底 ==');
+
+  writeModels({ id: 'p-soft', name: '软拒绝网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  let softNoToolsRound = 0;
+  responder = ({ body }) => {
+    if (body.tools) return json(200, { choices: [{ message: { content: '' }, finish_reason: 'stop' }] });
+    softNoToolsRound++;
+    if (softNoToolsRound === 1) {
+      return chat(`我先看下目录：\n<tool:file_list>${JSON.stringify({ path: HOME })}</tool>`, undefined);
+    }
+    return chat('软拒绝兜底完成', undefined);
+  };
+  out = await runAgentTurn(null, 's-m', '列目录', {});
+
+  await check('M1 带 tools 时 200 空内容 → 逐级降级到不带 tools', () => {
+    assert.strictEqual(calls.length, 4, '应恰好 4 次请求（3 次降级 + 1 次免重试续轮），实际: ' + calls.length);
+    assert.strictEqual(calls[0].body.tool_choice, 'auto', '第 1 次应带 tool_choice:auto');
+    assert.ok(Array.isArray(calls[0].body.tools), '第 1 次应带 tools');
+    assert.ok(Array.isArray(calls[1].body.tools), '第 2 次仍带 tools');
+    assert.ok(!('tool_choice' in calls[1].body), '第 2 次应去掉 tool_choice');
+    assert.ok(!('tools' in calls[2].body), '第 3 次应完全去掉 tools');
+    assert.ok(!('tools' in calls[3].body), '第 4 次因 toolsRejected 也不再带 tools');
+  });
+  await check('M2 降级后走文本兜底仍能完成任务', () => {
+    assert.strictEqual(out.text, '软拒绝兜底完成', '实际: ' + out.text);
+    const a = lastAssistant('s-m');
+    assert.ok((a.tools || []).some((t) => t.n === 'file_list'), '应通过文本兜底执行 file_list，实际: ' + JSON.stringify(a.tools));
+    const msgs = calls[calls.length - 1].body.messages;
+    assert.ok(msgs.some((m) => m.role === 'user' && String(m.content).includes('[工具 file_list 执行结果]')),
+      '文本兜底模式下工具结果应以 user 角色回传');
+  });
+
+  await check('M3 软拒绝记忆跨会话生效：同 provider+model 第二轮直接不发 tools', async () => {
+    reset();
+    softNoToolsRound = 0;
+    responder = ({ body }) => {
+      if (body.tools) return json(200, { choices: [{ message: { content: '' }, finish_reason: 'stop' }] });
+      softNoToolsRound++;
+      if (softNoToolsRound === 1) {
+        return chat(`<tool:file_list>${JSON.stringify({ path: HOME })}</tool>`, undefined);
+      }
+      return chat('跨轮记忆完成', undefined);
+    };
+    out = await runAgentTurn(null, 's-m2', '再列目录', {});
+    // 第一轮已记忆 toolsRejected，本轮只应 2 次请求（工具轮 + 总结轮），且首次即无 tools。
+    assert.strictEqual(calls.length, 2, '记忆命中后应只发 2 次请求，实际: ' + calls.length);
+    assert.ok(!('tools' in calls[0].body), '首轮请求应直接不带 tools，实际 keys: ' + Object.keys(calls[0].body).join(','));
+    assert.strictEqual(out.text, '跨轮记忆完成', '实际: ' + out.text);
   });
 
   // =========================================================================

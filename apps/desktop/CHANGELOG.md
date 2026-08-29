@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-30
+
+### Fixed
+- **BUG-018 发消息能响应，要求执行任务时报「模型返回空内容」**：StepFun 等网关在 chat 模式下接受 `tools`/`tool_choice` 参数但返回 200 空内容（软拒绝），原降级逻辑只处理硬 4xx/错误含 tool 的情况。现 `callOpenAICompatible` 识别软拒绝并逐级降级到不带 tools；成功后把 `provider.id|model` 记入进程级记忆，后续会话直接走 `<tool:>` 文本兜底解析
+- 空内容但去 tools 后仍空时，不再误置 `toolsRejected=true`，避免把真·空响应误判为网关不支持工具
+- 软拒绝降级路径补 `[softReject]` 模型日志，便于线上定位
+
+### Changed
+- 验证套件：`model-loop-verify.cjs` 新增 M 组 3 项（软拒绝逐级降级 / 文本兜底完成任务 / 跨会话记忆），`npm run verify` 扩至 11 套件 313 项
+
 ## [0.4.0] - 2026-08-30
 
 ### Added
