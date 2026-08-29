@@ -22,9 +22,10 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 - **Agent Runtime 分层**：`apps/desktop/agent-runtime.ts` = 纯逻辑（零 electron 依赖，可 node 直测：工具定义/参数解析/tool_calls 归一化/文本兜底解析/消息构造）；`main.ts` 只留需 electron 的 `executeTool`。
 - **数据目录**：`dataDir()` = `ORCHDESK_HOME` > 便携模式（exe 同目录 `orchdesk-data`）> `%APPDATA%/OrchDesk`。NSIS 的 userData 即后者，故 portable 与 NSIS 共用同一目录。启动 `migrateLegacyData()` 按 key 合并历史位置（只补齐不覆盖）。目录解析/迁移纯逻辑在 `apps/desktop/data-dir.ts`（零 electron 依赖）；guanji.json/hub.json/skills 也走 `dataDir()`；备份导出/导入见 main.ts `orchdesk:export-data/import-data`。
 - **工具调用双模式**：优先模型原生 function calling（`role:'tool'` + `tool_call_id`）；不支持时走 `<tool:name>json</tool>` 文本兜底，结果用 `role:'user'` 回传（无 tool_calls 时发 `role:'tool'` 会被网关拒）。
+- **网关软拒绝处理**：StepFun 等网关在 chat 模式下带 tools 时返回 HTTP 200 空内容（软拒绝），`callOpenAICompatible` 会逐级降级到不带 tools；`runAgentTurn` 用 `Map<provider.id|model>` 记忆该状态，后续同 provider+model 直接走文本兜底。去 tools 后仍空时不误置 toolsRejected。
 
 ## 验证入口（`cd apps/desktop`）
-- `npm run verify` = 11 套件 308 项：plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 35 / agent-loop 14 / model-loop 23 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29
+- `npm run verify` = 11 套件 313 项：plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 35 / agent-loop 14 / model-loop 28 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29
 - electron 依赖套件用 `Module._load` 钩子 stub `electron` 后 require `dist/main.js` 驱动真实 handler；`model-loop-verify.cjs` 用真 `node:http` mock 做线级验证
 - 打包：`npm run dist:win` 会因 BUG-W01 触发 pnpm install 失败 → 绕过方式 `npx tsc -p tsconfig.json && node scripts/vendor-dsh.cjs && node kill-running.cjs && npx electron-builder --win --publish never`
 - 打包前置 `scripts/vendor-dsh.cjs` 把 dsh 包物化到 `apps/desktop/{vendor/plugins,node_modules/@deepseek-ai}`（build.files 已含两处）；改动插件源码后必须先 `tsc` 再 vendor
