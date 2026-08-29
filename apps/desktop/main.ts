@@ -614,18 +614,28 @@ function isPathAllowed(p: string): boolean {
 /** 允许执行的命令白名单（集合形式，O(1) 判定）。 */
 const ALLOWED_COMMAND_SET = new Set(ALLOWED_COMMANDS);
 
-async function executeTool(tool: ToolCall): Promise<ToolResult> {
+// 会话级工作目录：set_cwd 写入，shell/file 操作读取。进程内 Map，重启即失——
+// ponytail: 升级路径 = 持久化到 sessions.json 的会话字段。
+const sessionCwds = new Map<string, string>();
+
+function sessionCwd(sessionId?: string): string {
+  const set = sessionId ? sessionCwds.get(sessionId) : undefined;
+  return set || resolveShellCwd();
+}
+
+async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }): Promise<ToolResult> {
   const { name, arguments: args } = tool;
+  const cwd = sessionCwd(sessionCtx?.sessionId);
   try {
     switch (name) {
       case 'file_read': {
-        const filePath = String(args.path || '');
+        const filePath = path.resolve(cwd, String(args.path || ''));
         if (!isPathAllowed(filePath)) return { name, result: '', error: '路径不在允许范围内' };
         const content = fs.readFileSync(filePath, 'utf-8');
         return { name, result: content.slice(0, 50000) }; // 限制 50KB
       }
       case 'file_write': {
-        const filePath = String(args.path || '');
+        const filePath = path.resolve(cwd, String(args.path || ''));
         const content = String(args.content || '');
         if (!isPathAllowed(filePath)) return { name, result: '', error: '路径不在允许范围内' };
         const dir = path.dirname(filePath);
@@ -634,7 +644,7 @@ async function executeTool(tool: ToolCall): Promise<ToolResult> {
         return { name, result: `已写入 ${path.basename(filePath)} (${content.length} 字节)` };
       }
       case 'file_list': {
-        const dirPath = String(args.path || '.');
+        const dirPath = path.resolve(cwd, String(args.path || '.'));
         if (!isPathAllowed(dirPath)) return { name, result: '', error: '路径不在允许范围内' };
         const entries = fs.readdirSync(dirPath, { withFileTypes: true });
         const items = entries.map(e => `${e.isDirectory() ? '📁' : '📄'} ${e.name}`).join('\n');
@@ -648,10 +658,8 @@ async function executeTool(tool: ToolCall): Promise<ToolResult> {
           return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${ALLOWED_COMMANDS.slice(0, 20).join(', ')}...` };
         }
         // 进程隔离 + 不阻塞主进程：在子进程中异步执行。
-        // 此前用 execSync 直接在主进程跑 —— 30 秒超时内整个 UI 无响应，
-        // 且命令崩溃会连带主进程。改 exec（异步、独立进程、超时可杀）。
+        // cwd 用会话工作目录（set_cwd 可切换），缺省回落 resolveShellCwd()。
         const { exec } = await import('node:child_process');
-        const cwd = resolveShellCwd();
         try {
           const output = await new Promise<string>((resolve, reject) => {
             const child = exec(cmd, {
@@ -682,6 +690,24 @@ async function executeTool(tool: ToolCall): Promise<ToolResult> {
         const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
         const text = await res.text();
         return { name, result: text.slice(0, 30000) };
+      }
+      case 'memory_save': {
+        // dsh memory 服务（global 域）落地——「记住 X」从口头应答变成真实持久化
+        const content = String(args.content || '').trim();
+        if (!content) return { name, result: '', error: '内容为空' };
+        const svc = getService<MemoryServiceLike>('memory');
+        if (!svc?.record) return { name, result: '', error: '记忆服务未就绪（运行时未启动）' };
+        svc.record('global', content, { origin: 'agent:memory_save' });
+        return { name, result: `已记住：${content.slice(0, 100)}` };
+      }
+      case 'set_cwd': {
+        const resolved = path.resolve(String(args.path || ''));
+        if (!isPathAllowed(resolved)) return { name, result: '', error: '路径不在允许范围内' };
+        let isDir = false;
+        try { isDir = fs.statSync(resolved).isDirectory(); } catch { /* not exist */ }
+        if (!isDir) return { name, result: '', error: `目录不存在：${resolved}` };
+        if (sessionCtx?.sessionId) sessionCwds.set(sessionCtx.sessionId, resolved);
+        return { name, result: `工作目录已切换：${resolved}` };
       }
       default:
         return { name, result: '', error: `未知工具: ${name}` };
@@ -725,7 +751,17 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     .filter(m => (m.role === 'user' || m.role === 'assistant') && m.text)
     .slice(-20)
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.text as string }));
-  apiMessages.unshift({ role: 'system', content: buildSystemPrompt() });
+  // dsh memory 服务接入对话流：召回长期记忆 + 注入会话工作目录（FR-7 最小闭环）。
+  // 召回失败不阻塞回合（fail-open 于诊断信息，fail-closed 于执行——记忆只影响提示词）。
+  let memories: string[] = [];
+  try {
+    const memSvc = getService<MemoryServiceLike>('memory');
+    if (memSvc?.listDomain) {
+      memories = ((memSvc.listDomain('global') as Array<{ text?: string }> | undefined) || [])
+        .map((e) => String(e?.text || '')).filter(Boolean).slice(-10);
+    }
+  } catch { /* 记忆召回失败不阻塞回合 */ }
+  apiMessages.unshift({ role: 'system', content: buildSystemPrompt({ cwd: sessionCwd(sessionId), memories }) });
   apiMessages.push({ role: 'user', content: text });
 
   const toolSteps: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }> = [];
@@ -760,7 +796,7 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
       for (const tc of reply.toolCalls) {
         stepCount++;
         notifyToolStep(sessionId, tc.name, 'running');
-        const result = await executeTool(tc);
+        const result = await executeTool(tc, { sessionId });
         toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
         notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
         // OpenAI 规范：工具结果用 role='tool' + tool_call_id 回传。
@@ -1036,6 +1072,7 @@ interface MemoryServiceLike {
   dump(sessionId: string, msgs: unknown[], opts?: unknown): Promise<unknown>;
   recall(query: string, opts?: unknown): Promise<unknown>;
   listDomain?(domain: string): unknown;
+  record?(domain: string, text: string, source: { origin: string }): unknown;
 }
 ipcMain.handle('orchdesk:memory-stats', () => {
   const svc = getService<MemoryServiceLike>('memory');

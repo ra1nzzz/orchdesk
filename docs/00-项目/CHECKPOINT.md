@@ -9,16 +9,18 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.4.1`（已打 tag `v0.4.1`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.4.0` 为上一 Release |
-| **最新 Commit** | `2f28567` | fix: StepFun 等网关工具软拒绝降级；release v0.4.1 |
+| **当前版本** | `0.5.0`（已打 tag `v0.5.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.4.1` 为上一 Release |
+| **最新 Commit** | `<tag 后回填>` | feat: dsh memory 接入对话流（memory_save + 召回注入）+ set_cwd 会话工作目录；chore: verify-kit 共享脚手架（ponytail audit） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
-| **验证套件** | 313/313 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 35 / agent-loop 14 / model-loop 28 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
+| **验证套件** | 318/318 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 37 / agent-loop 14 / model-loop 31 / dsh-runtime 15 / credentials 14 / data-dir 36 / data-port 10 / e2e 29） |
 
 > **v0.4.1 关键修复**：StepFun / 部分 OpenAI 兼容网关在 chat 模式下带 `tools` 参数时返回 HTTP 200、content/toolCalls 全空（软拒绝），导致「发消息能响应，要求执行任务则报错」。现 `callOpenAICompatible` 识别软拒绝并逐级降级到不带 tools，成功后把 `provider.id|model` 记入进程级记忆，后续会话直接走 `<tool:>` 文本兜底解析。新增 model-loop M 组 3 项回归测试。
+
+> **v0.5.0 关键交付（dsh memory 真实接入对话流，BUG-019/020）**：① 新工具 `memory_save`——用户告知的长期事实写入 dsh memory 插件 global 域，每轮回召回最近 10 条注入 system prompt（此前「我记住了」全是口头应答）；② 新工具 `set_cwd`——会话级工作目录，shell/file 操作以此为基准，system prompt 声明当前目录（此前命令固定跑在 home，`D:\Code\WxTools` 这类项目全被误判「不是 git 仓库」）；③ 工具 5→7，verify 313→318。同轮落地 ponytail audit 削减项：`scripts/verify-kit.cjs` 共享 electron stub + 计分脚手架（5 份 stub / 10 份样板归一，净减 ~160 行）、`scripts/changelog.mjs` 替换静默空输出的 conventional-changelog 链（BUG-W04 根因推翻：git-raw-commits@5 与 parser@6 分隔符契约断裂）。
 
 ### 1.1 PRD 完成度（FR 维度，2026-08-29 复盘）
 

@@ -229,9 +229,21 @@ check('空结果有占位文本', () => {
 // ---------------------------------------------------------------------------
 console.log('== 6. 系统提示词 ==');
 
-check('提示词覆盖全部 5 个工具', () => {
+check('提示词覆盖全部工具', () => {
   const p = rt.buildSystemPrompt();
+  assert.strictEqual(rt.TOOL_DEFS.length, 7, '工具应为 7 个（5 基础 + memory_save + set_cwd），实际: ' + rt.TOOL_DEFS.length);
   for (const n of rt.TOOL_NAMES) assert.ok(p.includes(n), `提示词缺少工具 ${n}`);
+});
+check('提示词注入工作目录与长期记忆（dsh memory 接入对话流）', () => {
+  const p = rt.buildSystemPrompt({ cwd: 'D:\\Code\\WxTools', memories: ['用户叫我小星'] });
+  assert.ok(p.includes('D:\\Code\\WxTools'), '应注入 cwd，实际无');
+  assert.ok(p.includes('用户叫我小星'), '应注入记忆条目，实际无');
+  assert.ok(p.includes('memory_save'), '应告知保存事实的规则');
+});
+check('缺省提示词不含工作目录/记忆段（可选项不产生空段）', () => {
+  const p = rt.buildSystemPrompt();
+  assert.ok(!p.includes('当前工作目录'), '不应出现空 cwd 段');
+  assert.ok(!p.includes('长期记忆'), '不应出现空记忆段');
 });
 check('提示词给出 <tool:> 兜底格式示例', () => {
   const p = rt.buildSystemPrompt();

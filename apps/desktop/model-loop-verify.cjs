@@ -182,7 +182,7 @@ function lastAssistant(sessionId) {
     const b = calls[0].body;
     assert.strictEqual(b.model, 'wire-model', '实际 model: ' + b.model);
     assert.ok(Array.isArray(b.messages) && b.messages.length >= 2, 'messages 应含 system + user');
-    assert.ok(Array.isArray(b.tools) && b.tools.length === 5, '应下发 5 个工具定义，实际: ' + (b.tools || []).length);
+    assert.ok(Array.isArray(b.tools) && b.tools.length === 7, '应下发 7 个工具定义，实际: ' + (b.tools || []).length);
     assert.strictEqual(b.stream, false, 'stream 必须为 false');
   });
   await check('A3 正文取自 choices[0].message.content', () => {
@@ -259,7 +259,7 @@ function lastAssistant(sessionId) {
     const b = calls[0].body;
     assert.strictEqual(b.model, 'qwen3:14b');
     assert.strictEqual(b.stream, false);
-    assert.ok(Array.isArray(b.tools) && b.tools.length === 5, 'Ollama 形态也应下发 tools，实际: ' + (b.tools || []).length);
+    assert.ok(Array.isArray(b.tools) && b.tools.length === 7, 'Ollama 形态也应下发 tools，实际: ' + (b.tools || []).length);
     assert.strictEqual(calls[0].headers.authorization, undefined, 'Ollama 形态不带 Authorization 头');
   });
   await check('D2 message.tool_calls 被归一化执行（缺 id 的调用自动补 id 且能对上）', () => {
@@ -576,6 +576,53 @@ function lastAssistant(sessionId) {
     assert.strictEqual(calls.length, 2, '记忆命中后应只发 2 次请求，实际: ' + calls.length);
     assert.ok(!('tools' in calls[0].body), '首轮请求应直接不带 tools，实际 keys: ' + Object.keys(calls[0].body).join(','));
     assert.strictEqual(out.text, '跨轮记忆完成', '实际: ' + out.text);
+  });
+
+  // =========================================================================
+  console.log('== N. 记忆与工作目录工具（dsh memory 接入对话流）==');
+
+  writeModels({ id: 'p-mem', name: '记忆网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  plan = [
+    chat('', [tc('n1', 'memory_save', { content: '用户叫我小星' }), tc('n2', 'set_cwd', { path: HOME })]),
+    chat('都记住了，目录也切好了', undefined),
+  ];
+  out = await runAgentTurn(null, 's-n', '记住我叫小星，切到我的项目目录', {});
+
+  await check('N1 memory_save 落入 dsh 记忆、set_cwd 切换会话工作目录', () => {
+    const a = lastAssistant('s-n');
+    const names = (a.tools || []).map((t) => t.n).sort();
+    assert.deepStrictEqual(names, ['memory_save', 'set_cwd'], '实际: ' + JSON.stringify(names));
+    const saved = (a.tools || []).find((t) => t.n === 'memory_save');
+    assert.ok(String(saved.result).includes('已记住'), 'memory_save 应成功: ' + saved.result);
+    const cwdTool = (a.tools || []).find((t) => t.n === 'set_cwd');
+    assert.ok(String(cwdTool.result).includes('工作目录已切换'), 'set_cwd 应成功: ' + cwdTool.result);
+    assert.strictEqual(out.text, '都记住了，目录也切好了', '实际: ' + out.text);
+  });
+
+  await check('N2 同会话下一轮：system prompt 注入已存记忆与 set_cwd 后的目录', async () => {
+    reset();
+    plan = [chat('你叫我小星', undefined)];
+    out = await runAgentTurn(null, 's-n', '我叫什么？', {});
+    const sys = calls[0].body.messages.find((m) => m.role === 'system');
+    assert.ok(sys, '应有 system 消息');
+    assert.ok(sys.content.includes('用户叫我小星'), '应注入已保存记忆');
+    assert.ok(sys.content.includes('当前工作目录'), '应注入 cwd 段');
+    assert.ok(sys.content.includes(HOME), 'cwd 应为 set_cwd 设置的目录');
+  });
+
+  await check('N3 set_cwd 后相对路径以会话目录为基准（file_list "." 列的是新目录）', async () => {
+    fs.writeFileSync(path.join(HOME, 'marker-wxtools.txt'), 'git-repo-here', 'utf-8');
+    reset();
+    plan = [
+      chat('', [tc('n3', 'file_list', { path: '.' })]),
+      chat('列好了', undefined),
+    ];
+    out = await runAgentTurn(null, 's-n', '列一下当前目录', {});
+    const msgs = calls[1].body.messages;
+    const toolMsg = msgs.find((m) => m.role === 'tool');
+    assert.ok(toolMsg, '应有工具结果');
+    assert.ok(toolMsg.content.includes('marker-wxtools.txt'), `相对路径应落在会话目录，实际: ${String(toolMsg.content).slice(0, 200)}`);
   });
 
   // =========================================================================

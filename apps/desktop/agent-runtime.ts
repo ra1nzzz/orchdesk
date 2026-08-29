@@ -155,6 +155,30 @@ export const TOOL_DEFS: ToolDef[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_save',
+      description: '把用户告知的长期事实/偏好存入记忆（称呼、习惯、项目约定等），后续对话自动注入',
+      parameters: {
+        type: 'object',
+        properties: { content: { type: 'string', description: '要记住的事实，一句话' } },
+        required: ['content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_cwd',
+      description: '设置本会话的工作目录（后续 shell/file 操作以此为基准），操作用户指定的项目时必须先调用',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: '项目目录绝对路径' } },
+        required: ['path'],
+      },
+    },
+  },
 ];
 
 export const TOOL_NAMES: string[] = TOOL_DEFS.map((t) => t.function.name);
@@ -166,6 +190,8 @@ export const TOOL_PRIMARY_ARG: Record<string, string> = {
   file_list: 'path',
   shell_command: 'command',
   web_fetch: 'url',
+  memory_save: 'content',
+  set_cwd: 'path',
 };
 
 // ---------------------------------------------------------------------------
@@ -412,7 +438,7 @@ export function buildToolResultMessage(
 // 系统提示词
 // ---------------------------------------------------------------------------
 
-export function buildSystemPrompt(): string {
+export function buildSystemPrompt(opts: { cwd?: string; memories?: string[] } = {}): string {
   const list = TOOL_DEFS.map((t) => {
     const req = (t.function.parameters.required as string[] | undefined) || [];
     const props = (t.function.parameters.properties as Record<string, { description?: string }> | undefined) || {};
@@ -420,8 +446,16 @@ export function buildSystemPrompt(): string {
     return `- ${t.function.name}(${args}): ${t.function.description}`;
   }).join('\n');
 
+  const head = ['你是 OrchDesk 的本地 Agent，可以使用工具来完成用户任务。'];
+  if (opts.cwd) {
+    head.push('', `当前工作目录：${opts.cwd}`, 'shell 命令与相对路径以此为基准；操作其他项目前必须先用 set_cwd 切换。');
+  }
+  if (opts.memories?.length) {
+    head.push('', '用户长期记忆（必须遵守）：', ...opts.memories.map((m) => `- ${m}`));
+  }
+
   return [
-    '你是 OrchDesk 的本地 Agent，可以使用工具来完成用户任务。',
+    ...head,
     '',
     '可用工具：',
     list,
@@ -434,5 +468,6 @@ export function buildSystemPrompt(): string {
     '3. 可以一次调用多个工具；工具结果会自动回传给你，拿到结果后再给出最终回答。',
     '4. 不需要工具时直接正常回答，不要输出任何工具标签。',
     '5. 不要编造工具执行结果。',
+    '6. 用户告知长期有效的事实或偏好（如称呼、约定、项目位置）时，必须调用 memory_save 保存，不要只口头答应。',
   ].join('\n');
 }
