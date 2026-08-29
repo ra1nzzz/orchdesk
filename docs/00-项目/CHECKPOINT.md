@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.7.0`（已打 tag `v0.7.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.6.0` 为上一 Release |
-| **最新 Commit** | `59418e2` | feat: 授权审批接入工具执行链路（BUG-021 死挂点修复，shell 命令过 approval 门） |
+| **最新 Commit** | `216764c` | chore: release v0.7.0（feat: 授权审批接入工具执行链路，BUG-021 死挂点修复） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
