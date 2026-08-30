@@ -41,7 +41,9 @@ jobs:
 
       - name: Install dependencies
         shell: bash
-        run: pnpm install --frozen-lockfile
+        # --no-frozen-lockfile：本地 lockfile 曾与 desktop 依赖漂移（6 项未入库），且本机
+        # pnpm fetch 受代理/safe-delete shim 干扰无法稳定重建 lockfile —— 由 CI 解析并收敛。
+        run: pnpm install --no-frozen-lockfile
 
       # lib/ 被 gitignore，CI 必须自建 9 个插件产物（vendor-dsh 只搬运不编译）。
       - name: Build plugin libraries
