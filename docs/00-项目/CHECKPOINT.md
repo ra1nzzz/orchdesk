@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.9.0`（已打 tag `v0.9.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.8.0` 为上一 Release |
-| **最新 Commit** | `<tag 后回填>` | feat: 专家团派发链路（compose-team 桥 + UI，第五个死挂点） |
+| **最新 Commit** | `91a8af2` | chore: release v0.9.0（feat: 专家团派发链路，第五个死挂点修复） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
