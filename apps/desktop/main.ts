@@ -624,6 +624,22 @@ function sessionCwd(sessionId?: string): string {
   return set || resolveShellCwd();
 }
 
+/**
+ * 授权门（PRD L3/L4 / T-P3-2）：paranoid（只读）直接拒；default/trusted 过 GUI 审批；
+ * 审批链路不可用一律 fail-closed（与 ADR-0008 intent 的「基础设施缺失放行」边界不同——
+ * 走此门的操作兜底不足：命令白名单含万能 shell、file_write 可覆盖白名单内任意文件）。
+ * @returns null = 放行；字符串 = 拒绝原因。
+ */
+async function approvalGate(toolName: string, reason: string, sessionId?: string): Promise<string | null> {
+  let mode = 'default';
+  try { mode = (await authzService?.getMode()) || 'default'; } catch { /* 缺省 default */ }
+  if (mode === 'paranoid') return 'paranoid（只读）模式下禁止该操作';
+  const approval = getHostServices()?.approval;
+  if (!approval) return '授权审批服务不可用，操作被拒绝（fail-closed）';
+  const outcome = await approval.request({ toolName, reason: reason.slice(0, 200), sessionId });
+  return outcome === 'allowed-once' ? null : `操作未获批准（${outcome}）`;
+}
+
 async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }): Promise<ToolResult> {
   const { name, arguments: args } = tool;
   const cwd = sessionCwd(sessionCtx?.sessionId);
@@ -639,6 +655,9 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
         const filePath = path.resolve(cwd, String(args.path || ''));
         const content = String(args.content || '');
         if (!isPathAllowed(filePath)) return { name, result: '', error: '路径不在允许范围内' };
+        // 写文件可覆盖白名单内任意内容 → 同样过授权门（与 shell 同一 helper）
+        const denied = await approvalGate('file_write', `写入 ${filePath}`, sessionCtx?.sessionId);
+        if (denied) return { name, result: '', error: denied };
         const dir = path.dirname(filePath);
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(filePath, content, 'utf-8');
@@ -659,24 +678,9 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
           return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${ALLOWED_COMMANDS.slice(0, 20).join(', ')}...` };
         }
         // ---- 授权门（PRD L3/L4 / T-P3-2）：命令执行必须过审批 ----
-        // 此前审批 UI 已建但工具链路从不触发（与 intent/trace 同款死挂点，本轮修复）。
-        // 白名单只是准入门槛（含 powershell 等万能命令，兜底不足），因此这里与
-        // ADR-0008 intent 的「基础设施缺失放行」边界**不同**：审批链路不可用一律
-        // fail-closed；paranoid（只读沙箱）直接拒绝。trusted 的白名单放宽待 authz
-        // 补 decide 接口后再接（ponytail: 升级路径 = authz.provide decide(op)）。
-        {
-          let mode = 'default';
-          try { mode = (await authzService?.getMode()) || 'default'; } catch { /* 缺省 default */ }
-          if (mode === 'paranoid') {
-            return { name, result: '', error: 'paranoid（只读）模式下禁止执行命令' };
-          }
-          const approval = getHostServices()?.approval;
-          if (!approval) return { name, result: '', error: '授权审批服务不可用，命令被拒绝（fail-closed）' };
-          const outcome = await approval.request({ toolName: 'shell_command', reason: cmd.slice(0, 200), sessionId: sessionCtx?.sessionId });
-          if (outcome !== 'allowed-once') {
-            return { name, result: '', error: `命令未获批准（${outcome}）` };
-          }
-        }
+        // 此前审批 UI 已建但工具链路从不触发（与 intent/trace 同款死挂点，BUG-021 修复）。
+        const denied = await approvalGate('shell_command', cmd, sessionCtx?.sessionId);
+        if (denied) return { name, result: '', error: denied };
         // 进程隔离 + 不阻塞主进程：在子进程中异步执行。
         // cwd 用会话工作目录（set_cwd 可切换），缺省回落 resolveShellCwd()。
         const { exec } = await import('node:child_process');
@@ -771,17 +775,35 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     .filter(m => (m.role === 'user' || m.role === 'assistant') && m.text)
     .slice(-20)
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.text as string }));
-  // dsh memory 服务接入对话流：召回长期记忆 + 注入会话工作目录（FR-7 最小闭环）。
-  // 召回失败不阻塞回合（fail-open 于诊断信息，fail-closed 于执行——记忆只影响提示词）。
+  // dsh 服务接入对话流：记忆语义召回（FR-7）+ 提示词库合并（FR-5/FR-11）+ 会话工作目录。
+  // 召回/合并失败不阻塞回合（提示词只影响 system prompt，不影响执行侧 fail 边界）。
   let memories: string[] = [];
   try {
     const memSvc = getService<MemoryServiceLike>('memory');
-    if (memSvc?.listDomain) {
+    if (memSvc?.recall) {
+      // 语义召回（TF-IDF Top-K）：相关优先；但短查询与记忆无词面交集时余弦为 0，
+      // 此时回落机械取尾——「用户告知的事实」必须可见，不能被召回算法吞掉。
+      const hits = (memSvc.recall(text, { k: 5 }) as Array<{ entry?: { text?: string }; score?: number }> | undefined) || [];
+      memories = hits.filter((h) => (h.score ?? 0) > 0).map((h) => String(h.entry?.text || '')).filter(Boolean);
+    }
+    if (!memories.length && memSvc?.listDomain) {
       memories = ((memSvc.listDomain('global') as Array<{ text?: string }> | undefined) || [])
         .map((e) => String(e?.text || '')).filter(Boolean).slice(-10);
     }
   } catch { /* 记忆召回失败不阻塞回合 */ }
-  apiMessages.unshift({ role: 'system', content: buildSystemPrompt({ cwd: sessionCwd(sessionId), memories }) });
+
+  let prompts: string[] = [];
+  try {
+    const promptSvc = getService<PromptServiceLike>('promptLib');
+    if (promptSvc?.mergeForAgent) {
+      const merged = promptSvc.mergeForAgent('orchdesk-main') as { sections?: Array<{ fromTitle?: string; body?: string; conflict?: boolean }> } | null;
+      prompts = (merged?.sections || [])
+        .map((s) => `【${s?.fromTitle || '提示词'}】${String(s?.body || '').trim()}${s?.conflict ? '（与其他提示词冲突，按用户最新意图取舍）' : ''}`)
+        .filter((p) => p.length > 6);
+    }
+  } catch { /* 提示词合并失败不阻塞回合 */ }
+
+  apiMessages.unshift({ role: 'system', content: buildSystemPrompt({ cwd: sessionCwd(sessionId), memories, prompts }) });
   apiMessages.push({ role: 'user', content: text });
 
   const toolSteps: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }> = [];
@@ -1122,7 +1144,8 @@ function unavailable(reason: string): { ok: false; unavailable: true; reason: st
 interface MemoryServiceLike {
   getStats(): unknown;
   dump(sessionId: string, msgs: unknown[], opts?: unknown): Promise<unknown>;
-  recall(query: string, opts?: unknown): Promise<unknown>;
+  /** 语义召回（TF-IDF Top-K 余弦，同步）；插件 provide 的原始形态。 */
+  recall?(query: string, opts?: { domain?: string; k?: number }): unknown;
   listDomain?(domain: string): unknown;
   record?(domain: string, text: string, source: { origin: string }): unknown;
 }
@@ -1132,7 +1155,7 @@ ipcMain.handle('orchdesk:memory-stats', () => {
 });
 ipcMain.handle('orchdesk:memory-recall', async (_e, query: string, opts: unknown) => {
   const svc = getService<MemoryServiceLike>('memory');
-  if (!svc) return null;
+  if (!svc?.recall) return null;
   return svc.recall(String(query || ''), opts || {});
 });
 

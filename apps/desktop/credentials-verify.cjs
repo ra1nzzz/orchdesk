@@ -161,6 +161,17 @@ const cred = require('./dist/credentials.js');
     assert.ok(out.error && out.error.includes('未获批准'), '应被审批拒绝，实际: ' + JSON.stringify(out).slice(0, 200));
   });
 
+  await check('file_write 未获批时被授权门拦截（白名单内路径仍不 silently 放行）', async () => {
+    const out = await runToolProbe('file_write', { path: '__DATA__/should-not-exist.txt', content: 'x' });
+    assert.ok(out.error && out.error.includes('未获批准'), '写文件应被审批拦截，实际: ' + JSON.stringify(out).slice(0, 200));
+  });
+
+  await check('file_write 审批放行后写入成功（授权门正向链路）', async () => {
+    const out = await runToolProbe('file_write', { path: '__DATA__/probe-written.txt', content: 'hello-gate' }, { approve: true });
+    assert.ok(!out.error, '不应有错误，实际: ' + JSON.stringify(out).slice(0, 200));
+    assert.ok(String(out.result).includes('已写入'), '应返回写入成功，实际: ' + out.result);
+  });
+
   await check('白名单外的命令被拒绝', async () => {
     const out = await runToolProbe('shell_command', { command: 'format C:' });
     assert.ok(out.error, '应被白名单拒绝');
@@ -202,6 +213,11 @@ const cred = require('./dist/credentials.js');
       const orig = Module._load;
       Module._load = function (req) { if (req === 'electron') return stub; return orig.apply(this, arguments); };
       require('${path.join(__dirname, 'dist', 'main.js').replace(/\\/g, '\\\\')}');
+      const args0 = ${JSON.stringify({ name: toolName, arguments: args })};
+      // __DATA__ 占位 → 子进程数据目录（ORCHDESK_HOME，必在路径白名单内）
+      if (args0.arguments && args0.arguments.path) {
+        args0.arguments.path = String(args0.arguments.path).replace(/__DATA__/g, HOME);
+      }
       (async () => {
         // 等 bootRuntime 完成（plugin-runtime handler 注册早于运行时就绪，直接 kick 会竞态）
         for (let i = 0; i < 100; i++) {
@@ -213,7 +229,7 @@ const cred = require('./dist/credentials.js');
           await new Promise((r) => setTimeout(r, 50));
         }
         ${opts.approve ? "await ipc.get('orchdesk:load-sessions')(null);" : ''}
-        const kick = ipc.get('orchdesk:tool-execute')(null, ${JSON.stringify({ name: toolName, arguments: args })});
+        const kick = ipc.get('orchdesk:tool-execute')(null, args0);
         ${opts.approve ? `
         let approvalReq = null;
         for (let i = 0; i < 100 && !approvalReq; i++) {

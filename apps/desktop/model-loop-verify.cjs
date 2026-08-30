@@ -641,6 +641,24 @@ function lastAssistant(sessionId) {
   });
 
   // =========================================================================
+  console.log('== P. 提示词库接入对话流（FR-5/FR-11）==');
+
+  writeModels({ id: 'p-pr', name: '提示词网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  // 经真实 prompt-save 桥写入一条提示词（agents 留空 = 对全部 Agent 生效）
+  const saveR = await ipcHandlers.get('orchdesk:prompt-save')(null, { title: '回复风格', body: '始终用简洁中文回答', category: 'style', agents: [], priority: 10 });
+  plan = [chat('好的', undefined)];
+  out = await runAgentTurn(null, 's-p', '在吗', {});
+
+  await check('P1 prompt-save 落库且下一轮 system prompt 注入提示词正文', () => {
+    assert.ok(saveR && (saveR.ok !== false), '保存应成功: ' + JSON.stringify(saveR).slice(0, 120));
+    const sys = calls[0].body.messages.find((m) => m.role === 'system');
+    assert.ok(sys, '应有 system 消息');
+    assert.ok(sys.content.includes('始终用简洁中文回答'), '应注入提示词正文，实际前 300 字: ' + sys.content.slice(0, 300));
+    assert.ok(sys.content.includes('回复风格'), '应含提示词标题');
+  });
+
+  // =========================================================================
   const ok = summary();
 
   // 收尾：关服务 + 清临时目录

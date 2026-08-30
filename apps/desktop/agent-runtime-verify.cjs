@@ -244,6 +244,12 @@ check('缺省提示词不含工作目录/记忆段（可选项不产生空段）
   const p = rt.buildSystemPrompt();
   assert.ok(!p.includes('当前工作目录'), '不应出现空 cwd 段');
   assert.ok(!p.includes('长期记忆'), '不应出现空记忆段');
+  assert.ok(!p.includes('生效提示词'), '不应出现空提示词段');
+});
+check('提示词库段落注入（FR-5/FR-11 接入对话流）', () => {
+  const p = rt.buildSystemPrompt({ prompts: ['【回复风格】简洁中文'] });
+  assert.ok(p.includes('生效提示词'), '应有提示词段');
+  assert.ok(p.includes('【回复风格】简洁中文'), '应含提示词正文');
 });
 check('提示词给出 <tool:> 兜底格式示例', () => {
   const p = rt.buildSystemPrompt();

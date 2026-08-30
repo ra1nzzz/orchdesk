@@ -438,7 +438,7 @@ export function buildToolResultMessage(
 // 系统提示词
 // ---------------------------------------------------------------------------
 
-export function buildSystemPrompt(opts: { cwd?: string; memories?: string[] } = {}): string {
+export function buildSystemPrompt(opts: { cwd?: string; memories?: string[]; prompts?: string[] } = {}): string {
   const list = TOOL_DEFS.map((t) => {
     const req = (t.function.parameters.required as string[] | undefined) || [];
     const props = (t.function.parameters.properties as Record<string, { description?: string }> | undefined) || {};
@@ -452,6 +452,9 @@ export function buildSystemPrompt(opts: { cwd?: string; memories?: string[] } = 
   }
   if (opts.memories?.length) {
     head.push('', '用户长期记忆（必须遵守）：', ...opts.memories.map((m) => `- ${m}`));
+  }
+  if (opts.prompts?.length) {
+    head.push('', '生效提示词（用户在提示词库配置，优先级高于默认行为）：', ...opts.prompts.map((p) => `- ${p}`));
   }
 
   return [
