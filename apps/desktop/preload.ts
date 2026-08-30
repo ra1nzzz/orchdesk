@@ -56,6 +56,10 @@ const orchdesk = {
   getOrchestrationCatalog: (): Promise<{ experts?: unknown[]; teams?: unknown[] } | null> =>
     ipcRenderer.invoke('orchdesk:orchestration-catalog'),
 
+  /** 专家团派发（multi composeTeam）：三层编排，返回 { rootId, nodes } 或 { error }。 */
+  composeTeam: (teamId: string, task: string): Promise<{ error?: string; rootId?: string; nodes?: unknown[] }> =>
+    ipcRenderer.invoke('orchdesk:compose-team', teamId, task),
+
   /** 模型回合 seam：主进程在此接入真实 dsh ctx / Ollama（P1-5）。 */
   runAgentTurn: (
     sessionId: string,

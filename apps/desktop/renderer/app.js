@@ -242,7 +242,9 @@
     // 插件运行时真实状态（替代 PLUGINS 常量的硬编码 on 字段）
     pluginRuntime: null,
     // 编排目录（multi 插件真实数据；null = 未接入，UI 回落兜底清单并标注）
-    orchestrationCatalog: null
+    orchestrationCatalog: null,
+    // 最近一次专家团派发结果（composeTeam 返回的 { rootId, nodes }）
+    delegationLast: null
   };
 
   const $ = (s) => document.querySelector(s);
@@ -829,13 +831,16 @@
       const market = PLUGIN_MARKET.map((p) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(p.n)}</span><span class="ib badge">规划中</span></div>`).join('');
       const skills = SKILLS_MARKET.map((s) => `<div class="ss-i"><span class="id"></span><span class="in mono" style="font-size:11.5px">${esc(s.n)}</span>${s.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>'}</div>`).join('');
       const experts = [...expertList().map((e) => `<div class="ss-i"><span class="id"></span><span class="in">${e}</span><span class="ib badge info">专家</span></div>`),
-        ...teamList().map((t) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(t.n)}</span><span class="ib badge ceo">团</span></div>`)].join('');
+        ...teamList().map((t) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(t.n)}</span><button class="btn sm ghost" data-action="team-compose" data-tid="${esc(t.id || '')}" data-tn="${esc(t.n)}">派发任务</button><span class="ib badge ceo">团</span></div>`)].join('');
+      // 委派树结果（composeTeam 返回后渲染；CEO→Director→Worker 三层）
+      const deleg = (state.delegationLast?.nodes || []).map((n) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(String(n.label || n.id))}</span><span class="ib badge ${String(n.layer) === 'ceo' ? 'ceo' : 'info'}">${esc(String(n.layer || ''))}</span><span class="ib badge ${String(n.status) === 'done' ? 'ok' : 'warn'}">${esc(String(n.status || ''))}</span></div>`).join('');
+      const expertsHtml = experts + (deleg ? sec('delegation', '最近一次委派树', (state.delegationLast?.nodes || []).length, deleg) : '');
       // 连接器：尚无后端，全部标「未接入」（此前 GitHub 硬编码 on:1 显示为「已连」，是假状态）
       const connectors = CONNECTORS.map((c) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(c.n)}</span><span class="ib badge">未接入</span></div>`).join('');
       return sec('builtin', '内置插件', PLUGINS.length, builtIn) +
         sec('market', '插件市场', PLUGIN_MARKET.length, market) +
         sec('skills', '技能市场', SKILLS_MARKET.length, skills) +
-        sec('experts', '专家·专家团', expertList().length + teamList().length, experts) +
+        sec('experts', '专家·专家团', expertList().length + teamList().length, expertsHtml) +
         sec('connectors', '连接器', CONNECTORS.length, connectors);
     },
     main() {
@@ -2219,6 +2224,27 @@
       case 'wz-skip': $('#wizard').classList.add('hidden'); state.page = 'session'; render(); break;
       case 'wz-open': state.wz = 0; renderWizard(); $('#wizard').classList.remove('hidden'); break;
       case 'wz-expert': state.wzExpert = +el.dataset.i; renderWizard(); break;
+      /* 专家团派发（multi composeTeam，第五个死挂点修复：目录可看 → 任务可派） */
+      case 'team-compose': {
+        const tid = el.dataset.tid;
+        const tn = el.dataset.tn || '专家团';
+        askInput({
+          title: `派发任务 · ${tn}`,
+          label: 'CEO（主会话）将拆解任务并派给 Director→Worker，经真实模型执行，耗时可能较长。',
+          placeholder: '描述要派发的任务…',
+        }).then((task) => {
+          task = String(task || '').trim();
+          if (!task) return;
+          toast('编排中：CEO 拆解 → Director → Worker…', 'info');
+          bridge.composeTeam(tid, task).then((r) => {
+            if (r && r.error) { toast(r.error, 'err'); return; }
+            state.delegationLast = r;
+            render();
+            toast(`编排完成 · ${r.rootId || ''}`, 'ok');
+          }).catch((e) => toast('编排失败: ' + ((e && e.message) || e), 'err'));
+        });
+        break;
+      }
     }
   });
 

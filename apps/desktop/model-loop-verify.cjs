@@ -659,6 +659,24 @@ function lastAssistant(sessionId) {
   });
 
   // =========================================================================
+  console.log('== Q. 专家团派发桥（multi composeTeam 端到端）==');
+
+  writeModels({ id: 'p-or', name: '编排网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  responder = () => chat('分包任务完成', undefined);
+  const comp = await ipcHandlers.get('orchdesk:compose-team')(null, 'team-fullstack', '做一个登录页');
+
+  await check('Q1 compose-team 桥跑通三层编排（Director 层经 agentRunner 真实执行）并返回委派树', () => {
+    assert.ok(!comp.error, '不应报错: ' + JSON.stringify(comp).slice(0, 200));
+    assert.ok(comp.rootId, '应返回 rootId');
+    assert.ok(Array.isArray(comp.nodes) && comp.nodes.length >= 1, '应返回 nodes');
+    const layers = comp.nodes.map((n) => n.layer);
+    assert.ok(layers.includes('director'), '应含 Director 层: ' + JSON.stringify(layers));
+    const bad = comp.nodes.filter((n) => n.status !== 'done');
+    assert.strictEqual(bad.length, 0, '全部节点应收敛 done，异常: ' + JSON.stringify(bad.map((n) => ({ id: n.id, s: n.status }))));
+  });
+
+  // =========================================================================
   const ok = summary();
 
   // 收尾：关服务 + 清临时目录

@@ -1240,11 +1240,22 @@ ipcMain.handle('orchdesk:evol-dispose', async (_e, id: string) => {
 // ---- 编排目录（multi 插件）：替换渲染层硬编码的 8 专家 + 3 团 ----
 interface OrchestrationServiceLike {
   getCatalog(): unknown;
-  getDelegationTree(): unknown;
+  getDelegationTree(rootId?: string): unknown;
+  /** CEO→Director→Worker 三层编排（后台经 agentRunner 跑真实 LLM，耗时较长）。 */
+  composeTeam?(teamId: string, task: string): Promise<unknown>;
 }
 ipcMain.handle('orchdesk:orchestration-catalog', () => {
   const svc = getService<OrchestrationServiceLike>('orchestration');
   return svc ? svc.getCatalog() : null;
+});
+ipcMain.handle('orchdesk:compose-team', async (_e, teamId: string, task: string) => {
+  const svc = getService<OrchestrationServiceLike>('orchestration');
+  if (!svc?.composeTeam) return { error: '编排服务未就绪（multi 插件未激活）' };
+  try {
+    return await svc.composeTeam(String(teamId || 'team-custom'), String(task || ''));
+  } catch (err) {
+    return { error: `编排失败: ${(err as Error).message}` };
+  }
 });
 
 // ---- 插件运行时状态（供设置页状态条与插件页展示真实数据，替代硬编码常量）----
