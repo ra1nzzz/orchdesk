@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-30
+
+### Fixed
+- **memory**: hydrate+persist four-domain memory; enforce subject convention in memory_save; hermetic trace build dir; repair release workflow
+
+
 ## [0.10.0] - 2026-08-30
 
 ### Added
