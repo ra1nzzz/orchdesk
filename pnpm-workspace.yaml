@@ -26,6 +26,13 @@ packages:
   - 'packages/*/*'
   - 'apps/*'
 
+# pnpm 11 配置移入本文件（.npmrc 不再读取）。
+# 关闭 peer 自动补装：@deepseek-ai/dsh-* 的 peer 链含公网不存在的
+# dsh-type-meta / dsh-invariants 等（workspace:^ 原样发布），补装必 404
+# （CI v0.10.1 三连挂实测）。peer 由 apps/desktop 的真实依赖满足，
+# 未满足仅为告警，运行时无影响（应用在无这些包的机器上已长期工作）。
+autoInstallPeers: false
+
 allowBuilds:
   electron-winstaller: set this to true or false
 
