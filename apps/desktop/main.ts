@@ -824,7 +824,11 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     if (iter === 0) {
       let gate: { kind?: string; reason?: string } | null = null;
       try {
-        gate = await firePreStep({ sessionId, text });
+        gate = await firePreStep({
+          sessionId, text,
+          // 完整会话正文（system + 历史 + 当前输入）：memory 80% 阈值按总 token 估算
+          messages: apiMessages.map((m) => String(m.content || '')).filter(Boolean),
+        });
       } catch (err) {
         log('WARN', 'intent', `pre-step waterfall 异常（放行）: ${(err as Error).message}`);
       }

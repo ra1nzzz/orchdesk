@@ -279,6 +279,9 @@ export interface PreStepDecisionLike {
 export async function firePreStep(payload: {
   sessionId: string;
   text: string;
+  /** 完整会话正文（历史回灌 + 当前输入 + system）：memory 插件的 80% 阈值检测
+   *  按 payload.messages 总 token 估算占比，只传单条会让阈值检测形同虚设。 */
+  messages?: string[];
   turn?: number;
   step?: number;
 }): Promise<PreStepDecisionLike | null> {
@@ -287,9 +290,10 @@ export async function firePreStep(payload: {
     waterfall?: (ev: string, p: unknown, base: () => Promise<unknown>) => Promise<PreStepDecisionLike | undefined>;
   }).waterfall;
   if (typeof wf !== 'function') return null;
+  const texts = payload.messages?.length ? payload.messages : [payload.text];
   const decision = await wf.call(runtime.ctx, 'agent/pre-step', {
     agent: { session: { id: payload.sessionId }, meta: { id: 'orchdesk-main' } },
-    messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: payload.text }] }],
+    messages: texts.map((t) => ({ source: { kind: 'user' }, content: [{ type: 'text', text: String(t) }] })),
     turn: payload.turn ?? 0,
     step: payload.step ?? 0,
   }, async () => ({ kind: 'enter', messages: [] }));
