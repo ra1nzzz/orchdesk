@@ -35,7 +35,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # pnpm 11 要求 Node >= 22.13（v0.10.1 首跑挂在这：Node 20 下 pnpm.CMD 直接崩）
+          node-version: '22'
           cache: 'pnpm'
 
       - name: Install dependencies
