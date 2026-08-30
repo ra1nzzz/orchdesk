@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-30
+
+### Added
+- **trace**: wire encrypted builtin token and settings toggle into upload chain (sixth dead hook); keep Issues as target
+
+
 ## [0.9.1] - 2026-08-30
 
 ### Fixed
