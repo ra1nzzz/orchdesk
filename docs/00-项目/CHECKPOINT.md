@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.10.0`（已打 tag `v0.10.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.9.1` 为上一 Release |
-| **最新 Commit** | `<tag 后回填>` | feat: TRACE 上传桥（TOKEN 加密内置 + 设置页开关，第六个死挂点） |
+| **最新 Commit** | `8e722e1` | chore: release v0.10.0（feat: TRACE 上传桥，TOKEN 加密内置 + 设置页开关） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
