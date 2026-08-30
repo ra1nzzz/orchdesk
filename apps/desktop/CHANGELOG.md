@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-30
+
+### Added
+- **multi**: wire compose-team dispatch bridge and plugin-page UI (fifth dead hook)
+
+
 ## [0.8.0] - 2026-08-30
 
 ### Added
