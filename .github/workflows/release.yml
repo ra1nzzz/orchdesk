@@ -45,6 +45,33 @@ jobs:
         # pnpm fetch 受代理/safe-delete shim 干扰无法稳定重建 lockfile —— 由 CI 解析并收敛。
         run: pnpm install --no-frozen-lockfile
 
+      # dsh 底座（references/deepseek-harness）是 gitignore 的本地 clone：
+      # vendor-dsh 的 7 个 @deepseek-ai 包与插件类型解析都源自它，CI 必须自取上游并构建。
+      - name: Fetch dsh base (deepseek-harness)
+        shell: bash
+        run: git clone --depth 1 https://github.com/deepseek-ai/deepseek-harness.git references/deepseek-harness
+
+      - name: Build dsh libs
+        shell: bash
+        run: |
+          cd references/deepseek-harness
+          pnpm install --no-frozen-lockfile
+          npm run build:lib
+
+      # 插件 tsc 需要解析 @deepseek-ai/{cordis,schemastery,dsh-agent,dsh-session}；
+      # 与 vendor-dsh 同源（上游 vendor/ + 构建产物）物化到根 node_modules。
+      - name: Materialize dsh modules for typecheck
+        shell: bash
+        run: |
+          node -e "
+          const fs=require('fs'),path=require('path');
+          function cp(src,dst){fs.mkdirSync(dst,{recursive:true});for(const e of fs.readdirSync(src,{withFileTypes:true})){if(['node_modules','src','tests'].includes(e.name))continue;const s=path.join(src,e.name),d=path.join(dst,e.name);if(e.isDirectory())cp(s,d);else fs.copyFileSync(s,d);}}
+          const DSH='references/deepseek-harness';
+          const map={'vendor/cordis':'cordis','vendor/schemastery':'schemastery','packages/core/agent':'dsh-agent','packages/core/session':'dsh-session'};
+          for(const [src,dst] of Object.entries(map))cp(path.join(DSH,src),path.join('node_modules','@deepseek-ai',dst));
+          console.log('materialized',Object.keys(map).length,'dsh modules');
+          "
+
       # lib/ 被 gitignore，CI 必须自建 9 个插件产物（vendor-dsh 只搬运不编译）。
       - name: Build plugin libraries
         shell: bash
