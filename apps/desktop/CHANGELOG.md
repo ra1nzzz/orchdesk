@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-30
+
+### Added
+- **agent**: wire promptLib into system prompt (FR-5/11), semantic memory recall with tail fallback, approval gate for file_write
+
+
 ## [0.7.0] - 2026-08-30
 
 ### Added
