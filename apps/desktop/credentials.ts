@@ -99,3 +99,46 @@ export function decryptSecret(enc: string | undefined): string {
 export function resetKeyCache(): void {
   cachedKey = null;
 }
+
+// ---------------------------------------------------------------------------
+// 显式密钥版（内置凭据场景，如 TRACE TOKEN 加密内置）
+// ---------------------------------------------------------------------------
+
+function keyFromHex(keyHex: string): Buffer {
+  const buf = Buffer.from(keyHex, 'hex');
+  if (buf.length !== 32) throw new Error('key must be 64-char hex (32 bytes)');
+  return buf;
+}
+
+/**
+ * AES-256-GCM 加密（显式密钥版）：与 encryptSecret 同 v1 格式，但密钥由调用方
+ * 传入（64 字符 hex = 32 字节）而非本机派生——用于「加密内置」场景：打包期以随包
+ * 密钥加密 TOKEN，运行时同包解密。诚实边界：密钥与密文同包仅是混淆级保护
+ * （防静态 grep / 爬仓库捡明文），不防逆向；内置 TOKEN 必须用最小权限
+ * （GitHub fine-grained，仅目标仓库 issues:write）。
+ */
+export function encryptWithKey(plain: string, keyHex: string): string {
+  if (!plain) return '';
+  const iv = crypto.randomBytes(IV_LEN);
+  const cipher = crypto.createCipheriv(ALGORITHM, keyFromHex(keyHex), iv);
+  const enc = Buffer.concat([cipher.update(plain, 'utf-8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return [CIPHER_PREFIX, iv.toString('base64'), tag.toString('base64'), enc.toString('base64')].join(':');
+}
+
+/** 解密（显式密钥版）。失败 / 换密钥 / 格式不符返回空串——调用方按「未内置」处理。 */
+export function decryptWithKey(enc: string | undefined, keyHex: string): string {
+  if (!enc || !isV1Cipher(enc)) return '';
+  const parts = enc.split(':');
+  if (parts.length !== 4) return '';
+  try {
+    const iv = Buffer.from(parts[1]!, 'base64');
+    const tag = Buffer.from(parts[2]!, 'base64');
+    const data = Buffer.from(parts[3]!, 'base64');
+    const decipher = crypto.createDecipheriv(ALGORITHM, keyFromHex(keyHex), iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf-8');
+  } catch {
+    return '';
+  }
+}

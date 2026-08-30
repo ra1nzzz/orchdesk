@@ -244,7 +244,10 @@
     // 编排目录（multi 插件真实数据；null = 未接入，UI 回落兜底清单并标注）
     orchestrationCatalog: null,
     // 最近一次专家团派发结果（composeTeam 返回的 { rootId, nodes }）
-    delegationLast: null
+    delegationLast: null,
+    // TRACE 上报开关（默认开；bridge.traceStatus 拉取后覆盖）
+    traceEnabled: true,
+    traceBuiltin: false
   };
 
   const $ = (s) => document.querySelector(s);
@@ -1043,6 +1046,7 @@
           <div class="desktop-item"><div><div class="di-name">全局快捷键</div><div class="di-desc mono">Ctrl+Shift+Space</div></div><div class="switch on" data-action="todo"></div></div>
           <div class="desktop-item"><div><div class="di-name">登录自启动</div><div class="di-desc">开机时启动 OrchDesk</div></div><div class="switch" data-action="todo"></div></div>
           <div class="desktop-item"><div><div class="di-name">自动更新</div><div class="di-desc">新版本静默下载</div></div><div class="switch on" data-action="todo"></div></div>
+          <div class="desktop-item"><div><div class="di-name">TRACE 遥测</div><div class="di-desc" id="trace-desc">脱敏遥测上报至 OrchDesk 公开仓库（仅白名单字段，不含任何消息内容）</div></div><div class="switch ${state.traceEnabled ? 'on' : ''}" id="trace-switch" data-action="trace-toggle"></div></div>
           <div class="desktop-item"><div><div class="di-name">悬浮窗</div><div class="di-desc">桌面浮动小窗</div></div><div class="switch" data-action="todo"></div></div>
           <div class="desktop-item"><div><div class="di-name">开机提醒</div><div class="di-desc">关键事件系统通知</div></div><div class="switch on" data-action="todo"></div></div>
         </div>
@@ -1151,6 +1155,17 @@
       console.error('[render] ERROR:', err);
       $('#main').innerHTML = '<div style="color:#EF4444;padding:40px;font-family:monospace"><b>渲染错误</b><pre>' + (err && err.stack || err) + '</pre></div>';
     }
+  }
+
+  function updateTraceUi() {
+    const sw = $('#trace-switch');
+    if (sw) sw.classList.toggle('on', state.traceEnabled);
+    const desc = $('#trace-desc');
+    if (desc) desc.textContent = state.traceBuiltin
+      ? (state.traceEnabled
+        ? '脱敏遥测上报至 OrchDesk 公开仓库（仅白名单字段，不含任何消息内容）'
+        : '已关闭（重启后完全生效）——遥测仅本地缓冲，不上传')
+      : '未内置上报凭据（开发模式）——遥测仅本地缓冲，不上传';
   }
 
   function toast(msg, type = '') {
@@ -2225,6 +2240,17 @@
       case 'wz-open': state.wz = 0; renderWizard(); $('#wizard').classList.remove('hidden'); break;
       case 'wz-expert': state.wzExpert = +el.dataset.i; renderWizard(); break;
       /* 专家团派发（multi composeTeam，第五个死挂点修复：目录可看 → 任务可派） */
+      /* TRACE 上报开关（TOKEN 加密内置，用户仅可开关；默认开） */
+      case 'trace-toggle': {
+        const cur = state.traceEnabled !== false;
+        bridge.traceSetEnabled(!cur).then((r) => {
+          if (!r || !r.ok) { toast((r && r.reason) || '切换失败', 'err'); return; }
+          state.traceEnabled = !cur;
+          updateTraceUi();
+          toast(r.requiresRestart ? '已保存 · 重启 OrchDesk 后生效' : '已保存', 'ok');
+        }).catch((e) => toast('切换失败: ' + ((e && e.message) || e), 'err'));
+        break;
+      }
       case 'team-compose': {
         const tid = el.dataset.tid;
         const tn = el.dataset.tn || '专家团';
@@ -2294,6 +2320,15 @@
 
     // 立即渲染空壳（用户先看到界面，不等数据）
     render();
+
+    // TRACE 上报状态（开关默认开；builtin = TOKEN 是否已加密内置）——fire-and-forget
+    if (typeof bridge.traceStatus === 'function') {
+      bridge.traceStatus().then((ts) => {
+        state.traceEnabled = ts.enabled !== false;
+        state.traceBuiltin = !!ts.builtin;
+        updateTraceUi();
+      }).catch(() => undefined);
+    }
 
     // 第零步：加载项目分组（此前只加载会话 → 重启后项目全丢、会话退化为「任务」组）
     try {

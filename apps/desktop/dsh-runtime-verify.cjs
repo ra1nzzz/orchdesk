@@ -201,6 +201,28 @@ const { check, summary } = createChecker();
   });
 
   // -------------------------------------------------------------------------
+  console.log('== TRACE 配置注入（TOKEN 加密内置 + 用户开关）==');
+  const rtMod = require('./dist/dsh-runtime.js'); // 同缓存单例；buildTraceConfig 为纯函数
+  await check('buildTraceConfig 缺省：目标为 OrchDesk 公开仓库、脱敏开、无内置文件时 token 为空', () => {
+    delete process.env.ORCHDESK_DATA_DIR;
+    const cfg = rtMod.buildTraceConfig({ repoUrl: '', token: 'x', maskEnabled: false, batchSize: 20, cacheDir: 'c' });
+    assert.strictEqual(cfg.repoUrl, rtMod.TRACE_REPO_URL, '实际: ' + cfg.repoUrl);
+    assert.strictEqual(cfg.maskEnabled, true, '脱敏应默认开');
+    assert.strictEqual(cfg.token, '', 'dev 无内置文件应为空串（只缓冲不上传）');
+  });
+  await check('buildTraceConfig enabled=false → repoUrl 置空（用户开关关闭 = 只缓冲不上传）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-off-'));
+    fs.writeFileSync(path.join(dir, 'trace.json'), JSON.stringify({ enabled: false }));
+    process.env.ORCHDESK_DATA_DIR = dir;
+    try {
+      const cfg = rtMod.buildTraceConfig({ repoUrl: '', token: 'x' });
+      assert.strictEqual(cfg.repoUrl, '', '关闭时应置空上传目标');
+    } finally {
+      delete process.env.ORCHDESK_DATA_DIR;
+    }
+  });
+
+  // -------------------------------------------------------------------------
   const ok = summary();
 
   try { fs.rmSync(HOME, { recursive: true, force: true }); } catch {}

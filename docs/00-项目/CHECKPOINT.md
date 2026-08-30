@@ -9,14 +9,14 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.9.1`（已打 tag `v0.9.1`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.9.0` 为上一 Release |
-| **最新 Commit** | `bf3a941` | chore: release v0.9.1（fix: pre-step payload 完整化，memory 阈值检测生效） |
+| **当前版本** | `0.10.0`（已打 tag `v0.10.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.9.1` 为上一 Release |
+| **最新 Commit** | `<tag 后回填>` | feat: TRACE 上传桥（TOKEN 加密内置 + 设置页开关，第六个死挂点） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
-| **验证套件** | 325/325 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 34 / dsh-runtime 15 / credentials 17 / data-dir 36 / data-port 10 / e2e 29） |
+| **验证套件** | 329/329 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 34 / dsh-runtime 15 / credentials 17 / data-dir 36 / data-port 10 / e2e 29） |
 
 > **v0.4.1 关键修复**：StepFun / 部分 OpenAI 兼容网关在 chat 模式下带 `tools` 参数时返回 HTTP 200、content/toolCalls 全空（软拒绝），导致「发消息能响应，要求执行任务则报错」。现 `callOpenAICompatible` 识别软拒绝并逐级降级到不带 tools，成功后把 `provider.id|model` 记入进程级记忆，后续会话直接走 `<tool:>` 文本兜底解析。新增 model-loop M 组 3 项回归测试。
 
@@ -43,6 +43,8 @@
 | P1 功能（FR-10~12 + 编排） | 25% | ~85% | v0.8.0 记忆语义召回（Top-K + 兜底）；v0.9.0 专家团可派发（委派树端到端 done）；v0.9.1 memory 80% 阈值检测生效。剩余：真实模型下编排/SubAgent 效果验证 |
 | P2 功能（自进化 + Hub） | 5% | ~65% | evolution/临时插件（静态分析 + CONFIRM + 仅驻内存）可用；Hub 客户端就绪未连线。剩余：Hub 连接配置实测 |
 | **加权合计** | | **≈ 88%** | 剩余 ≈ 12% 全部为**用户环境运行期验证**：GUI 实机冒烟 / 真实模型闭环 / TRACE 上传 / 签名——代码侧无已知死挂点 |
+
+> **v0.10.0 交付（第六个死挂点：TRACE 上传不可达）**：上传端（Issues API + NDJSON + 白名单脱敏）与观测端（v0.6.0）早已完整，但 `configure`/`flush` 是插件模块级导出而非 provide 服务——主进程无桥，repoUrl/TOKEN 无处设置，记录只积压缓冲。修复（用户裁决：**保持 Issues 目标不变**，曾短暂考虑 Contents API 写 Trace/ 子目录，被正确否决——Issues 才是 append-only 审计正解）：① TOKEN **加密内置**——`scripts/prepare-trace.cjs` 打包前用随包密钥 AES-256-GCM 加密 `build/trace-token.local.txt` → `trace-token.enc.json`，dsh-runtime 装载 trace 时解密注入 config（诚实边界：同包密钥=混淆级，TOKEN 必须用 fine-grained 仅 issues:write）；② 用户开关——设置页「TRACE 遥测」开关（默认开），关闭 = repoUrl 置空 → 只缓冲不上传，重启生效；③ verify 329/329（新原语 encryptWithKey/decryptWithKey ×2 + buildTraceConfig 注入 ×2）。
 
 > 详细：差距盘点（30%）见 [PRD差距盘点-2026-08-29](../99-归档/PRD差距盘点-2026-08-29.md)；
 > 补齐复盘（75%）见 [PRD差距补齐-2026-08-29](../99-归档/PRD差距补齐-2026-08-29.md)。
@@ -186,7 +188,7 @@ electron-updater → 请求 GitHub Releases /latest.yml
 - [x] P1-4 沙箱子进程隔离 + 清理 6 个 mock 常量
 - [x] P2-5 插件测试 2/9 → 9/9（`scripts/verify-plugins.mjs` 51 项）+ 修复 3 真 bug
 - [x] 6 处渲染层缺陷修复（clone→deepClone / 插件开关 / model-test / tool-step / TRACE key / 项目落盘）
-- [x] 验证体系扩至 158 项全绿（新增 dsh-runtime 15 / credentials 14 / verify-plugins 51）
+- [x] 验证体系扩至 158 项全绿（新增 dsh-runtime 17 / credentials 19 / verify-plugins 51）
 
 **第二轮补齐（2026-08-29 晚，yt-dev-review 三方审阅 + 交叉修复流程）**：
 

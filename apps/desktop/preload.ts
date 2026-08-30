@@ -60,6 +60,14 @@ const orchdesk = {
   composeTeam: (teamId: string, task: string): Promise<{ error?: string; rootId?: string; nodes?: unknown[] }> =>
     ipcRenderer.invoke('orchdesk:compose-team', teamId, task),
 
+  /** TRACE 上报状态：enabled（用户开关，默认开）+ builtin（TOKEN 是否已加密内置）。 */
+  traceStatus: (): Promise<{ enabled: boolean; builtin: boolean }> =>
+    ipcRenderer.invoke('orchdesk:trace-status'),
+
+  /** TRACE 上报开关（重启生效：config 在插件装载时注入）。 */
+  traceSetEnabled: (enabled: boolean): Promise<{ ok: boolean; reason?: string; requiresRestart?: boolean }> =>
+    ipcRenderer.invoke('orchdesk:trace-set-enabled', enabled),
+
   /** 模型回合 seam：主进程在此接入真实 dsh ctx / Ollama（P1-5）。 */
   runAgentTurn: (
     sessionId: string,

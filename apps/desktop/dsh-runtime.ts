@@ -21,6 +21,50 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import type { Context } from '@deepseek-ai/cordis';
 import { hostServices, getHostServices, type HostServices } from './host-services';
+import { decryptWithKey } from './credentials';
+
+/** TRACE 上报目标（OrchDesk 公开仓库；上传端 = GitHub Issues，NDJSON 批量）。 */
+export const TRACE_REPO_URL = 'https://github.com/ra1nzzz/orchdesk';
+
+/**
+ * 组装 trace 插件配置（装载时注入，非运行时桥）：
+ * - 用户开关：`<dataDir>/trace.json` `{ enabled: boolean }`，缺省 **true**；
+ *   关闭 = repoUrl 置空 → 插件行为退化为「只缓冲不上传」（观测照旧，不静默丢数据）。
+ * - TOKEN 加密内置：打包前 `node scripts/prepare-trace.cjs` 产出
+ *   `build/trace-token.enc.json` + `build/trace-key.local`（随包），运行时解密；
+ *   文件缺失（dev / 未内置）→ 空 token → 只缓冲（安全降级，与未配置等价）。
+ * 诚实边界：密钥与密文同包是混淆级保护，不防逆向——内置 TOKEN 必须用最小权限。
+ */
+export function buildTraceConfig(baseConfig: Record<string, unknown>): Record<string, unknown> {
+  const cfg = { ...baseConfig };
+  cfg.repoUrl = TRACE_REPO_URL;
+  cfg.maskEnabled = true;
+
+  const dataDir = process.env.ORCHDESK_DATA_DIR || process.env.ORCHDESK_HOME || '';
+  let enabled = true;
+  if (dataDir) {
+    try {
+      const f = JSON.parse(fs.readFileSync(path.join(dataDir, 'trace.json'), 'utf-8')) as { enabled?: boolean };
+      if (typeof f.enabled === 'boolean') enabled = f.enabled;
+    } catch { /* 缺省开 */ }
+  }
+  if (!enabled) {
+    cfg.repoUrl = '';
+    return cfg;
+  }
+
+  try {
+    const buildDir = path.join(__dirname, '..', 'build');
+    const encJson = JSON.parse(fs.readFileSync(path.join(buildDir, 'trace-token.enc.json'), 'utf-8')) as { enc?: string };
+    const keyHex = fs.readFileSync(path.join(buildDir, 'trace-key.local'), 'utf-8').trim();
+    cfg.token = decryptWithKey(encJson.enc, keyHex);
+  } catch {
+    // 未内置（dev / 未跑 prepare-trace）→ 显式清空：只缓冲不上传（安全降级），
+    // 不保留 schema 默认值或外部传入的残留。
+    cfg.token = '';
+  }
+  return cfg;
+}
 
 /** 插件名清单（顺序即加载顺序）。 */
 export const PLUGIN_NAMES = [
@@ -141,9 +185,13 @@ export async function startRuntime(): Promise<OrchDeskRuntime> {
     try {
       const mod = (await dynamicImport(pathToFileUrl(entry))) as Record<string, unknown>;
       const plugin = normalizeInject(mod);
-      const config = typeof plugin.Config === 'function'
+      let config = typeof plugin.Config === 'function'
         ? (plugin.Config as (c: unknown) => unknown)({})
         : undefined;
+      // TRACE：装载时注入内置 TOKEN + 上报目标 + 用户开关（见 buildTraceConfig）。
+      if (name === 'trace' && config && typeof config === 'object') {
+        config = buildTraceConfig(config as Record<string, unknown>) as never;
+      }
       // 插件产物经动态 import 载入，形状由运行时保证；此处做一次收窄以通过 strict 检查。
       type CordisPlugin = Parameters<Context['plugin']>[0];
       const fiber = ctx.plugin(plugin as unknown as CordisPlugin, config as never);

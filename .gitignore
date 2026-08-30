@@ -26,3 +26,5 @@ references/
 .dsh-home/profiles/*/node_modules/
 release-v091/
 build-log.txt
+apps/desktop/build/trace-token.local.txt
+apps/desktop/build/trace-key.local

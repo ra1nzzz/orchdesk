@@ -76,6 +76,21 @@ const cred = require('./dist/credentials.js');
     assert.strictEqual(cred.decryptSecret(a), 'determinism', '清缓存后仍应能解密（派生确定性）');
   });
 
+  console.log('== A2. 显式密钥版（TRACE TOKEN 加密内置）==');
+  const KEY_A = crypto.randomBytes(32).toString('hex');
+  const KEY_B = crypto.randomBytes(32).toString('hex');
+  await check('encryptWithKey/decryptWithKey 往返一致（含中文）', () => {
+    const enc = cred.encryptWithKey('ghp_trace_令牌123', KEY_A);
+    assert.ok(cred.isV1Cipher(enc), '应为 v1 格式');
+    assert.strictEqual(cred.decryptWithKey(enc, KEY_A), 'ghp_trace_令牌123', '同密钥应可解密');
+  });
+  await check('换密钥 / 篡改 → 解密返回空串（不抛错不回落明文）', () => {
+    const enc = cred.encryptWithKey('secret', KEY_A);
+    assert.strictEqual(cred.decryptWithKey(enc, KEY_B), '', '不同密钥应解密失败');
+    assert.strictEqual(cred.decryptWithKey(enc.slice(0, -4) + 'AAAA', KEY_A), '', '密文篡改应解密失败（GCM 认证）');
+    assert.strictEqual(cred.decryptWithKey(undefined, KEY_A), '', 'undefined 应返回空串');
+  });
+
   console.log('== B. 主进程凭据读写（stub electron 驱动真实 handler）==');
 
   // 用独立子进程跑，避免 stub 污染本进程

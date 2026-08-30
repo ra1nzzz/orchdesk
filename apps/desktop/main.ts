@@ -1121,6 +1121,37 @@ ipcMain.handle('orchdesk:authz-get-audit', async () => {
   if (!authzService) return [];
   try { return authzService.getAuditLog(); } catch { return []; }
 });
+
+// ---- TRACE 上报开关（TOKEN 加密内置于包内；用户仅可开关，默认开）----
+// enabled=false → dsh-runtime 装载 trace 时 repoUrl 置空 → 只缓冲不上传（观测照旧）。
+// 切换写 <dataDir>/trace.json，**重启生效**（config 在插件装载时注入）。
+ipcMain.handle('orchdesk:trace-status', () => {
+  const dataDir = process.env.ORCHDESK_DATA_DIR || process.env.ORCHDESK_HOME || '';
+  let enabled = true;
+  if (dataDir) {
+    try {
+      const f = JSON.parse(fs.readFileSync(path.join(dataDir, 'trace.json'), 'utf-8')) as { enabled?: boolean };
+      if (typeof f.enabled === 'boolean') enabled = f.enabled;
+    } catch { /* 缺省开 */ }
+  }
+  let builtin = false;
+  try {
+    fs.accessSync(path.join(__dirname, '..', 'build', 'trace-token.enc.json'));
+    builtin = true;
+  } catch { /* 未内置（dev 或未跑 prepare-trace）→ 只缓冲 */ }
+  return { enabled, builtin };
+});
+ipcMain.handle('orchdesk:trace-set-enabled', (_e, enabled: boolean) => {
+  const dataDir = process.env.ORCHDESK_DATA_DIR || process.env.ORCHDESK_HOME || '';
+  if (!dataDir) return { ok: false, reason: '数据目录未就绪' };
+  try {
+    fs.writeFileSync(path.join(dataDir, 'trace.json'), JSON.stringify({ enabled: !!enabled }, null, 2), 'utf-8');
+    return { ok: true, requiresRestart: true };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
+
 ipcMain.on('orchdesk:authz-submit-decision', (_e, id: string, outcome: string) => {
   const pending = pendingApprovals.get(id);
   if (!pending) return;

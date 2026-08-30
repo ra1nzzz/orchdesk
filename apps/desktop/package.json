@@ -48,6 +48,8 @@
       "dist/**/*",
       "renderer/**/*",
       "vendor/**/*",
+      "build/trace-token.enc.json",
+      "build/trace-key.local",
       "package.json"
     ],
     "extraFiles": [
