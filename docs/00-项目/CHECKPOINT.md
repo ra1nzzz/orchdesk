@@ -9,14 +9,14 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.10.0`（已打 tag `v0.10.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.9.1` 为上一 Release |
+| **当前版本** | `0.10.1`（已打 tag `v0.10.1`，GitHub Release 由 CI 生成——本次 tag 同时验证修复后的 workflow） | SemVer，pre-1.0 阶段；`0.10.0` 为上一 Release |
 | **最新 Commit** | `8e722e1` | chore: release v0.10.0（feat: TRACE 上传桥，TOKEN 加密内置 + 设置页开关） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
-| **验证套件** | 329/329 PASS | `npm run verify`（plugins 51 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 34 / dsh-runtime 15 / credentials 17 / data-dir 36 / data-port 10 / e2e 29） |
+| **验证套件** | 333/333 PASS | `npm run verify`（plugins 53 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 34 / dsh-runtime 15 / credentials 17 / data-dir 36 / data-port 10 / e2e 29） |
 
 > **v0.4.1 关键修复**：StepFun / 部分 OpenAI 兼容网关在 chat 模式下带 `tools` 参数时返回 HTTP 200、content/toolCalls 全空（软拒绝），导致「发消息能响应，要求执行任务则报错」。现 `callOpenAICompatible` 识别软拒绝并逐级降级到不带 tools，成功后把 `provider.id|model` 记入进程级记忆，后续会话直接走 `<tool:>` 文本兜底解析。新增 model-loop M 组 3 项回归测试。
 
@@ -45,6 +45,7 @@
 | **加权合计** | | **≈ 88%** | 剩余 ≈ 12% 全部为**用户环境运行期验证**：GUI 实机冒烟 / 真实模型闭环 / TRACE 上传 / 签名——代码侧无已知死挂点 |
 
 > **v0.10.0 交付（第六个死挂点：TRACE 上传不可达）**：上传端（Issues API + NDJSON + 白名单脱敏）与观测端（v0.6.0）早已完整，但 `configure`/`flush` 是插件模块级导出而非 provide 服务——主进程无桥，repoUrl/TOKEN 无处设置，记录只积压缓冲。修复（用户裁决：**保持 Issues 目标不变**，曾短暂考虑 Contents API 写 Trace/ 子目录，被正确否决——Issues 才是 append-only 审计正解）：① TOKEN **加密内置**——`scripts/prepare-trace.cjs` 打包前用随包密钥 AES-256-GCM 加密 `build/trace-token.local.txt` → `trace-token.enc.json`，dsh-runtime 装载 trace 时解密注入 config（诚实边界：同包密钥=混淆级，TOKEN 必须用 fine-grained 仅 issues:write）；② 用户开关——设置页「TRACE 遥测」开关（默认开），关闭 = repoUrl 置空 → 只缓冲不上传，重启生效；③ verify 329/329（新原语 encryptWithKey/decryptWithKey ×2 + buildTraceConfig 注入 ×2）。
+> **v0.10.1 交付（第七个死挂点：记忆持久化 + 记忆主语颠倒）**：① **记忆持久化**——memory 插件的 `serializeDomains`/`dataRoot` 自 v0.6.0 起无 host 接管，记忆仅进程内存、重启即清零（用户实测「记了称呼、重启忘光」的结构性根源之一）。修复：插件新增 `hydrateDomains`（非法条目过滤：空 text/缺 vector/非数组域静默丢弃）；dsh-runtime 装载后从 `dataDir()/memory/{domain}.json` 回灌 + 20s 轮询快照去重落盘 + `stopRuntime` 退出冲刷。② **记忆主语约定**——用户说「你是小星，我是梧哥」被存成「用户称呼：小星」，回放时角色颠倒。修复：`memory_save` 工具描述与系统规则强制第三人称客观存储（「用户」=人类，「助手」=OrchDesk，禁「我/你/对方」），注入头加主语图例。③ **buildTraceConfig 密闭性**——打包含真 TOKEN 后 verify 的「无内置文件」分支失真，加 `ORCHDESK_TRACE_BUILD_DIR` 测试 seam。④ **CI release workflow 修复**——自 v0.8.0 起连续失败（cache: npm 找不到 lock 秒挂 / 缺 vendor-dsh / BUG-W04 conventional-changelog / electron-builder 认 GH_TOKEN 不认 GITHUB_TOKEN），改为 pnpm 全链路 + 插件 lib 自建（lib/ 被 gitignore）+ changelog.mjs + GH_TOKEN。verify 333/333。
 
 > 详细：差距盘点（30%）见 [PRD差距盘点-2026-08-29](../99-归档/PRD差距盘点-2026-08-29.md)；
 > 补齐复盘（75%）见 [PRD差距补齐-2026-08-29](../99-归档/PRD差距补齐-2026-08-29.md)。
@@ -188,7 +189,7 @@ electron-updater → 请求 GitHub Releases /latest.yml
 - [x] P1-4 沙箱子进程隔离 + 清理 6 个 mock 常量
 - [x] P2-5 插件测试 2/9 → 9/9（`scripts/verify-plugins.mjs` 51 项）+ 修复 3 真 bug
 - [x] 6 处渲染层缺陷修复（clone→deepClone / 插件开关 / model-test / tool-step / TRACE key / 项目落盘）
-- [x] 验证体系扩至 158 项全绿（新增 dsh-runtime 17 / credentials 19 / verify-plugins 51）
+- [x] 验证体系扩至 158 项全绿（新增 dsh-runtime 19 / credentials 19 / verify-plugins 51）
 
 **第二轮补齐（2026-08-29 晚，yt-dev-review 三方审阅 + 交叉修复流程）**：
 

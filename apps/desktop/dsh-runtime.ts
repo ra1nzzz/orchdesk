@@ -22,6 +22,7 @@ import * as fs from 'node:fs';
 import type { Context } from '@deepseek-ai/cordis';
 import { hostServices, getHostServices, type HostServices } from './host-services';
 import { decryptWithKey } from './credentials';
+import { getDataDir } from './data-dir';
 
 /** TRACE 上报目标（OrchDesk 公开仓库；上传端 = GitHub Issues，NDJSON 批量）。 */
 export const TRACE_REPO_URL = 'https://github.com/ra1nzzz/orchdesk';
@@ -54,7 +55,8 @@ export function buildTraceConfig(baseConfig: Record<string, unknown>): Record<st
   }
 
   try {
-    const buildDir = path.join(__dirname, '..', 'build');
+    // ORCHDESK_TRACE_BUILD_DIR：密闭测试 seam（真实产物在 build/ 会解出真 TOKEN，测试不可依赖）。
+    const buildDir = process.env.ORCHDESK_TRACE_BUILD_DIR || path.join(__dirname, '..', 'build');
     const encJson = JSON.parse(fs.readFileSync(path.join(buildDir, 'trace-token.enc.json'), 'utf-8')) as { enc?: string };
     const keyHex = fs.readFileSync(path.join(buildDir, 'trace-key.local'), 'utf-8').trim();
     cfg.token = decryptWithKey(encJson.enc, keyHex);
@@ -211,6 +213,13 @@ export async function startRuntime(): Promise<OrchDeskRuntime> {
   const activeCount = plugins.filter((p) => p.active).length;
   console.log(`[orchdesk] dsh 运行时就绪：插件 ${activeCount}/${PLUGIN_NAMES.length} 已激活`);
 
+  // 记忆持久化：装载后回灌 + 轮询落盘（第七死挂点）。
+  const memApi = memoryApiOf(ctx);
+  if (memApi) {
+    hydrateMemory(memApi);
+    scheduleMemoryPersist(memApi);
+  }
+
   runtime = { ctx, host: getHostServices(), plugins, activeCount };
   return runtime;
 }
@@ -218,6 +227,79 @@ export async function startRuntime(): Promise<OrchDeskRuntime> {
 /** 取已启动的运行时（未启动时返回 null）。 */
 export function getRuntime(): OrchDeskRuntime | null {
   return runtime;
+}
+
+// ---- 记忆持久化（第七死挂点修复：此前 serializeDomains/dataRoot 无 host 接管，记忆仅进程内存，重启即清零）----
+
+/** memory 插件 provide 的服务面（宿主持久化只依赖这两个方法）。 */
+export interface MemoryPersistApi {
+  serializeDomains(): Record<string, unknown[]>;
+  hydrateDomains(snapshot: Record<string, unknown[]>): void;
+}
+
+const MEMORY_DOMAINS = ['global', 'project', 'director', 'worker'] as const;
+let memorySaveTimer: NodeJS.Timeout | null = null;
+let lastMemorySnapshot = '';
+
+function memoryDir(): string {
+  return path.join(getDataDir(), 'memory');
+}
+
+function memoryApiOf(ctx: Context): MemoryPersistApi | null {
+  const v = (ctx as unknown as Record<string, unknown>)['memory'];
+  if (!v || typeof v !== 'object') return null;
+  const api = v as MemoryPersistApi;
+  return typeof api.serializeDomains === 'function' && typeof api.hydrateDomains === 'function' ? api : null;
+}
+
+/** 立即落盘（快照级去重：无变化不写盘）。四域各一文件，物理隔离。 */
+export function persistMemoryNow(api: MemoryPersistApi): void {
+  try {
+    const domains = api.serializeDomains();
+    const snap = JSON.stringify(domains);
+    if (snap === lastMemorySnapshot) return;
+    const dir = memoryDir();
+    fs.mkdirSync(dir, { recursive: true });
+    for (const d of MEMORY_DOMAINS) {
+      fs.writeFileSync(path.join(dir, `${d}.json`), JSON.stringify(domains[d] ?? []), 'utf-8');
+    }
+    lastMemorySnapshot = snap;
+  } catch (err) {
+    // 持久化失败不阻断运行（记忆退化为进程内，与修复前行为一致）。
+    console.warn('[orchdesk] 记忆持久化失败:', (err as Error).message);
+  }
+}
+
+/** 启动回灌：从 dataDir()/memory/{domain}.json 恢复四域；坏文件/缺文件静默跳过对应域。 */
+export function hydrateMemory(api: MemoryPersistApi): boolean {
+  try {
+    const dir = memoryDir();
+    const snapshot: Record<string, unknown[]> = {};
+    let restored = 0;
+    for (const d of MEMORY_DOMAINS) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(dir, `${d}.json`), 'utf-8'));
+        snapshot[d] = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        snapshot[d] = [];
+      }
+      restored += snapshot[d].length;
+    }
+    api.hydrateDomains(snapshot);
+    lastMemorySnapshot = JSON.stringify(api.serializeDomains());
+    if (restored > 0) console.log(`[orchdesk] 记忆已回灌：${restored} 条（${memoryDir()}）`);
+    return restored > 0;
+  } catch (err) {
+    console.warn('[orchdesk] 记忆回灌失败:', (err as Error).message);
+    return false;
+  }
+}
+
+/** 变更轮询落盘（20s 去抖；写前比对快照，无变化零 IO）。 */
+function scheduleMemoryPersist(api: MemoryPersistApi): void {
+  if (memorySaveTimer) clearInterval(memorySaveTimer);
+  memorySaveTimer = setInterval(() => persistMemoryNow(api), 20_000);
+  memorySaveTimer.unref?.();
 }
 
 /** 单个插件的当前状态（供 UI 展示，不伪造）。 */
@@ -351,6 +433,13 @@ export async function firePreStep(payload: {
 /** 关闭运行时（应用退出前调用，触发全部插件的逆效应）。 */
 export async function stopRuntime(): Promise<void> {
   if (!runtime) return;
+  // 退出前冲刷记忆（轮询间隔内的最后变更不丢）。
+  if (memorySaveTimer) {
+    clearInterval(memorySaveTimer);
+    memorySaveTimer = null;
+  }
+  const memApi = memoryApiOf(runtime.ctx);
+  if (memApi) persistMemoryNow(memApi);
   // Context 类型未声明 dispose；实际由 root fiber 提供（逆效应入口）。
   const disposable = runtime.ctx as unknown as { fiber?: { dispose?: () => Promise<void> | void } };
   try {

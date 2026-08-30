@@ -26,46 +26,78 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 项目用 pnpm（pnpm-lock.yaml + packageManager 字段）。
+      # 历史 BUG：cache: npm 找不到 package-lock.json → CI 自 v0.8.0 起秒挂。
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        # 版本读根 package.json 的 packageManager 字段，无需指定
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          cache: 'pnpm'
 
       - name: Install dependencies
         shell: bash
+        run: pnpm install --frozen-lockfile
+
+      # lib/ 被 gitignore，CI 必须自建 9 个插件产物（vendor-dsh 只搬运不编译）。
+      - name: Build plugin libraries
+        shell: bash
         run: |
-          cd apps/desktop
-          npm install
+          for d in packages/plugin/*/; do
+            echo "== $d"
+            (cd "$d" && npx tsc -p tsconfig.json)
+          done
 
       - name: Extract version from tag
         id: version
         shell: bash
         run: |
-          TAG=${GITHUB_REF_NAME}
+          TAG=${GITHUB_REF_NAME#refs/tags/}
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            TAG="v$(node -e "console.log(require('./apps/desktop/package.json').version)")"
+          fi
           VERSION=${TAG#v}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Bump version in package.json
+        shell: bash
         run: |
           cd apps/desktop
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version=process.argv[1];fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')" "${{ steps.version.outputs.version }}"
 
+      # BUG-W04：conventional-changelog 链路坏（git-raw-commits 无 -hash- 分隔符 → 全历史被吞）。
+      # 用零依赖自研脚本；--from 取 HEAD 前最近 tag（HEAD 本身就是本次 tag，默认取会得到空区间）。
       - name: Update CHANGELOG.md
         shell: bash
         run: |
-          cd apps/desktop
-          npx conventional-changelog -p angular -i CHANGELOG.md -s || true
+          FROM_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$FROM_TAG" ]; then
+            node scripts/changelog.mjs --from "$FROM_TAG" --version "${{ steps.version.outputs.version }}" --write
+          else
+            echo "（无更早 tag，跳过 changelog 生成）"
+          fi
 
       - name: Build Electron (TypeScript)
         run: |
           cd apps/desktop
           npx tsc -p tsconfig.json
 
+      # 物化 dsh 包 + 插件产物进 apps/desktop（asar 可解析的实路径），必须在 electron-builder 前跑。
+      - name: Vendor dsh runtime & plugins
+        run: |
+          cd apps/desktop
+          node scripts/vendor-dsh.cjs
+
+      # electron-builder 认 GH_TOKEN（不认 GITHUB_TOKEN）。
+      # TRACE TOKEN 不进 CI：无内置文件时应用安全降级为「只缓冲不上传」。
       - name: Package (electron-builder)
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd apps/desktop
           npx electron-builder --win nsis portable --publish always

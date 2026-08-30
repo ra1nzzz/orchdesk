@@ -263,6 +263,25 @@ function tick(n = 3) {
   await check('queryDumps 返回数组', () => {
     assert(Array.isArray(mem.queryDumps()), 'queryDumps 应返回数组');
   });
+  await check('hydrateDomains：合法条目回灌 + 非法条目过滤 + 非法快照域清空', () => {
+    mem.hydrateDomains({
+      global: [
+        { id: 'g1', domain: 'global', text: '用户称呼为梧哥；助手称呼为小星', vector: { a: 1 }, source: { origin: 'test' }, createdAt: 1 },
+        { id: 'bad-empty-text', text: '', vector: {}, source: {} },
+        { id: 'bad-no-vector', text: 'x', source: {} },
+        null,
+      ],
+      project: 'not-an-array',
+    });
+    const g = mem.listDomain('global');
+    assert(g.length === 1, '非法条目应被过滤，实际 ' + g.length);
+    assert(g[0] && g[0].id === 'g1', '应保留合法条目 g1');
+    assert(mem.listDomain('project').length === 0, '非法快照域应清空而非抛错');
+  });
+  await check('hydrate 后回灌条目可被语义召回（持久化闭环前提）', () => {
+    const hits = mem.recall('梧哥 称呼', { domain: 'global', k: 3 });
+    assert(hits.some((h) => h.entry && h.entry.id === 'g1'), '回灌的 global 条目应可召回，实际 ' + JSON.stringify(hits.map((h) => h.entry && h.entry.id)));
+  });
 
   // ---------------- prompt ----------------
   current = 'prompt';

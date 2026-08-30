@@ -159,10 +159,10 @@ export const TOOL_DEFS: ToolDef[] = [
     type: 'function',
     function: {
       name: 'memory_save',
-      description: '把用户告知的长期事实/偏好存入记忆（称呼、习惯、项目约定等），后续对话自动注入',
+      description: '把用户告知的长期事实/偏好存入记忆（称呼、习惯、项目约定等），后续对话自动注入。content 必须用第三人称客观陈述，主语只用「用户」(=人类用户) 和「助手」(=你 OrchDesk)，禁止「我/你/对方」等相对称谓',
       parameters: {
         type: 'object',
-        properties: { content: { type: 'string', description: '要记住的事实，一句话' } },
+        properties: { content: { type: 'string', description: '要记住的事实，一句话；主语用「用户」或「助手」，如「用户称呼为梧哥，助手称呼为小星」' } },
         required: ['content'],
       },
     },
@@ -451,7 +451,11 @@ export function buildSystemPrompt(opts: { cwd?: string; memories?: string[]; pro
     head.push('', `当前工作目录：${opts.cwd}`, 'shell 命令与相对路径以此为基准；操作其他项目前必须先用 set_cwd 切换。');
   }
   if (opts.memories?.length) {
-    head.push('', '用户长期记忆（必须遵守）：', ...opts.memories.map((m) => `- ${m}`));
+    head.push(
+      '',
+      '用户长期记忆（必须遵守；条目中「用户」= 人类用户本人，「助手」= 你 OrchDesk，勿混淆角色）：',
+      ...opts.memories.map((m) => `- ${m}`),
+    );
   }
   if (opts.prompts?.length) {
     head.push('', '生效提示词（用户在提示词库配置，优先级高于默认行为）：', ...opts.prompts.map((p) => `- ${p}`));
@@ -472,5 +476,7 @@ export function buildSystemPrompt(opts: { cwd?: string; memories?: string[]; pro
     '4. 不需要工具时直接正常回答，不要输出任何工具标签。',
     '5. 不要编造工具执行结果。',
     '6. 用户告知长期有效的事实或偏好（如称呼、约定、项目位置）时，必须调用 memory_save 保存，不要只口头答应。',
+    '   memory_save 的 content 必须用第三人称客观陈述：「用户」专指人类用户，「助手」专指你自己（OrchDesk）。',
+    '   例：用户说「你是小星，我是梧哥」→ 保存「用户称呼为梧哥；助手称呼为小星」。禁止保存「我/你/对方」等相对称谓（回放时会角色颠倒）。',
   ].join('\n');
 }

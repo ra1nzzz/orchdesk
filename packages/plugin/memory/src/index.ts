@@ -202,6 +202,8 @@ export interface MemoryService {
   setSummarize(fn: (messages: UserMessage[]) => Promise<string>): void;
   /** 序列化四域快照（host 持久化为四个独立文件，实现物理隔离）。 */
   serializeDomains(): Record<MemoryDomain, MemoryEntry[]>;
+  /** 恢复四域快照（host 启动时从磁盘回灌；非法条目静默丢弃）。 */
+  hydrateDomains(snapshot: Record<MemoryDomain, MemoryEntry[]>): void;
 }
 
 export function apply(ctx: Context, config: MemoryConfig): void {
@@ -341,6 +343,17 @@ export function apply(ctx: Context, config: MemoryConfig): void {
       director: [...stores.director.values()],
       worker: [...stores.worker.values()],
     }),
+    hydrateDomains: (snapshot) => {
+      for (const d of DOMAINS) {
+        stores[d].clear();
+        const entries = Array.isArray(snapshot?.[d]) ? snapshot[d] : [];
+        for (const e of entries) {
+          if (!e || typeof e.id !== 'string' || typeof e.text !== 'string' || !e.text) continue;
+          if (typeof e.vector !== 'object' || e.vector === null) continue;
+          stores[d].set(e.id, { ...e, domain: d });
+        }
+      }
+    },
   };
 
   ctx.effect(() => {

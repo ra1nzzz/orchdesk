@@ -205,10 +205,16 @@ const { check, summary } = createChecker();
   const rtMod = require('./dist/dsh-runtime.js'); // 同缓存单例；buildTraceConfig 为纯函数
   await check('buildTraceConfig 缺省：目标为 OrchDesk 公开仓库、脱敏开、无内置文件时 token 为空', () => {
     delete process.env.ORCHDESK_DATA_DIR;
-    const cfg = rtMod.buildTraceConfig({ repoUrl: '', token: 'x', maskEnabled: false, batchSize: 20, cacheDir: 'c' });
-    assert.strictEqual(cfg.repoUrl, rtMod.TRACE_REPO_URL, '实际: ' + cfg.repoUrl);
-    assert.strictEqual(cfg.maskEnabled, true, '脱敏应默认开');
-    assert.strictEqual(cfg.token, '', 'dev 无内置文件应为空串（只缓冲不上传）');
+    // 密闭：真实 build/ 可能已内置 TOKEN（打包含凭据），指向空目录保证「未内置」分支可测。
+    process.env.ORCHDESK_TRACE_BUILD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-build-empty-'));
+    try {
+      const cfg = rtMod.buildTraceConfig({ repoUrl: '', token: 'x', maskEnabled: false, batchSize: 20, cacheDir: 'c' });
+      assert.strictEqual(cfg.repoUrl, rtMod.TRACE_REPO_URL, '实际: ' + cfg.repoUrl);
+      assert.strictEqual(cfg.maskEnabled, true, '脱敏应默认开');
+      assert.strictEqual(cfg.token, '', 'dev 无内置文件应为空串（只缓冲不上传）');
+    } finally {
+      delete process.env.ORCHDESK_TRACE_BUILD_DIR;
+    }
   });
   await check('buildTraceConfig enabled=false → repoUrl 置空（用户开关关闭 = 只缓冲不上传）', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-off-'));
@@ -220,6 +226,58 @@ const { check, summary } = createChecker();
     } finally {
       delete process.env.ORCHDESK_DATA_DIR;
     }
+  });
+
+  // -------------------------------------------------------------------------
+  console.log('== 记忆持久化接线（回灌 + 落盘 + 去重）==');
+  const ddMod = require('./dist/data-dir.js');
+  await check('persistMemoryNow：四域落盘为独立文件，快照去重（无变化不重写）', () => {
+    const entry = { id: 'g1', domain: 'global', text: '用户称呼为梧哥', vector: { u: 1 }, source: { origin: 'test' }, createdAt: 1 };
+    let snap = { global: [entry], project: [], director: [], worker: [] };
+    let writes = 0;
+    const origWrite = fs.writeFileSync;
+    fs.writeFileSync = (...a) => { writes++; return origWrite(...a); };
+    try {
+      const api = { serializeDomains: () => snap, hydrateDomains: () => {} };
+      rtMod.persistMemoryNow(api);
+      const dir = path.join(ddMod.getDataDir(), 'memory');
+      const g = JSON.parse(fs.readFileSync(path.join(dir, 'global.json'), 'utf-8'));
+      assert.strictEqual(g.length, 1, 'global.json 应有 1 条');
+      assert.strictEqual(g[0].id, 'g1');
+      for (const d of ['project', 'director', 'worker']) {
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dir, d + '.json'), 'utf-8')), [], d + '.json 应为空数组');
+      }
+      const writesAfterFirst = writes;
+      rtMod.persistMemoryNow(api); // 快照未变 → 零写盘
+      assert.strictEqual(writes, writesAfterFirst, '快照未变时不应产生新写入');
+      snap = { global: [entry, { ...entry, id: 'g2' }], project: [], director: [], worker: [] };
+      rtMod.persistMemoryNow(api);
+      assert.strictEqual(writes, writesAfterFirst + 4, '快照变化后应重写四个文件');
+    } finally {
+      fs.writeFileSync = origWrite;
+    }
+  });
+  await check('hydrateMemory：磁盘快照回灌 + 坏文件跳过 + 返回是否恢复', () => {
+    const dir = path.join(ddMod.getDataDir(), 'memory');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'global.json'), JSON.stringify([{ id: 'r1', text: '用户项目在 D:/Code/OrchDesk', vector: { d: 1 }, source: {}, createdAt: 2 }]));
+    fs.writeFileSync(path.join(dir, 'project.json'), '{broken json');
+    fs.rmSync(path.join(dir, 'director.json'), { force: true });
+    let hydrated = null;
+    const api = {
+      serializeDomains: () => hydrated || { global: [], project: [], director: [], worker: [] },
+      hydrateDomains: (s) => { hydrated = s; },
+    };
+    const restored = rtMod.hydrateMemory(api);
+    assert.strictEqual(restored, true, '存在合法条目时应返回 true');
+    assert.strictEqual(hydrated.global.length, 1, 'global 应回灌 1 条');
+    assert.deepStrictEqual(hydrated.project, [], '坏文件域应跳过为空');
+    assert.deepStrictEqual(hydrated.director, [], '缺失文件域应为空');
+    // 全空盘 → false：先清空盘上快照（上一轮写入的 r1 仍在盘上）。
+    for (const d of ['global', 'project', 'director', 'worker']) {
+      fs.writeFileSync(path.join(dir, d + '.json'), '[]');
+    }
+    assert.strictEqual(rtMod.hydrateMemory({ serializeDomains: () => ({ global: [], project: [], director: [], worker: [] }), hydrateDomains: () => {} }), false, '全部为空时应返回 false');
   });
 
   // -------------------------------------------------------------------------

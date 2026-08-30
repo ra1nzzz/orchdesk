@@ -24,7 +24,8 @@ references/
 # 开发期 profile 的 node_modules（含指向 packages/bundle/desktop 的软链）
 .dsh-home/profiles/node_modules/
 .dsh-home/profiles/*/node_modules/
-release-v091/
+release-v*/
 build-log.txt
 apps/desktop/build/trace-token.local.txt
 apps/desktop/build/trace-key.local
+apps/desktop/build/trace-token.enc.json
