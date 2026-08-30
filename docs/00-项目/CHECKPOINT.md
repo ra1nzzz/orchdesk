@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.8.0`（已打 tag `v0.8.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.7.0` 为上一 Release |
-| **最新 Commit** | `<tag 后回填>` | feat: 提示词库接入对话流 + 语义召回 + file_write 授权门（死挂点清零） |
+| **最新 Commit** | `093282f` | chore: release v0.8.0（feat: 提示词库接入对话流 + 语义召回 + file_write 授权门） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
