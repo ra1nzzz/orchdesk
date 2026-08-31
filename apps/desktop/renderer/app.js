@@ -304,6 +304,9 @@
       entries: [], stats: { total: 0, promoted: 0, rejected: 0, byEdge: [] },
       total: 0, max: 200, ok: 'all', loaded: false,
     },
+    // 记忆摘要方式（FR-10）：llm = 模型摘要，extractive = 抽取式兜底。
+    // 必须显式展示 —— 否则「自动转储其实一直在兜底」这种降级无从发现。
+    memorySummarize: { mode: 'extractive', provider: '', model: '', seam: false, loaded: false },
   };
 
   const $ = (s) => document.querySelector(s);
@@ -475,6 +478,29 @@
       if (state.page === 'settings') render();
     });
     refreshMemoryPromotions();
+  }
+
+  /** 重拉当前摘要方式（LLM / 抽取式兜底）。桥不可用时保持 loaded=false。 */
+  function refreshMemorySummarize() {
+    if (typeof bridge.getMemorySummarizeStatus !== 'function') {
+      state.memorySummarize = { ...state.memorySummarize, loaded: false };
+      if (state.page === 'settings') render();
+      return;
+    }
+    bridge.getMemorySummarizeStatus().then((r) => {
+      if (!r || typeof r !== 'object') return;
+      state.memorySummarize = {
+        mode: r.mode === 'llm' ? 'llm' : 'extractive',
+        provider: String(r.provider || ''),
+        model: String(r.model || ''),
+        seam: !!r.seam,
+        loaded: true,
+      };
+      if (state.page === 'settings') render();
+    }).catch(() => {
+      state.memorySummarize = { ...state.memorySummarize, loaded: false };
+      if (state.page === 'settings') render();
+    });
   }
 
   function refreshMemoryPromotions() {
@@ -1379,6 +1405,16 @@
         <div class="sec-title" id="settings-section-memory"><span class="ico">${ic('archive', 14)}</span>分层记忆（PRD FR-10）</div>
         <div class="card">
           <div class="faint" style="margin-bottom:8px">四域物理隔离，各落独立文件。Worker 出域（→ 总监 / 项目 / 全局）一律经 Director 过滤，<b>fail-closed</b>：过滤器缺失、超时、抛错都按拒绝处理。</div>
+          <div class="row" style="gap:6px;margin-bottom:8px;align-items:center">
+            <span class="faint" style="font-size:11.5px">转储摘要</span>
+            ${!state.memorySummarize.loaded
+    // 桥断了就**不要**沿用上一秒的状态：那会把「已断开」显示成「正在用某模型」，
+    // 与记忆列表同类的毛病（陈旧状态冒充现状）。loaded=false 一律报未接入。
+    ? '<span class="badge warn">摘要状态未接入</span><span class="faint" style="font-size:11px">主进程桥不可用</span>'
+    : state.memorySummarize.mode === 'llm'
+      ? `<span class="badge ok">模型摘要</span><span class="faint mono" style="font-size:11px">${esc(state.memorySummarize.provider || '模型')} / ${esc(state.memorySummarize.model)}</span>`
+      : '<span class="badge warn">抽取式兜底</span><span class="faint" style="font-size:11px">未配置模型：自动转储只保留首尾各 3 条原文</span>'}
+          </div>
           <div class="row" style="margin-bottom:6px;gap:6px">
             ${['worker', 'director', 'project', 'global'].map((d) => {
     const n = state.memory.stats && typeof state.memory.stats[d] === 'number' ? state.memory.stats[d] : null;
@@ -2083,7 +2119,7 @@
         state.page = id;
         // 进入设置页时重拉记忆域与沙箱日志：SubAgent 执行完会随时往 worker 域落结论，
         // 只靠启动时拉一次，用户看到的就是「空的」，会误判成功能没生效。
-        if (id === 'settings') { refreshMemoryDomain(); refreshSandboxLog(); }
+        if (id === 'settings') { refreshMemoryDomain(); refreshMemorySummarize(); refreshSandboxLog(); }
         render();
         break;
       }

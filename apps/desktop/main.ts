@@ -39,6 +39,13 @@ import {
   type PromotionEntry,
   type PromotionLogQuery,
 } from './memory-promotion';
+import {
+  buildSummarizeMessages,
+  clampSummary,
+  extractSummarizeText,
+  withTimeout,
+  SUMMARIZE_TIMEOUT_MS,
+} from './memory-summarize';
 import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
 import { initLogger, mirrorConsole, log, logModel, logFilePath } from './logger';
 import {
@@ -1548,6 +1555,34 @@ async function bootRuntime(): Promise<void> {
       return { text: reply.content };
     });
     console.log('[orchdesk] SubAgent 运行器已接入');
+
+    // 3) FR-10 记忆摘要 seam：自动转储走真实 LLM 摘要。
+    //    第十五个死挂点：插件的 setSummarize 实现完整，但全项目零调用方 ——
+    //    上下文达 80% 触发的自动转储一直走「首尾各 3 条截断 200 字」的抽取式
+    //    兜底，PRD 要求的「LLM 摘要 → 语义分块 → 向量编码」只完成了后两步。
+    //    失败语义：模型未配置 / 超时 / 报错一律**抛错**，由插件侧回落抽取式
+    //    （摘要是增强不是必需，绝不能让整批转储蒸发）。
+    const memoryApi = getService<MemoryServiceLike>('memory');
+    if (memoryApi?.setSummarize) {
+      memoryApi.setSummarize(async (messages) => {
+        const cfg = loadModelConfig();
+        const provider = cfg.providers[0];
+        // 没配模型就直接抛 —— 让插件走兜底，而不是在这塞一句「（未配置模型）」
+        // 当记忆存进去（那会污染语料，且召回出来是噪声）。
+        if (!provider) throw new Error('no-provider');
+        const model = (provider.models || [])[0] || cfg.defaultModel || 'qwen3:14b';
+        const texts = (messages || []).map(extractSummarizeText);
+        const reply = await withTimeout(
+          callModel(provider, model, buildSummarizeMessages(texts) as ApiMessage[]),
+          SUMMARIZE_TIMEOUT_MS,
+        );
+        return clampSummary(reply.content);
+      });
+      memorySummarizeSeam = true;
+      console.log('[orchdesk] 记忆摘要已接入 LLM（FR-10，未配置模型时回落抽取式兜底）');
+    } else {
+      console.warn('[orchdesk] memory 服务不可用，自动转储将全部走抽取式兜底');
+    }
   } catch (err) {
     console.error('[orchdesk] dsh 运行时启动失败，插件能力不可用:', (err as Error).message);
   }
@@ -1747,10 +1782,35 @@ interface MemoryServiceLike {
    * `director-rejected:<原因>` / `brain-filter-unavailable` / `entry-not-found`。
    */
   promote?(id: string, from: string, to: string): Promise<{ ok: boolean; reason: string }>;
+  /** 注入 LLM 摘要实现（FR-10 seam；未注入时插件走抽取式兜底）。 */
+  setSummarize?(fn: (messages: unknown[]) => Promise<string>): void;
 }
+/** FR-10：摘要 seam 是否已由宿主注入（设置页据此显示当前摘要方式）。 */
+let memorySummarizeSeam = false;
+
 ipcMain.handle('orchdesk:memory-stats', () => {
   const svc = getService<MemoryServiceLike>('memory');
   return svc ? svc.getStats() : null;
+});
+/**
+ * 当前摘要方式（可观测性）：seam 注入了 + 配置了模型才走 LLM，
+ * 否则自动转储一律走抽取式兜底 —— 这个值就是判断依据，避免「以为在用
+ * LLM 摘要，其实一直在兜底」这种无从发现的降级。
+ */
+ipcMain.handle('orchdesk:memory-summarize-status', () => {
+  let providerName = '';
+  let model = '';
+  try {
+    const cfg = loadModelConfig();
+    const p = cfg.providers[0];
+    providerName = p?.name ? String(p.name) : '';
+    // 没有提供商就**不要**拿 cfg.defaultModel 顶上（默认是 'qwen3:14b'）——
+    // 那会让「一个模型都没配」显示成「正在用 qwen3:14b 做 LLM 摘要」，
+    // 恰恰是这个功能最需要避免的假象（用 mock 网关跑真链路时抓到的）。
+    model = p ? String((p.models || [])[0] || cfg.defaultModel || '') : '';
+  } catch { /* 配置读取失败按「未配置」处理，不阻断设置页渲染 */ }
+  const ready = memorySummarizeSeam && !!model;
+  return { seam: memorySummarizeSeam, provider: providerName, model, mode: ready ? 'llm' : 'extractive' };
 });
 ipcMain.handle('orchdesk:memory-recall', async (_e, query: string, opts: unknown) => {
   const svc = getService<MemoryServiceLike>('memory');

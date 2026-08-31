@@ -148,6 +148,10 @@ const orchdesk = {
   clearMemoryPromotions: (): Promise<{ ok: boolean; cleared: number }> =>
     ipcRenderer.invoke('orchdesk:memory-promotions-clear'),
 
+  /** 当前记忆摘要方式（llm = 模型摘要；extractive = 抽取式兜底）。 */
+  getMemorySummarizeStatus: (): Promise<{ seam: boolean; provider: string; model: string; mode: 'llm' | 'extractive' }> =>
+    ipcRenderer.invoke('orchdesk:memory-summarize-status'),
+
   /** 提示词库列表。 */
   listPrompts: (): Promise<Array<Record<string, unknown>>> =>
     ipcRenderer.invoke('orchdesk:prompt-list'),

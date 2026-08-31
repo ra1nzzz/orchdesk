@@ -193,6 +193,12 @@ async function run() {
         window.__promo = [];
         return Promise.resolve({ ok: true, cleared: n });
       },
+      // PRD FR-10 摘要方式（第十五个死挂点）：默认「抽取式兜底」，
+      // 测试可切到 llm 验证 UI 如实反映真实状态（而不是写死"模型摘要"）。
+      getMemorySummarizeStatus: () => Promise.resolve(Object.assign(
+        { seam: true, provider: '', model: '', mode: 'extractive' },
+        window.__summarize || {},
+      )),
       // PRD FR-9：授权白名单（会话 / 永久，可查看可撤销）
       listGrants: () => Promise.resolve(window.__grants || []),
       addGrant: (input) => {
@@ -794,6 +800,45 @@ async function run() {
   await page.waitForTimeout(700);
   await assert(/记忆服务未接入/.test(await page.locator('.mem-list').innerText()),
     '桥不可用时显示「记忆服务未接入（主进程桥不可用）」');
+
+  // ================================================================
+  // 测试组 11b：记忆摘要方式（PRD FR-10，第十五个死挂点）
+  // 自动转储的摘要到底是「模型摘要」还是「抽取式兜底」，必须如实显示 ——
+  // 否则「一直在兜底却以为在用模型」这种降级用户永远发现不了。
+  // ================================================================
+  console.log('📋 测试组 11b：记忆摘要方式');
+
+  // 恢复记忆桥（上一组末尾把它打成 null 了）
+  await page.evaluate(() => { window.__memOff = false; window.orchdesk.listMemoryDomain = () => Promise.resolve([]); });
+  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await page.waitForTimeout(500);
+  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await page.waitForTimeout(800);
+
+  const memCard = page.locator('#settings-section-memory').locator('..');
+  await assert(/抽取式兜底/.test(await memCard.innerText()),
+    '未配置模型时如实显示「抽取式兜底」');
+  await assert(/未配置模型/.test(await memCard.innerText()),
+    '并说明原因（未配置模型：自动转储只保留首尾各 3 条原文）');
+
+  // 切到已配模型：UI 必须跟着变成「模型摘要 + 模型名」
+  await page.evaluate(() => {
+    window.__summarize = { seam: true, provider: '本地 mock 网关', model: 'mock-model', mode: 'llm' };
+  });
+  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await page.waitForTimeout(500);
+  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await page.waitForTimeout(800);
+  await assert(/模型摘要/.test(await memCard.innerText()), '配置模型后显示「模型摘要」');
+  await assert(/mock-model/.test(await memCard.innerText()), '并显示具体模型名');
+
+  // 桥不可用时不能伪装成「抽取式兜底」（那是另一种真实状态）
+  await page.evaluate(() => { delete window.orchdesk.getMemorySummarizeStatus; });
+  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await page.waitForTimeout(500);
+  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await page.waitForTimeout(800);
+  await assert(/摘要状态未接入/.test(await memCard.innerText()), '桥不可用时显示「摘要状态未接入」');
 
   // ================================================================
   // 总结

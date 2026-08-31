@@ -41,9 +41,21 @@ export interface DumpRecord {
   sessionId: string;
   /** 被转储（移出活跃窗口）的消息 id 列表（原消息仍留 SessionEvent，不删除）。 */
   messageRefs: string[];
+  /** 每块的摘要（语义分块的产物；未分块时长度为 1）。 */
+  chunks: string[];
+  /** 全部块摘要的拼接（日志与旧调用方用；等于 chunks.join(' | ')）。 */
   summary: string;
-  /** 生成的伪记忆条目 id（落入 project 域）。 */
+  /** 生成的伪记忆条目 id（每块一条，落入 project 域）。 */
+  memoryIds: string[];
+  /** 首块条目 id（旧字段，保留给只想拿一条的调用方）。 */
   memoryId: string;
+  /**
+   * 摘要方式（可观测性：UI 与排障靠它区分「模型真的摘要了」和「走兜底」）。
+   * - llm：全部块由模型摘要
+   * - extractive：全部块走抽取式兜底（未注入 seam / seam 全失败）
+   * - mixed：部分块模型摘要、部分块兜底（模型中途超时或报错）
+   */
+  mode: 'llm' | 'extractive' | 'mixed';
   createdAt: number;
 }
 
@@ -61,6 +73,8 @@ export interface MemoryConfig {
   maxContextTokens: number;
   /** 转储时保留的最近消息条数（活跃窗口）。 */
   keepRecent: number;
+  /** 语义分块字符预算：每块大致多少字符（块边界只落在消息边界上）。 */
+  chunkChars: number;
   /** 每域最大条目数（环形回收）。 */
   maxEntriesPerDomain: number;
   /** host 持久化根目录（插件产出序列化快照，host 落盘为四独立文件）。 */
@@ -72,6 +86,7 @@ export const Config: z<MemoryConfig> = z.object({
   recallTopK: z.number().default(5),
   maxContextTokens: z.number().default(128000),
   keepRecent: z.number().default(6),
+  chunkChars: z.number().default(1_200),
   maxEntriesPerDomain: z.number().default(200),
   dataRoot: z.string().default('.orchdesk/memory'),
 });
@@ -106,10 +121,26 @@ function buildIdf(docs: string[][]): Record<string, number> {
   return idf;
 }
 
-function tfidf(tokens: string[], idf: Record<string, number>): Record<string, number> {
+/**
+ * 未登录词（OOV：当前语料里零出现）的 IDF。
+ *
+ * 为什么必须有：IDF 表只覆盖**已落盘语料**里的 token，对表中缺失的 token 不能
+ * 当成 0 —— 那等于说「一个新词没有任何区分度」，而事实恰恰相反：在别处都
+ * 没出现过的词**最能代表这条记忆**，应该拿到最高 IDF（df=0 即 log(1+n)+1）。
+ *
+ * 不处理会怎样（实测踩到）：项目第一条记忆写入时语料为空 → IDF 表为空 →
+ * 整条向量全零 → 余弦恒为 0 → 这条记忆**永远召回不到**。分块后更糟，每批
+ * 转储的第一块都踩这个坑。
+ */
+function oovIdf(corpusSize: number): number {
+  return Math.log(1 + Math.max(0, corpusSize)) + 1;
+}
+
+function tfidf(tokens: string[], idf: Record<string, number>, corpusSize = 0): Record<string, number> {
   const t = tf(tokens);
+  const fallback = oovIdf(corpusSize);
   const out: Record<string, number> = {};
-  for (const k of Object.keys(t)) out[k] = (t[k] ?? 0) * (idf[k] ?? 0);
+  for (const k of Object.keys(t)) out[k] = (t[k] ?? 0) * (idf[k] ?? fallback);
   return out;
 }
 
@@ -168,12 +199,57 @@ function estTokens(input: unknown): number {
 }
 
 function summarizeExtractive(messages: UserMessage[]): string {
-  // 抽取式兜底摘要（无 LLM seam 时使用）：保留首尾若干条的关键内容。
-  if (messages.length === 0) return '(empty)';
-  const head = messages.slice(0, 3);
-  const tail = messages.slice(-3);
-  const parts = [...head, ...tail].map((m) => messageText(m).slice(0, 200));
+  return summarizeExtractiveTexts(messages.map(messageText).filter(Boolean));
+}
+
+/** 抽取式兜底摘要（无 LLM seam 时使用）：保留首尾若干条的关键内容。 */
+function summarizeExtractiveTexts(texts: string[]): string {
+  if (texts.length === 0) return '(empty)';
+  const head = texts.slice(0, 3);
+  const tail = texts.slice(-3);
+  const parts = [...head, ...tail].map((t) => t.slice(0, 200));
   return `摘要（抽取式）：${parts.join(' | ')}`;
+}
+
+/**
+ * 语义分块：把待转储的文本切成若干块，**块边界只落在消息边界上**。
+ *
+ * 为什么不分块不行：整批消息一次性摘要成一条记忆，一个向量要同时代表多个主题
+ * （「改了登录逻辑」+「数据库要加索引」+「下周发版」），召回时余弦被稀释，
+ * 每个主题都匹配得不疼不痒。分块后每块一个向量，问「数据库怎么样」能精准命中。
+ *
+ * 为什么按字符预算而不是按条数：消息长度差异极大（一句「好的」vs 一整段代码），
+ * 按条数切会让块大小失衡。字符预算是「大致等长」的近似。
+ *
+ * 为什么不切断单条消息：把一条消息剁成两半，两半各自失去上下文，摘要出来的东西
+ * 谁都看不懂。单条超预算就自己独占一块。
+ */
+export function chunkMessages(texts: readonly string[], budget = 1_200): string[][] {
+  const max = Number(budget);
+  const limit = Number.isFinite(max) && max > 0 ? Math.trunc(max) : 1_200;
+  const chunks: string[][] = [];
+  let cur: string[] = [];
+  let size = 0;
+  for (const raw of texts) {
+    const t = String(raw ?? '').trim();
+    if (!t) continue;
+    // 当前块已非空且再加这条就超预算 → 先收块
+    if (cur.length && size + t.length > limit) {
+      chunks.push(cur);
+      cur = [];
+      size = 0;
+    }
+    cur.push(t);
+    size += t.length;
+    // 单条超预算：独占一块（不切断，见上方注释）
+    if (size >= limit) {
+      chunks.push(cur);
+      cur = [];
+      size = 0;
+    }
+  }
+  if (cur.length) chunks.push(cur);
+  return chunks;
 }
 
 // ---------- 插件主体 ----------
@@ -234,6 +310,13 @@ export function apply(ctx: Context, config: MemoryConfig): void {
     return buildIdf(docs);
   }
 
+  /** 语料规模（四域条目总数）—— OOV 词的 IDF 基准，见 oovIdf 注释。 */
+  function corpusSize(): number {
+    let n = 0;
+    for (const d of DOMAINS) n += stores[d].size;
+    return n;
+  }
+
   async function dump(
     sessionId: string,
     messages: UserMessage[],
@@ -241,27 +324,68 @@ export function apply(ctx: Context, config: MemoryConfig): void {
   ): Promise<DumpRecord> {
     const keep = Math.min(config.keepRecent, messages.length);
     const toDump = messages.slice(0, messages.length - keep);
-    const summary = summarizeFn ? await summarizeFn(toDump) : summarizeExtractive(toDump);
-    const idf = vectorizeCorpus();
-    const vector = tfidf(tokenize(summary), idf);
     const domain: MemoryDomain = opts?.domain ?? 'project';
-    const entryId = nextId('mem');
-    const entry: MemoryEntry = {
-      id: entryId,
-      domain,
-      text: summary,
-      vector,
-      source: { agent: opts?.agent, sessionId, origin: `dump:${sessionId}` },
-      createdAt: Date.now(),
-    };
-    stores[domain].set(entryId, entry);
+
+    // 语义分块：块边界落在消息边界上，每块独立摘要 + 独立向量 + 独立条目。
+    const chunks = chunkMessages(toDump.map(messageText), config.chunkChars);
+    const summaries: string[] = [];
+    let fallbacks = 0;
+    for (const chunk of chunks) {
+      // seam 签名保持 (UserMessage[]) 不变，故把块内文本包成单 content 块。
+      const asMsgs = chunk.map((t) => ({ content: t } as unknown as UserMessage));
+      let done = false;
+      if (summarizeFn) {
+        try {
+          const s = String((await summarizeFn(asMsgs)) ?? '').trim();
+          if (s) {
+            summaries.push(s);
+            done = true;
+          }
+        } catch {
+          // LLM 摘要是**增强**不是必需：模型未配置 / 超时 / 429 / 返回空，
+          // 都不能让这一块（乃至整批）转储化为乌有 —— 自动转储是
+          // fire-and-forget，异常抛出去就没人兜了，宁可退化成抽取式摘要。
+        }
+      }
+      if (!done) {
+        summaries.push(summarizeExtractiveTexts(chunk));
+        fallbacks++;
+      }
+    }
+    if (summaries.length === 0) summaries.push('(empty)');
+    const mode: DumpRecord['mode'] =
+      !summarizeFn || fallbacks === chunks.length ? 'extractive' : fallbacks === 0 ? 'llm' : 'mixed';
+
+    const memoryIds: string[] = [];
+    for (const summary of summaries) {
+      const idf = vectorizeCorpus();
+      const n = corpusSize();
+      const entryId = nextId('mem');
+      const entry: MemoryEntry = {
+        id: entryId,
+        domain,
+        text: summary,
+        // 每块单独算 IDF：先落盘的块会改变语料分布，但那正是「随时间演进的 IDF」，
+        // 与召回时（全语料重新计算）口径不同。差异可接受 —— TF-IDF 本就是近似，
+        // 且召回端每次都按当前全量语料重算，不会累积漂移。
+        vector: tfidf(tokenize(summary), idf, n),
+        source: { agent: opts?.agent, sessionId, origin: `dump:${sessionId}` },
+        createdAt: Date.now(),
+      };
+      stores[domain].set(entryId, entry);
+      memoryIds.push(entryId);
+    }
     prune(domain);
+
     const rec: DumpRecord = {
       id: nextId('dump'),
       sessionId,
       messageRefs: toDump.map((m) => (m as unknown as { id?: string }).id ?? nextId('msg')),
-      summary,
-      memoryId: entryId,
+      chunks: summaries,
+      summary: summaries.join(' | '),
+      memoryIds,
+      memoryId: memoryIds[0] ?? '',
+      mode,
       createdAt: Date.now(),
     };
     dumps.push(rec);
@@ -271,7 +395,7 @@ export function apply(ctx: Context, config: MemoryConfig): void {
 
   function recall(query: string, opts?: { domain?: MemoryDomain; k?: number }): RecallResult[] {
     const idf = vectorizeCorpus();
-    const qv = tfidf(tokenize(query), idf);
+    const qv = tfidf(tokenize(query), idf, corpusSize());
     const scope: MemoryDomain[] = opts?.domain ? [opts.domain] : ['project', 'global'];
     const scored: RecallResult[] = [];
     for (const d of scope) {
@@ -290,7 +414,7 @@ export function apply(ctx: Context, config: MemoryConfig): void {
       id,
       domain,
       text,
-      vector: tfidf(tokenize(text), idf),
+      vector: tfidf(tokenize(text), idf, corpusSize()),
       source,
       createdAt: Date.now(),
     };

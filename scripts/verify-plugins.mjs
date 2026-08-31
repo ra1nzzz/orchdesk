@@ -468,6 +468,186 @@ function tick(n = 3) {
   // 恢复 fail-closed 默认，避免把「放行」状态泄漏给后续套件。
   brainMod.setDirectorFilter(null);
 
+  // ---------------- 语义分块（FR-10「LLM 摘要 → 语义分块 → 向量编码 → 注入」）----------------
+  // 此前 dump 把整批待转储消息一次性摘要成**一条**记忆、一个向量。一个向量要同时
+  // 代表多个主题，召回时余弦被稀释 —— 问「数据库怎么样」命中一条混着「改了登录
+  // 逻辑 + 下周发版」的记忆，哪个主题都匹配得不疼不痒。
+  current = 'memory/分块';
+  console.log('== 语义分块（FR-10 转储链）==');
+
+  const memMod = await import(pathToFileURL(require.resolve('../packages/plugin/memory/lib/index.js')).href);
+  const chunkMessages = memMod.chunkMessages;
+
+  // 注：本套件的 assert 是自定义的两参版（cond, msg），没有 node:assert 的
+  // strictEqual / deepStrictEqual / ok，比对一律用 === 或 JSON.stringify。
+  await check('分块：空输入 / 全空文本 → 空数组（不产生空块）', () => {
+    assert(chunkMessages([]).length === 0, '空输入应得空数组');
+    assert(chunkMessages(['', '   ', null, undefined]).length === 0, '全空文本应得空数组');
+  });
+
+  await check('分块：不超预算时只切一块', () => {
+    const out = chunkMessages(['a', 'b', 'c'], 1000);
+    assert(out.length === 1, '实际 ' + out.length);
+    assert(JSON.stringify(out[0]) === JSON.stringify(['a', 'b', 'c']), '实际 ' + JSON.stringify(out[0]));
+  });
+
+  await check('分块：累积超预算即切块，边界落在消息边界上（不切断消息）', () => {
+    const X = 'x'.repeat(60), Y = 'y'.repeat(60), Z = 'z'.repeat(60);
+    const out = chunkMessages([X, Y, Z], 100);
+    assert(out.length === 3, `60 字符一条、预算 100 应得 3 块，实际 ${out.length}`);
+    for (const c of out) {
+      for (const t of c) {
+        assert(t === X || t === Y || t === Z, '出现被切断的消息，长度 ' + t.length);
+      }
+    }
+  });
+
+  await check('分块：单条超预算独占一块（不把消息剁碎）', () => {
+    const long = 'L'.repeat(500);
+    const out = chunkMessages([long, 'short'], 100);
+    assert(out.length === 2, '实际 ' + out.length);
+    assert(out[0][0] === long, '超长消息应完整保留在第一块');
+    assert(out[1][0] === 'short', '实际 ' + out[1][0]);
+  });
+
+  await check('分块：无文本丢失（展平后与输入一致）', () => {
+    const input = [0, 1, 2, 3, 4].map((i) => String(i).repeat(50));
+    const flat = chunkMessages(input, 120).flat();
+    assert(flat.length === input.length, `条数应一致，实际 ${flat.length} vs ${input.length}`);
+    for (const t of input) assert(flat.indexOf(t) >= 0, '丢失：' + t[0]);
+  });
+
+  await check('分块：budget 非法（0 / 负数 / NaN）回落默认，不产生空转', () => {
+    const two = ['a'.repeat(100), 'b'.repeat(100)];
+    assert(chunkMessages(two, 0).length === 1, 'budget=0 应回落默认');
+    assert(chunkMessages(two, -5).length === 1, 'budget 负数应回落默认');
+    assert(chunkMessages(two, NaN).length === 1, 'budget=NaN 应回落默认');
+  });
+
+  await check('dump：每块产出一条独立记忆（不再是整批一条）', async () => {
+    const before = mem.listDomain('project').length;
+    const msgs = [];
+    for (let i = 0; i < 12; i++) {
+      msgs.push({ content: [{ type: 'text', text: `主题${i}：` + '内容'.repeat(200) }] });
+    }
+    const rec = await mem.dump('s-chunk', msgs, { domain: 'project' });
+    assert(rec.chunks.length >= 3, `12 条长消息（keepRecent=6）应切成多块，实际 ${rec.chunks.length}`);
+    assert(rec.memoryIds.length === rec.chunks.length, '每块应对应一条记忆');
+    const grew = mem.listDomain('project').length - before;
+    assert(grew === rec.memoryIds.length, `域计数应按块数增长，实际 +${grew} vs 块数 ${rec.memoryIds.length}`);
+  });
+
+  await check('dump：summary = 各块拼接，memoryId 指向首块（旧字段仍可用）', async () => {
+    const rec = mem.queryDumps('s-chunk')[0];
+    assert(!!rec, '应能查到刚才的转储记录');
+    assert(rec.summary === rec.chunks.join(' | '), 'summary 应为 chunks 拼接');
+    assert(rec.memoryId === rec.memoryIds[0], 'memoryId 应指向首块');
+  });
+
+  await check('分块召回：问单个主题能命中对应块（不再是稀释后的大杂烩）', () => {
+    const hits = mem.recall('主题3', { domain: 'project', k: 3 });
+    assert(hits.length > 0, '应有召回结果');
+    assert(/主题3/.test(String(hits[0].entry.text)),
+      '首位应命中含「主题3」的块，实际 ' + JSON.stringify(hits.map((h) => String(h.entry.text).slice(0, 14))));
+  });
+
+  // ---------------- TF-IDF 未登录词（OOV）回归 ----------------
+  // 这组锁的是「分块召回」用例暴露出来的真 bug：tfidf 对 IDF 表里没有的 token
+  // 取 `(idf[k] ?? 0)` → 权重 0。最极端的后果是**第一条记忆**：写入时语料为空
+  // → IDF 表为空 → 整条向量全零 → 余弦恒为 0 → 这条记忆永远召不回来（实测
+  // 分块第一块的召回分就是 0.000000）。正确做法：OOV 恰恰最稀有、最有区分度，
+  // 应拿最高 IDF（df=0 → log(1+n)+1），而不是 0。
+  current = 'memory/IDF';
+  console.log('== TF-IDF 未登录词（OOV 权重）==');
+
+  const freshCtx = new Context();
+  const freshMod = await import(pathToFileURL(require.resolve('../packages/plugin/memory/lib/index.js')).href);
+  const freshPlugin = normalizeInject(freshMod);
+  freshCtx.plugin(freshPlugin, typeof freshPlugin.Config === 'function' ? freshPlugin.Config({}) : undefined);
+  await tick();
+  const mem2 = freshCtx.memory ?? freshCtx.get('memory');
+
+  await check('空语料下的第一条记忆可被召回（向量不再被空 IDF 表清零）', () => {
+    mem2.record('project', '独角兽项目的数据库分片方案', { origin: 'test' });
+    const hits = mem2.recall('独角兽', { domain: 'project', k: 3 });
+    assert(hits.length > 0, '应有召回结果');
+    assert(hits[0].score > 0, `第一条记忆的余弦必须 > 0（否则永远召回不到），实际 ${hits[0].score}`);
+  });
+
+  await check('新词（语料中零出现）拿到最高权重而非 0 —— OOV 最有区分度', () => {
+    mem2.record('project', '常见的数据库索引优化', { origin: 'test' });
+    mem2.record('project', '罕见的麒麟芯片烧录流程', { origin: 'test' });
+    const hits = mem2.recall('麒麟芯片', { domain: 'project', k: 3 });
+    assert(/麒麟/.test(String(hits[0].entry.text)), '首位应命中含「麒麟」的条目，实际 ' + String(hits[0].entry.text));
+    assert(hits[0].score > hits[1].score, `OOV 词应显著领先，实际 ${hits[0].score} vs ${hits[1].score}`);
+  });
+
+  await check('常见词区分度低于罕见词（IDF 方向正确，未被拉平）', () => {
+    const rare = mem2.recall('麒麟芯片', { domain: 'project', k: 3 });
+    const common = mem2.recall('数据库', { domain: 'project', k: 3 });
+    assert(rare[0].score > common[0].score,
+      `罕见词命中分应高于常见词，实际 ${rare[0].score} vs ${common[0].score}`);
+  });
+
+  // ---------------- LLM 摘要 seam（FR-10 第一步）----------------
+  // PRD 的转储链是「LLM 摘要 → 语义分块 → 向量编码 → 注入」。此前 setSummarize
+  // 实现完整但**全项目零调用方**（第十五个死挂点），自动转储永远走抽取式兜底。
+  // 这组锁的是 seam 的**契约**：注入即用、失败回落（摘要是增强不是必需，
+  // 模型挂了绝不能让整批转储蒸发）、以及 mode 可观测。
+  current = 'memory/摘要';
+  console.log('== LLM 摘要 seam（FR-10）==');
+
+  const seamMsgs = [];
+  for (let i = 0; i < 12; i++) {
+    // 每条 400+ 字符 → 预算 1200 下每块 2 条，共 3 块（mixed 用例需要 ≥2 块）。
+    seamMsgs.push({ content: [{ type: 'text', text: `片段${i}：` + '正文'.repeat(200) }] });
+  }
+
+  await check('未注入 seam 时走抽取式兜底（mode=extractive）', async () => {
+    const rec = await mem.dump('s-seam-0', seamMsgs, { domain: 'project' });
+    assert(rec.mode === 'extractive', '实际 mode=' + rec.mode);
+  });
+
+  await check('注入 seam 后 dump 走模型摘要（mode=llm）', async () => {
+    let calls = 0;
+    mem2.setSummarize(async (msgs) => {
+      calls++;
+      return `模型摘要#${calls}（${msgs.length} 条）`;
+    });
+    const rec = await mem2.dump('s-seam-1', seamMsgs, { domain: 'project' });
+    assert(rec.mode === 'llm', '实际 mode=' + rec.mode);
+    assert(calls === rec.chunks.length, `每块应各调一次 seam，实际 ${calls} vs ${rec.chunks.length} 块`);
+    assert(rec.chunks.every((c) => /^模型摘要#/.test(String(c))), '块内容应来自模型：' + JSON.stringify(rec.chunks));
+  });
+
+  await check('seam 抛错 → 整批回落抽取式，一块不丢（fail-open）', async () => {
+    mem2.setSummarize(async () => { throw new Error('模型 429'); });
+    const rec = await mem2.dump('s-seam-2', seamMsgs, { domain: 'project' });
+    assert(rec.mode === 'extractive', '实际 mode=' + rec.mode);
+    assert(rec.chunks.length >= 3, `块数不应因摘要失败而减少，实际 ${rec.chunks.length}`);
+    assert(rec.chunks.every((c) => /^摘要（抽取式）/.test(String(c))), '应回落抽取式：' + JSON.stringify(rec.chunks.slice(0, 1)));
+    assert(rec.memoryIds.length === rec.chunks.length, '每块仍应各产一条记忆');
+  });
+
+  await check('seam 返回空串 → 回落抽取式（空摘要不能当记忆存）', async () => {
+    mem2.setSummarize(async () => '   ');
+    const rec = await mem2.dump('s-seam-3', seamMsgs, { domain: 'project' });
+    assert(rec.mode === 'extractive', '实际 mode=' + rec.mode);
+    assert(rec.chunks.every((c) => /^摘要（抽取式）/.test(String(c))), '空白摘要应被丢弃并回落');
+  });
+
+  await check('部分块失败 → mode=mixed（可观测到「有的块没摘成」）', async () => {
+    let n = 0;
+    mem2.setSummarize(async () => {
+      n++;
+      if (n === 2) throw new Error('中途超时');
+      return `模型摘要#${n}`;
+    });
+    const rec = await mem2.dump('s-seam-4', seamMsgs, { domain: 'project' });
+    assert(rec.chunks.length >= 2, `需要至少 2 块才能构造 mixed，实际 ${rec.chunks.length}`);
+    assert(rec.mode === 'mixed', '实际 mode=' + rec.mode);
+  });
+
   // ---------------- prompt ----------------
   current = 'prompt';
   console.log('== prompt（提示词库）==');
