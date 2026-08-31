@@ -108,6 +108,15 @@ export function appendEvents(file: string, events: Array<Omit<SessionEvent, 'seq
   if (!events.length) return { ok: true, written: [] };
   const existing = readEvents(file);
   let seq = existing.length ? Math.max(...existing.map((e) => Number(e.seq) || 0)) : 0;
+  // 坏行被 readEvents 跳过，但其 seq 仍占用序号位——扫原始行回收最大 seq，避免重号
+  // （审阅裁决：append-only 日志 seq 重号会让「按 seq 定位分叉点」失真）。
+  try {
+    const raw = fs.readFileSync(file, 'utf-8');
+    for (const m of raw.matchAll(/"seq"\s*:\s*(\d+)/g)) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > seq) seq = n;
+    }
+  } catch { /* 文件尚不存在，无需回收 */ }
   const written: SessionEvent[] = events.map((ev) => ({ seq: ++seq, ...ev }));
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -128,21 +137,30 @@ export function isMessageEvent(ev: SessionEvent): boolean {
 }
 
 /**
+ * 「按消息位计数、atIndex 截断」的唯一实现——单会话前缀（forkPrefixEvents）与
+ * 跨块拼接（prefixLabeled）共用同一份截断语义（审阅裁决：血缘截断是 ADR-0009
+ * 最易错的语义，两份拷贝有发散风险）。
+ */
+function prefixByMessageCount<T>(list: T[], atIndex: number, evOf: (item: T) => SessionEvent): T[] {
+  let count = 0;
+  const out: T[] = [];
+  for (const item of list) {
+    if (isMessageEvent(evOf(item))) {
+      if (count >= atIndex) break;
+      count += 1;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+/**
  * 取父事件日志中「第 atIndex 条消息（含）之前」的事件前缀。
  * atIndex 超界按全量处理；atIndex 不是真数字按 0 处理由调用方保证——
  * 这里与 session-fork.js forkMessages 同一语义：null/undefined 已在血缘层夹紧。
  */
 export function forkPrefixEvents(events: SessionEvent[], atIndex: number): SessionEvent[] {
-  let count = 0;
-  const out: SessionEvent[] = [];
-  for (const ev of events) {
-    if (isMessageEvent(ev)) {
-      if (count >= atIndex) break;
-      count += 1;
-    }
-    out.push(ev);
-  }
-  return out;
+  return prefixByMessageCount(events, atIndex, (ev) => ev);
 }
 
 /**
@@ -178,24 +196,15 @@ function collectBlocks(loadLog: (sid: string) => SessionEvent[], sid: string, de
 }
 
 /** 带 seq 前缀标注的事件项。 */
-interface LabeledEvent { ev: SessionEvent; prefix: string }
+export interface LabeledEvent { ev: SessionEvent; prefix: string }
 
-/** forkPrefixEvents 的标注版（截断语义一致，跨块计数消息事件）。 */
+/** forkPrefixEvents 的标注版（与单块版本共用 prefixByMessageCount 截断语义）。 */
 function prefixLabeled(list: LabeledEvent[], atIndex: number): LabeledEvent[] {
-  let count = 0;
-  const out: LabeledEvent[] = [];
-  for (const item of list) {
-    if (isMessageEvent(item.ev)) {
-      if (count >= atIndex) break;
-      count += 1;
-    }
-    out.push(item);
-  }
-  return out;
+  return prefixByMessageCount(list, atIndex, (it) => it.ev);
 }
 
-/** 沿血缘链收集（祖先前缀截断后拼接）。 */
-function collectLabeled(loadLog: (sid: string) => SessionEvent[], sid: string, depth = 0): LabeledEvent[] {
+/** 沿血缘链收集（祖先前缀截断后拼接）。导出供 IPC 一次读盘同时派生时间线与上下文——审阅修复：此前 loadLog 链在一次请求里被重复读 3 遍。 */
+export function collectLabeled(loadLog: (sid: string) => SessionEvent[], sid: string, depth = 0): LabeledEvent[] {
   const blocks: TimelineBlock[] = [];
   collectBlocks(loadLog, sid, 0, blocks);
   let combined: LabeledEvent[] = [];
@@ -206,17 +215,36 @@ function collectLabeled(loadLog: (sid: string) => SessionEvent[], sid: string, d
   return combined;
 }
 
+/**
+ * 祖先链完整性检查：任一 fork-origin 指向的父日志为空（父从未入事件流——典型是
+ * legacy 历史会话先被分叉）→ 血缘时间线必然缺失继承前缀。调用方必须整体回落
+ * 消息数组重建并标注 legacy，不能拿残缺事件流冒充完整回放（审阅抓出的真 bug：
+ * 此种子会话回放只剩分叉标记 + 新回合，继承消息全部消失）。
+ */
+export function hasIncompleteAncestry(loadLog: (sid: string) => SessionEvent[], sid: string, depth = 0): boolean {
+  if (depth > FORK_DEPTH_MAX) return false;
+  const events = loadLog(sid);
+  const forkEv = events.find((ev) => ev.kind === 'fork-origin');
+  if (!forkEv || !forkEv.from) return false;
+  const from = String(forkEv.from);
+  if (!loadLog(from).length) return true;
+  return hasIncompleteAncestry(loadLog, from, depth + 1);
+}
+
 /** 全量血缘事件（含截断）——上下文重建用。 */
 export function collectLineageEvents(loadLog: (sid: string) => SessionEvent[], sid: string, depth = 0): SessionEvent[] {
   return collectLabeled(loadLog, sid, depth).map((x) => x.ev);
 }
 
-export function buildTimeline(
-  loadLog: (sid: string) => SessionEvent[],
-  sid: string,
-  depth = 0,
-): Array<{ seq: string; kind: string; label: string; detail: string; ts: string }> {
-  const items: Array<{ seq: string; kind: string; label: string; detail: string; ts: string }> = [];
+/** 时间线条目（与渲染层回放视图同形）。 */
+export interface TimelineItem { seq: string; kind: string; label: string; detail: string; ts: string }
+
+/**
+ * 从已收集的标注事件构建时间线——与 collectLabeled 配套，调用方可一次读盘
+ * 同时派生时间线与上下文（不必让 loadLog 链重复执行）。
+ */
+export function timelineFromLabeled(labeled: LabeledEvent[]): TimelineItem[] {
+  const items: TimelineItem[] = [];
 
   const push = (ev: SessionEvent, seqLabel: string) => {
     const when = new Date(ev.ts).toLocaleString('zh-CN');
@@ -243,10 +271,18 @@ export function buildTimeline(
     items.push({ seq: seqLabel, kind: 'agent', label: ev.model ? `模型 · ${ev.model}` : '模型', detail: ev.text || '', ts: when });
   };
 
-  for (const item of collectLabeled(loadLog, sid, depth)) {
+  for (const item of labeled) {
     push(item.ev, `${item.prefix}#${item.ev.seq}`);
   }
   return items;
+}
+
+export function buildTimeline(
+  loadLog: (sid: string) => SessionEvent[],
+  sid: string,
+  depth = 0,
+): TimelineItem[] {
+  return timelineFromLabeled(collectLabeled(loadLog, sid, depth));
 }
 
 /**

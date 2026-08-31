@@ -2,9 +2,10 @@
  * SessionEvent append-only 事件日志验证（PRD FR-6，ADR-0009）。
  *
  * A 组：纯逻辑（require dist/session-events.js）—— 会话 id 防线 / 追加与 seq /
- *       坏行韧性 / 分叉前缀 / 血缘时间线（含环防护）/ 上下文重建。
+ *       坏行韧性 / seq 回收 / 分叉前缀 / 血缘时间线（含环防护）/ 上下文重建 /
+ *       祖先完整性 / 单次收集一致性。
  * B 组：stub electron 驱动真实 IPC —— fork-event 落血缘 → session-events 沿
- *       父子链拼接时间线 → 无日志会话回 legacy。
+ *       父子链拼接时间线 → 无日志会话回 legacy → legacy 父被分叉整体回落。
  *
  * 运行：node session-events-verify.cjs
  */
@@ -56,6 +57,16 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     SE.appendEvents(file, [{ ts: 3, kind: 'user', text: 'c' }]);
     const evs = SE.readEvents(file);
     assert(evs.length === 3 && evs[2].text === 'c', '坏行后应继续追加可读，实际 ' + JSON.stringify(evs.map((e) => e.text)));
+  });
+
+  await check('seq 回收：坏行占用的序号位不重号（审阅回归）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-ev-'));
+    const file = path.join(dir, 's2b.ndjson');
+    SE.appendEvents(file, [{ ts: 1, kind: 'user', text: 'a' }]);
+    // 模拟半截写入的坏行（JSON 解析失败但 seq 可辨识）
+    fs.appendFileSync(file, '{"seq":9,"ts":2,"kind":"user","text":"brok\n', 'utf-8');
+    const w = SE.appendEvents(file, [{ ts: 3, kind: 'user', text: 'c' }]);
+    assert(w.ok && w.written[0].seq === 10, '坏行 seq=9 后新事件应从 10 起，实际 ' + (w.written || [])[0]?.seq);
   });
 
   await check('分叉前缀：只取第 atIndex 条消息（含）之前，fork-origin 不占消息位', () => {
@@ -118,6 +129,36 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     assert(ctx.length === 2 && ctx[0].role === 'user' && ctx[1].role === 'assistant', JSON.stringify(ctx));
   });
 
+  await check('祖先完整性：父日志为空的血缘链必须判残缺（审阅回归）', () => {
+    // 场景：legacy 父会话（从未入事件流）先被分叉 → 子日志只有 fork-origin
+    const logs = {
+      orphan: [{ seq: 1, ts: 1, kind: 'fork-origin', from: 'ghost', fromTitle: '幽灵父', atIndex: 3 }],
+      child: [{ seq: 1, ts: 1, kind: 'fork-origin', from: 'parent', atIndex: 1 }, { seq: 2, ts: 2, kind: 'user', text: 'C1' }],
+      parent: [{ seq: 1, ts: 1, kind: 'user', text: 'P1' }],
+    };
+    const load = (sid) => logs[sid] || [];
+    assert(SE.hasIncompleteAncestry(load, 'orphan') === true, '父日志为空应判残缺');
+    assert(SE.hasIncompleteAncestry(load, 'child') === false, '父日志有事件应完整');
+    assert(SE.hasIncompleteAncestry(load, 'parent') === false, '无 fork-origin 应完整');
+    // 残缺链的时间线确实缺继承前缀——证明回落 legacy 是必要的
+    const tl = SE.buildTimeline(load, 'orphan');
+    assert(tl.length === 1 && tl[0].kind === 'fork-origin', '残缺链回放只有分叉标记，实际 ' + JSON.stringify(tl));
+  });
+
+  await check('单次收集：timelineFromLabeled(collectLabeled) 与 buildTimeline 输出一致', () => {
+    const logs = {
+      parent: [{ seq: 1, ts: 1, kind: 'user', text: 'P1' }],
+      child: [{ seq: 1, ts: 2, kind: 'fork-origin', from: 'parent', atIndex: 1 }, { seq: 2, ts: 3, kind: 'user', text: 'C1' }],
+    };
+    const load = (sid) => logs[sid] || [];
+    const a = SE.timelineFromLabeled(SE.collectLabeled(load, 'child'));
+    const b = SE.buildTimeline(load, 'child');
+    assert(JSON.stringify(a) === JSON.stringify(b), '两条路径输出必须一致');
+    // 上下文从同一份派生
+    const ctx = SE.rebuildContext(SE.collectLabeled(load, 'child').map((x) => x.ev));
+    assert(ctx.length === 2 && ctx[0].text === 'P1', JSON.stringify(ctx));
+  });
+
   /* ============================== B 组：真实 IPC ============================== */
   console.log('\n== SessionEvent：IPC 桥接 ==');
 
@@ -142,6 +183,11 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
   await check('无事件日志的会话 → source=legacy（渲染层回退消息数组重建）', () => {
     assert(probe.legacySource === 'legacy' && probe.legacyCount === 0, JSON.stringify({ s: probe.legacySource, c: probe.legacyCount }));
+  });
+
+  await check('legacy 父会话被分叉 → 整体回落 legacy（不拿残缺事件流冒充完整回放）', () => {
+    assert(probe.orphanForkOk === true, 'fork-event 应 ok');
+    assert(probe.orphanSource === 'legacy', '残缺血缘应回落 legacy，实际 ' + probe.orphanSource);
   });
 
   await check('防线：穿越 id 的 fork-event 被拒绝', () => {
@@ -202,7 +248,13 @@ function runProbe() {
       const r2 = await ipc.get('orchdesk:session-events')(null, 'no-log-session');
       out.legacySource = r2.source; out.legacyCount = r2.count;
 
-      // 4. 穿越拒绝
+      // 4. legacy 父会话被分叉 → 血缘链残缺，整体回落 legacy（审阅回归：不拿残缺事件流冒充 event-log）
+      const f3 = await ipc.get('orchdesk:fork-event')(null, { newId: 'orphan', from: 'ghost', fromTitle: '幽灵父', atIndex: 2, at: 12346 });
+      out.orphanForkOk = f3.ok === true;
+      const r3 = await ipc.get('orchdesk:session-events')(null, 'orphan');
+      out.orphanSource = r3.source; out.orphanCount = r3.count;
+
+      // 5. 穿越拒绝
       const f2 = await ipc.get('orchdesk:fork-event')(null, { newId: '../evil', from: 'parent', atIndex: 1 });
       out.traverseRejected = f2.ok !== true;
 

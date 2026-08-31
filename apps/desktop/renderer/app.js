@@ -619,16 +619,20 @@
       return;
     }
     bridge.getUsage().then((r) => {
-      if (!r || typeof r !== 'object' || !r.total) return;
-      state.usage = {
-        loaded: true,
-        total: r.total,
+      if (!r || typeof r !== 'object') return;
+      // 桥在但 IPC 出错 ≠ 未接入——错误态必须显式标注（审阅裁决：把异常显示成「未接入」同样违反「状态不许撒谎」）
+      if (r.ok === false) {
+        state.usage = { ...state.usage, loaded: false, error: String(r.reason || '读取失败') };
+        if (state.page === 'settings') render();
+        return;
+      }
+      if (!r.total) return;
+      state.usage = { loaded: true, error: null, total: r.total,
         byModel: Array.isArray(r.byModel) ? r.byModel : [],
-        bySession: Array.isArray(r.bySession) ? r.bySession : [],
-      };
+        bySession: Array.isArray(r.bySession) ? r.bySession : [] };
       if (state.page === 'settings') render();
-    }).catch(() => {
-      state.usage = { ...state.usage, loaded: false };
+    }).catch((err) => {
+      state.usage = { ...state.usage, loaded: false, error: (err && err.message) ? String(err.message) : '桥接调用异常' };
       if (state.page === 'settings') render();
     });
   }
@@ -641,10 +645,16 @@
     return String(v);
   }
 
-  /** FR-5 用量卡片：真实记账（只统计网关上报过 usage 的回合）。「未接入」≠「0」。 */
+  /** FR-5 用量卡片：真实记账（只统计网关上报过 usage 的回合）。「未接入」≠「0」≠「读取失败」。 */
   function renderUsageCard() {
     const u = state.usage;
     if (!u.loaded) {
+      if (u.error) {
+        return `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px">
+          <div class="row" style="justify-content:space-between"><b style="font-size:12px">用量追踪（FR-5）</b><span class="badge warn">读取失败</span></div>
+          <div class="faint" style="font-size:11.5px;margin-top:4px">主进程用量读取失败：${esc(u.error)}（重新打开设置页可重试）。</div>
+        </div>`;
+      }
       return `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px">
         <div class="row" style="justify-content:space-between"><b style="font-size:12px">用量追踪（FR-5）</b><span class="badge">未接入</span></div>
         <div class="faint" style="font-size:11.5px;margin-top:4px">主进程未接入用量桥接，无法显示真实记账。</div>
@@ -1090,7 +1100,7 @@
   function replaySourceNote() {
     const ev = state.sessionEvents;
     if (ev.loaded && ev.data && ev.data.source === 'event-log') return 'append-only 事件流重建（ADR-0009）';
-    if (ev.loaded && ev.data && ev.data.source === 'legacy') return '历史会话：事件流无记录，从消息数组重建';
+    if (ev.loaded && ev.data && ev.data.source === 'legacy') return '历史会话：事件流无记录或不完整，从消息数组重建';
     return '从消息数组重建（事件流未接入）';
   }
   function renderReplay(s) {

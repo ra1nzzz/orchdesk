@@ -50,12 +50,13 @@ import {
 } from './usage-registry';
 import {
   appendEvents,
-  buildTimeline as buildEventTimeline,
-  collectLineageEvents,
+  collectLabeled,
   eventFileFor,
+  hasIncompleteAncestry,
   readEvents,
   rebuildContext,
   sanitizeSessionId,
+  timelineFromLabeled,
   type SessionEvent,
 } from './session-events';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, listMarketPlugins, setMarketPluginEnabled, startupMarketPlugins, marketDir } from './dsh-runtime';
@@ -1209,8 +1210,9 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
 
   // ---- SessionEvent append-only 双写（FR-6，ADR-0009）----
   // 「模型可见必入日志」：用户输入与模型回复（含工具步骤、token 用量）在同一
-  // 持久化点追加进事件流。写失败不阻塞回合（事件流是回放权威源，不是运行态依赖）。
-  {
+  // 持久化点追加进事件流。写失败不阻塞回合（事件流是回放权威源，不是运行态依赖）
+  // ——整块兜异常（eventFileFor 对非法 sid 会抛错），只 WARN 不 reject 回合。
+  try {
     const evFile = eventFileFor(dataDir(), sessionId);
     const evs: Array<Omit<SessionEvent, 'seq'>> = [
       { ts: turnTs, kind: 'user', text },
@@ -1222,21 +1224,28 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     ];
     const w = appendEvents(evFile, evs);
     if (!w.ok) log('WARN', 'events', `会话事件追加失败: ${w.reason}`);
+  } catch (err) {
+    log('WARN', 'events', `会话事件双写异常: ${(err as Error).message}`);
   }
 
   // ---- FR-5 用量记账：一回合一条目（网关从未上报 usage → 不记，不伪造 0）----
+  // 记账失败同样不阻塞回合——宁可丢一条统计，不能让回合 IPC 因落盘问题失败。
   if (turnUsage) {
-    const entry: UsageEntry = {
-      ts: new Date(turnTs).toISOString(),
-      sessionId, provider: provider.name, model,
-      promptTokens: turnUsage.p, completionTokens: turnUsage.c, totalTokens: turnUsage.t,
-      steps: stepCount,
-    };
-    const usageFile = path.join(dataDir(), DATA_FILE_NAMES.usage);
-    const cur = readUsageFile(usageFile);
-    const next = appendUsageTurn(cur, entry);
-    const wr = writeUsageFile(usageFile, next);
-    if (!wr.ok) log('WARN', 'usage', `用量记账落盘失败: ${wr.reason}`);
+    try {
+      const entry: UsageEntry = {
+        ts: new Date(turnTs).toISOString(),
+        sessionId, provider: provider.name, model,
+        promptTokens: turnUsage.p, completionTokens: turnUsage.c, totalTokens: turnUsage.t,
+        steps: stepCount,
+      };
+      const usageFile = path.join(dataDir(), DATA_FILE_NAMES.usage);
+      const cur = readUsageFile(usageFile);
+      const next = appendUsageTurn(cur, entry);
+      const wr = writeUsageFile(usageFile, next);
+      if (!wr.ok) log('WARN', 'usage', `用量记账落盘失败: ${wr.reason}`);
+    } catch (err) {
+      log('WARN', 'usage', `用量记账异常: ${(err as Error).message}`);
+    }
   }
 
   return { text: finalReply, intent: 'ACT' };
@@ -1522,16 +1531,23 @@ function loadEventLog(sid: string): SessionEvent[] {
 /** 回放数据源：事件流时间线（沿血缘链拼接）；日志为空 → source='legacy'（渲染层回退消息数组重建并显式标注）。 */
 ipcMain.handle('orchdesk:session-events', async (_e, sid: string) => {
   try {
-    const events = loadEventLog(String(sid || ''));
+    const key = String(sid || '');
+    const events = loadEventLog(key);
     if (!events.length) return { ok: true, source: 'legacy', count: 0, timeline: [] };
+    // 血缘链上任一祖先日志为空（如 legacy 历史会话先被分叉）→ 事件流缺继承前缀，
+    // 整体回落 legacy：消息数组含分叉时拷贝的切片，回放完整——不拿残缺事件流冒充 event-log。
+    if (hasIncompleteAncestry(loadEventLog, key)) return { ok: true, source: 'legacy', count: 0, timeline: [] };
+    // 一次收集（loadLog 链只走 1 遍），时间线与上下文从同一份派生
+    // （审阅修复：此前 buildTimeline 与 collectLineageEvents 各自重读同一批 NDJSON，血缘链被读 3 遍）。
+    const labeled = collectLabeled(loadEventLog, key);
     return {
       ok: true,
       source: 'event-log',
       count: events.length,
-      timeline: buildEventTimeline(loadEventLog, String(sid || '')),
+      timeline: timelineFromLabeled(labeled),
       // 上下文重建走全量血缘链（祖先前缀按 atIndex 截断后拼接），分叉子分支的
       // 模型上下文不依赖消息数组切片（ADR-0009 §4）。
-      context: rebuildContext(collectLineageEvents(loadEventLog, String(sid || ''))),
+      context: rebuildContext(labeled.map((x) => x.ev)),
     };
   } catch (err) {
     return { ok: false, reason: (err as Error).message, source: 'legacy', count: 0, timeline: [] };
