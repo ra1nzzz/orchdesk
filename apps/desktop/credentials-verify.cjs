@@ -162,7 +162,143 @@ const cred = require('./dist/credentials.js');
 
   try { fs.rmSync(HOME, { recursive: true, force: true }); } catch {}
 
-  console.log('== C. 沙箱：命令在子进程异步执行 ==');
+  console.log('== C. 沙箱日志（PRD FR-8 可检索）==');
+
+  const sb = require('./dist/sandbox-log.js');
+
+  const entry = (o) => Object.assign({ tool: 'file_write', kind: 'approval', target: 'D:/w/a.txt', decision: 'allowed', ts: 1700000000000 }, o || {});
+
+  await check('归一化：完整条目保留', () => {
+    const e = sb.normalizeSandboxEntry(entry({ reason: '已写入', mode: 'default', sessionId: 's1' }));
+    assert.ok(e, '应通过归一化');
+    assert.strictEqual(e.tool, 'file_write');
+    assert.strictEqual(e.reason, '已写入');
+    assert.strictEqual(e.sessionId, 's1');
+  });
+
+  await check('归一化：缺 tool / target / decision 一律丢弃（不留不可检索的脏数据）', () => {
+    assert.strictEqual(sb.normalizeSandboxEntry(entry({ tool: '' })), null);
+    assert.strictEqual(sb.normalizeSandboxEntry(entry({ target: '  ' })), null);
+    assert.strictEqual(sb.normalizeSandboxEntry(entry({ decision: 'maybe' })), null);
+    assert.strictEqual(sb.normalizeSandboxEntry(null), null);
+    assert.strictEqual(sb.normalizeSandboxEntry('x'), null);
+  });
+
+  await check('归一化：kind 非法回落 path；ts 非法补当前时间', () => {
+    const e = sb.normalizeSandboxEntry(entry({ kind: 'nope', ts: 'abc' }));
+    assert.strictEqual(e.kind, 'path');
+    assert.ok(e.ts > 0 && Number.isFinite(e.ts));
+  });
+
+  await check('装载：坏条目静默跳过，超量只留最新 MAX 条', () => {
+    const raw = [entry(), null, 'x', entry({ decision: 'bad' }), entry()];
+    assert.strictEqual(sb.normalizeSandboxLog(raw).length, 2, '应只留 2 条合法');
+    const many = [];
+    for (let i = 0; i < sb.SANDBOX_LOG_MAX + 50; i++) many.push(entry({ target: 'f' + i, ts: 1700000000000 + i }));
+    const kept = sb.normalizeSandboxLog(many);
+    assert.strictEqual(kept.length, sb.SANDBOX_LOG_MAX, `应保留 ${sb.SANDBOX_LOG_MAX} 条`);
+    assert.strictEqual(kept[kept.length - 1].target, 'f' + (sb.SANDBOX_LOG_MAX + 49), '应保留最新的');
+  });
+
+  await check('追加：不改原数组；越界淘汰最旧', () => {
+    const list = sb.normalizeSandboxLog([entry({ target: 'a', ts: 1 })]);
+    const next = sb.appendSandboxLog(list, entry({ target: 'b', ts: 2 }));
+    assert.strictEqual(list.length, 1, '原数组被改动');
+    assert.strictEqual(next.length, 2);
+    let acc = [];
+    for (let i = 0; i < sb.SANDBOX_LOG_MAX + 5; i++) acc = sb.appendSandboxLog(acc, entry({ target: 't' + i, ts: i }));
+    assert.strictEqual(acc.length, sb.SANDBOX_LOG_MAX);
+    assert.strictEqual(acc[acc.length - 1].target, 't' + (sb.SANDBOX_LOG_MAX + 4));
+    assert.ok(!acc.some((e) => e.target === 't0'), '最旧条目应被淘汰');
+  });
+
+  await check('检索：默认返回最新的，关键词大小写不敏感', () => {
+    const list = sb.normalizeSandboxLog([
+      entry({ target: 'D:/work/a.txt', ts: 1 }),
+      entry({ target: 'C:/secret/b.txt', decision: 'denied', reason: '路径不在允许范围内', ts: 2 }),
+      entry({ tool: 'shell_command', kind: 'command', target: 'git status', ts: 3 }),
+    ]);
+    const all = sb.searchSandboxLog(list, {});
+    assert.deepStrictEqual(all.map((e) => e.ts), [3, 2, 1], '应从新到旧');
+    const kw = sb.searchSandboxLog(list, { keyword: 'SECRET' });
+    assert.strictEqual(kw.length, 1, '关键词应大小写不敏感命中');
+    assert.strictEqual(kw[0].target, 'C:/secret/b.txt');
+    assert.strictEqual(sb.searchSandboxLog(list, { keyword: '路径不在' }).length, 1, 'reason 也应可检索');
+    assert.strictEqual(sb.searchSandboxLog(list, { keyword: 'zzz' }).length, 0);
+  });
+
+  await check('检索：空关键词 = 不过滤（不是「什么都匹配不到」）', () => {
+    const list = sb.normalizeSandboxLog([entry({ ts: 1 }), entry({ ts: 2 })]);
+    assert.strictEqual(sb.searchSandboxLog(list, { keyword: '   ' }).length, 2);
+  });
+
+  await check('检索：decision / kind 过滤与 limit 生效', () => {
+    const list = sb.normalizeSandboxLog([
+      entry({ decision: 'allowed', kind: 'path', ts: 1 }),
+      entry({ decision: 'denied', kind: 'command', ts: 2 }),
+      entry({ decision: 'error', kind: 'network', ts: 3 }),
+    ]);
+    assert.strictEqual(sb.searchSandboxLog(list, { decision: 'denied' }).length, 1);
+    assert.strictEqual(sb.searchSandboxLog(list, { kind: 'network' }).length, 1);
+    assert.strictEqual(sb.searchSandboxLog(list, { limit: 2 }).length, 2);
+  });
+
+  await check('统计：三态计数 + 按工具降序', () => {
+    const list = sb.normalizeSandboxLog([
+      entry({ tool: 'file_write', decision: 'allowed', ts: 1 }),
+      entry({ tool: 'file_write', decision: 'denied', ts: 2 }),
+      entry({ tool: 'shell_command', decision: 'error', ts: 3 }),
+      entry({ tool: 'shell_command', decision: 'allowed', ts: 4 }),
+      entry({ tool: 'shell_command', decision: 'allowed', ts: 5 }),
+    ]);
+    const st = sb.sandboxLogStats(list);
+    assert.strictEqual(st.total, 5);
+    assert.strictEqual(st.allowed, 3);
+    assert.strictEqual(st.denied, 1);
+    assert.strictEqual(st.error, 1);
+    assert.strictEqual(st.byTool[0].tool, 'shell_command');
+    assert.strictEqual(st.byTool[0].count, 3);
+  });
+
+  await check('摘要截断到 SANDBOX_DETAIL_MAX', () => {
+    const e = sb.normalizeSandboxEntry(entry({ reason: 'x'.repeat(1000) }));
+    assert.strictEqual(e.reason.length, sb.SANDBOX_DETAIL_MAX + 1);
+  });
+
+  await check('埋点：命令白名单拒绝真的写进日志（否则「可检索」是空话）', async () => {
+    const out = await runToolProbe('shell_command', { command: 'format C:' }, { logQuery: { keyword: 'format' } });
+    assert.ok(out.log, '探针未返回日志');
+    const hit = out.log.entries.find((e) => e.decision === 'denied' && e.kind === 'command');
+    assert.ok(hit, '命令白名单拒绝应入日志，实际: ' + JSON.stringify(out.log.entries).slice(0, 300));
+    assert.ok(String(hit.reason).includes('白名单'), '日志应带拒绝原因');
+  });
+
+  await check('埋点：审批放行后的 shell 成功执行记为 allowed', async () => {
+    const out = await runToolProbe('shell_command', { command: 'echo hello-sandbox' }, { approve: true, logQuery: { keyword: 'echo' } });
+    const hit = out.log.entries.find((e) => e.decision === 'allowed' && e.kind === 'approval');
+    assert.ok(hit, '放行应入日志，实际: ' + JSON.stringify(out.log.entries).slice(0, 300));
+    assert.ok(String(hit.target).includes('echo hello-sandbox'));
+  });
+
+  await check('埋点：渲染层未就绪被拒 → 记为 denied（不是「什么都没发生」）', async () => {
+    const out = await runToolProbe('shell_command', { command: 'echo blocked' }, { logQuery: { keyword: 'blocked' } });
+    const hit = out.log.entries.find((e) => e.decision === 'denied' && String(e.reason).includes('未获批准'));
+    assert.ok(hit, '审批拒绝应入日志，实际: ' + JSON.stringify(out.log.entries).slice(0, 300));
+  });
+
+  await check('日志落盘：磁盘上有 sandbox-log.json 且内容可回读', async () => {
+    const out = await runToolProbe('file_read', { path: '__DATA__/probe-written.txt' }, { logQuery: {} });
+    assert.ok(out.logFileExists, '数据目录应存在 sandbox-log.json（实际: ' + out.logPreview + '）');
+    assert.ok(Array.isArray(out.logFileEntries), '落盘内容应为数组');
+  });
+
+  await check('清空：sandbox-log-clear 后 total 归零', async () => {
+    const out = await runToolProbe('file_read', { path: '__DATA__/probe-written.txt' }, { logQuery: {}, clearLog: true });
+    assert.ok(out.cleared >= 0, '应返回被清条数');
+    assert.strictEqual(out.logAfterClear.total, 0, '清空后 total 应为 0');
+  });
+
+  console.log('== D. 沙箱：命令在子进程异步执行 ==');
 
   await check('shell_command 经审批放行后正确执行（授权门→弹窗→应答→子进程全链路）', async () => {
     const out = await runToolProbe('shell_command', { command: 'echo hello-sandbox' }, { approve: true });
@@ -255,7 +391,22 @@ const cred = require('./dist/credentials.js');
         stub.ipcListeners.get('orchdesk:authz-submit-decision')(null, approvalReq.payload.id, 'allowed-once');
         ` : ''}
         const r = await kick;
-        console.log('TOOL_JSON:' + JSON.stringify(r));
+        // PRD FR-8：可选地把沙箱日志一并返回（验证「判定真的被记下来」而非只存在代码里）
+        let payload = r;
+        if (${opts.logQuery !== undefined || !!opts.clearLog}) {
+          const logH = ipc.get('orchdesk:sandbox-log');
+          payload = { result: r.result, error: r.error, log: await logH(null, ${JSON.stringify(opts.logQuery || {})}) };
+          const logFile = path.join(HOME, 'sandbox-log.json');
+          payload.logFileExists = fs.existsSync(logFile);
+          try { payload.logFileEntries = JSON.parse(fs.readFileSync(logFile, 'utf-8')); }
+          catch (e) { payload.logPreview = 'read-fail:' + e.message; }
+          if (${!!opts.clearLog}) {
+            const c = await ipc.get('orchdesk:sandbox-log-clear')(null);
+            payload.cleared = c.cleared;
+            payload.logAfterClear = await logH(null, {});
+          }
+        }
+        console.log('TOOL_JSON:' + JSON.stringify(payload));
         process.exit(0);
       })().catch(e => { console.log('ERR:' + e.message); process.exit(1); });
     `;

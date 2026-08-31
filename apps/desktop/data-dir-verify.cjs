@@ -44,6 +44,8 @@ const {
   setDataDirResolver,
   resetDataDirResolver,
   getDataDir,
+  scanDataDir,
+  formatBytes,
 } = require('./dist/data-dir.js');
 
 // ---------------------------------------------------------------------------
@@ -568,6 +570,139 @@ function captureWarn(fn) {
   if (envBackup === undefined) delete process.env.ORCHDESK_HOME;
   else process.env.ORCHDESK_HOME = envBackup;
   setDataDirResolver(null);
+
+  // -------------------------------------------------------------------------
+  // G. 数据目录内容清单（PRD FR-4.2「内容清单」）
+  // -------------------------------------------------------------------------
+  // 设置页此前写死「~ 24 MB」。清单必须来自真实文件系统，否则「备份整个数据目录」
+  // 这句承诺的大小就是编的。这里覆盖扫描语义与体积换算两条独立链路。
+  // -------------------------------------------------------------------------
+  console.log('== G. 数据目录内容清单（FR-4.2） ==');
+
+  await check('9) 目录不存在时返回空清单且不抛错（首次运行）', () => {
+    const inv = scanDataDir(path.join(ROOT, 'no-such-dir-inv'));
+    assert.deepStrictEqual(inv.items, []);
+    assert.strictEqual(inv.totalSize, 0);
+    assert.strictEqual(inv.totalFiles, 0);
+    assert.strictEqual(inv.dir, path.join(ROOT, 'no-such-dir-inv'));
+  });
+
+  const invRoot = mk('inv-root');
+  fs.writeFileSync(path.join(invRoot, 'sessions.json'), 'x'.repeat(300));
+  fs.writeFileSync(path.join(invRoot, 'providers.json'), 'y'.repeat(100));
+  fs.mkdirSync(path.join(invRoot, 'logs', '2026-08'), { recursive: true });
+  fs.writeFileSync(path.join(invRoot, 'logs', 'a.log'), 'z'.repeat(50));
+  fs.writeFileSync(path.join(invRoot, 'logs', '2026-08', 'b.log'), 'w'.repeat(70));
+  const emptyDir = path.join(invRoot, 'empty');
+  fs.mkdirSync(emptyDir, { recursive: true });
+
+  await check('9) 顶层子项按体积降序，根汇总排在最后', () => {
+    const inv = scanDataDir(invRoot);
+    const names = inv.items.map((i) => i.name);
+    assert.strictEqual(names[names.length - 1], '.', `根汇总 '.', 应在最后：${names.join(' | ')}`);
+    const top = names.slice(0, -1);
+    assert.ok(top.includes('sessions.json') && top.includes('providers.json') && top.includes('logs') && top.includes('empty'),
+      `顶层应含四类子项：${names.join(' | ')}`);
+    const sizes = inv.items.slice(0, -1).map((i) => i.size);
+    for (let i = 1; i < sizes.length; i++) {
+      assert.ok(sizes[i - 1] >= sizes[i], `体积未降序：${JSON.stringify(inv.items.slice(0, -1).map((x) => [x.name, x.size]))}`);
+    }
+  });
+
+  await check('9) 目录体积与文件数递归汇总（含嵌套子目录）', () => {
+    const inv = scanDataDir(invRoot);
+    const logs = inv.items.find((i) => i.name === 'logs');
+    assert.ok(logs, '未找到 logs 目录项');
+    assert.strictEqual(logs.kind, 'dir');
+    assert.strictEqual(logs.size, 120, `logs 应为 50+70=120，实际 ${logs.size}`);
+    assert.strictEqual(logs.files, 2, `logs 应含 2 个文件，实际 ${logs.files}`);
+    assert.strictEqual(inv.totalSize, 300 + 100 + 120, `总计应为 520，实际 ${inv.totalSize}`);
+    assert.strictEqual(inv.totalFiles, 4, `总文件数应为 4，实际 ${inv.totalFiles}`);
+  });
+
+  await check('9) 空目录体积为 0 且仍被列出（不静默吞掉）', () => {
+    const inv = scanDataDir(invRoot);
+    const e = inv.items.find((i) => i.name === 'empty');
+    assert.ok(e, '空目录应出现在清单里');
+    assert.strictEqual(e.size, 0);
+    assert.strictEqual(e.files, 0);
+  });
+
+  await check('9) 嵌套文件不出现在顶层（只列一层 + 各自汇总）', () => {
+    const inv = scanDataDir(invRoot);
+    const names = inv.items.map((i) => i.name);
+    assert.ok(!names.includes('logs/a.log'), `嵌套文件不应出现在顶层：${names.join(' | ')}`);
+    assert.ok(!names.includes('logs/2026-08'), `二级目录不应出现在顶层：${names.join(' | ')}`);
+  });
+
+  await check('9) 路径统一用 / 分隔（UI 与检索口径一致）', () => {
+    const inv = scanDataDir(invRoot);
+    for (const i of inv.items) {
+      assert.ok(!i.name.includes('\\'), `路径含反斜杠：${i.name}`);
+    }
+    const logs = inv.items.find((i) => i.name === 'logs');
+    assert.strictEqual(logs.name, 'logs', `顶层目录名应无分隔符残留，实际「${logs.name}」`);
+    // 嵌套路径必须含 '/'，证明分隔符被统一过（Windows 上原生是 '\\'）
+    const invNested = scanDataDir(invRoot);
+    assert.ok(invNested.items.every((i) => !i.name.includes('//')), '不应出现重复分隔符');
+  });
+
+  await check('9) 符号链接被跳过，不成环也不重复计数', () => {
+    const linkRoot = mk('inv-link');
+    fs.writeFileSync(path.join(linkRoot, 'a.txt'), 'a'.repeat(10));
+    const sub = path.join(linkRoot, 'sub');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'b.txt'), 'b'.repeat(20));
+    let created = false;
+    try {
+      // 指向自身父目录的软链：跟随就会无限递归
+      fs.symlinkSync(linkRoot, path.join(sub, 'loop'), 'junction');
+      created = true;
+    } catch { created = false; }
+    if (!created) {
+      // 无权限创建软链时跳过多余断言，但仍验证清单不崩
+      const inv = scanDataDir(linkRoot);
+      assert.ok(Array.isArray(inv.items));
+      return;
+    }
+    const inv = scanDataDir(linkRoot);
+    const names = inv.items.map((i) => i.name);
+    assert.ok(!names.includes('sub/loop'), `软链不应被扫描：${names.join(' | ')}`);
+    const subItem = inv.items.find((i) => i.name === 'sub');
+    assert.strictEqual(subItem.size, 20, `sub 只应计 b.txt（20 字节），实际 ${subItem.size}`);
+    assert.strictEqual(inv.totalFiles, 2, `软链不应重复计入文件数，实际 ${inv.totalFiles}`);
+  });
+
+  await check('9) 路径指向文件（非目录）时返回空清单而不抛错', () => {
+    const inv = scanDataDir(path.join(invRoot, 'sessions.json'));
+    assert.deepStrictEqual(inv.items, []);
+    assert.strictEqual(inv.totalSize, 0);
+  });
+
+  await check('9) formatBytes 四档换算', () => {
+    assert.strictEqual(formatBytes(0), '0 B');
+    assert.strictEqual(formatBytes(512), '512 B');
+    assert.strictEqual(formatBytes(1023), '1023 B');
+    assert.strictEqual(formatBytes(1024), '1.0 KB');
+    assert.strictEqual(formatBytes(1024 * 1024 - 1), '1024.0 KB');
+    assert.strictEqual(formatBytes(1024 * 1024), '1.0 MB');
+    assert.strictEqual(formatBytes(1024 * 1024 * 1024), '1.00 GB');
+    assert.strictEqual(formatBytes(1024 * 1024 * 1024 * 5), '5.00 GB');
+  });
+
+  await check('9) formatBytes 对负数 / 非数字回退 0 B（不显示 NaN）', () => {
+    assert.strictEqual(formatBytes(-1), '0 B');
+    assert.strictEqual(formatBytes(NaN), '0 B');
+    assert.strictEqual(formatBytes(Infinity), '0 B');
+    assert.strictEqual(formatBytes(undefined), '0 B');
+    assert.strictEqual(formatBytes(null), '0 B');
+  });
+
+  await check('9) 清单体积经 formatBytes 后即为 UI 展示值（口径唯一）', () => {
+    const inv = scanDataDir(invRoot);
+    assert.strictEqual(inv.totalSize, 520, '清单原始字节数应为 520');
+    assert.strictEqual(formatBytes(inv.totalSize), '520 B', 'UI 展示值应由同一函数产出');
+  });
 
   // -------------------------------------------------------------------------
   console.log('\n' + log.join('\n'));

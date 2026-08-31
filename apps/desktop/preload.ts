@@ -155,6 +155,27 @@ const orchdesk = {
   setNetworkAllow: (list: string[]): Promise<{ ok: boolean; reason?: string; networkAllow?: string[] }> =>
     ipcRenderer.invoke('orchdesk:sandbox-set-network-allow', list),
 
+  // ---- PRD FR-8 沙箱日志（可检索） ----
+  /**
+   * 检索沙箱判定日志（默认返回最新 200 条 + 统计）。
+   * keyword 按 tool / target / reason / sessionId 大小写不敏感匹配；决策与类型可过滤。
+   */
+  getSandboxLog: (query?: {
+    keyword?: string;
+    decision?: 'allowed' | 'denied' | 'error' | 'all';
+    kind?: 'path' | 'command' | 'network' | 'approval' | 'outbound' | 'config' | 'all';
+    limit?: number;
+  }): Promise<{
+    entries: Array<{ id: string; ts: number; tool: string; kind: string; target: string; decision: string; reason?: string; mode?: string; sessionId?: string }>;
+    stats: { total: number; allowed: number; denied: number; error: number; byTool: Array<{ tool: string; count: number }> };
+    total: number;
+    max: number;
+  }> => ipcRenderer.invoke('orchdesk:sandbox-log', query || {}),
+
+  /** 清空沙箱日志（返回被清掉的条数）。 */
+  clearSandboxLog: (): Promise<{ ok: boolean; cleared: number; entries: unknown[]; stats: { total: number; allowed: number; denied: number; error: number; byTool: unknown[] } }> =>
+    ipcRenderer.invoke('orchdesk:sandbox-log-clear'),
+
   // ---- PRD FR-4.2 桌面集成（托盘 / 快捷键 / 自启动 / 更新 / 悬浮窗 / 通知） ----
   /** 桌面集成开关快照（含快捷键读法与自启动的**系统实际**状态）。 */
   getDesktop: (): Promise<{
@@ -256,6 +277,17 @@ const orchdesk = {
   /** 打开日志目录（模型调用 / 插件加载诊断留痕）。 */
   openLogDir: (): Promise<{ ok: boolean; file?: string; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:open-log-dir'),
+
+  /** PRD FR-4.2「数据目录 · 内容清单」：真实扫描结果（此前 UI 写死「~ 24 MB」）。 */
+  getDataDirInventory: (): Promise<{
+    ok: boolean;
+    dir: string;
+    items: Array<{ name: string; size: number; kind: 'file' | 'dir'; files: number; mtime: number }>;
+    totalSize: number;
+    totalFiles: number;
+    errors: string[];
+    reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:data-dir-inventory'),
 
   /** 导出全部业务数据到用户选择的 JSON 备份文件（BUG-013 方案 B）。 */
   exportData: (): Promise<{ ok: boolean; path?: string; reason?: string }> =>

@@ -34,6 +34,8 @@ export const DATA_FILE_NAMES = {
   hub: 'hub.json',
   /** PRD FR-4.2 桌面集成开关（托盘 / 快捷键 / 自启动 / 更新 / 悬浮窗 / 通知）。 */
   desktop: 'desktop.json',
+  /** PRD FR-8 沙箱日志（可检索；随数据目录迁移，否则换目录后追溯断档）。 */
+  sandboxLog: 'sandbox-log.json',
 } as const;
 
 /** 随数据目录迁移的目录名（与 DATA_FILE_NAMES 同理，集中登记）。 */
@@ -484,4 +486,110 @@ export function getDataDir(): string {
   const envHome = (process.env.ORCHDESK_HOME || '').trim();
   if (envHome) return path.resolve(envHome);
   throw new Error('[orchdesk] 数据目录解析器尚未注入（setDataDirResolver），且未设置 ORCHDESK_HOME');
+}
+
+// ---------------------------------------------------------------------------
+// 数据目录内容清单（PRD FR-4.2「内容清单」）
+// ----------------------------------------------------------------------------
+// 设置页此前写死「~ 24 MB」——一个与实际磁盘毫无关系的数字。清单必须来自真实
+// 文件系统，否则「备份整个数据目录」这句承诺的大小是编的。
+// ----------------------------------------------------------------------------
+
+export interface DataDirItem {
+  /** 相对数据目录的路径（统一用 / 分隔，UI 展示与检索都方便）。 */
+  name: string;
+  /** 字节数；目录取其递归内所有文件之和。 */
+  size: number;
+  /** 'file' | 'dir'。 */
+  kind: 'file' | 'dir';
+  /** 目录内的文件数（文件恒为 1）。 */
+  files: number;
+  /** epoch ms；读取失败为 0。 */
+  mtime: number;
+}
+
+export interface DataDirInventory {
+  dir: string;
+  items: DataDirItem[];
+  totalSize: number;
+  totalFiles: number;
+  /** 扫描未完成的目录（权限 / 竞态删除），如实上报而不是假装扫全了。 */
+  errors: string[];
+}
+
+interface TreeStat { size: number; files: number }
+
+/**
+ * 递归统计目录（不跟随符号链接，避免软链成环把扫描拖死）。
+ *
+ * 返回本目录的 {size, files} 汇总供父级累加 —— **不要**改成让父级去扫 out 里新增
+ * 的条目：out 里既有后代文件，也有后代目录条目本身，父级照单全收会把子目录的重量
+ * 算两遍（FR-4.2 首版踩过：logs 实为 120 B 却报 190 B，根汇总 520 B 却报 780 B）。
+ */
+function statTree(abs: string, rel: string, out: DataDirItem[], errors: string[]): TreeStat {
+  const none: TreeStat = { size: 0, files: 0 };
+  let st;
+  try { st = fs.statSync(abs); } catch { return none; }
+  if (st.isSymbolicLink()) return none;
+  if (st.isFile()) {
+    out.push({ name: rel, size: st.size, kind: 'file', files: 1, mtime: st.mtimeMs });
+    return { size: st.size, files: 1 };
+  }
+  if (!st.isDirectory()) return none;
+
+  let size = 0;
+  let files = 0;
+  let entries: fs.Dirent[] = [];
+  try { entries = fs.readdirSync(abs, { withFileTypes: true }); }
+  catch (err) { errors.push((rel || '.') + ': ' + (err as Error).message); }
+  for (const e of entries) {
+    if (e.isSymbolicLink()) continue;
+    const childRel = rel ? rel + '/' + e.name : e.name;
+    if (e.isDirectory()) {
+      const r = statTree(path.join(abs, e.name), childRel, out, errors);
+      size += r.size; files += r.files;
+    } else if (e.isFile()) {
+      let cst;
+      try { cst = fs.statSync(path.join(abs, e.name)); } catch { continue; }
+      out.push({ name: childRel, size: cst.size, kind: 'file', files: 1, mtime: cst.mtimeMs });
+      size += cst.size; files++;
+    }
+  }
+  out.push({ name: rel || '.', size, kind: 'dir', files, mtime: st.mtimeMs });
+  return { size, files };
+}
+
+/**
+ * 扫描数据目录，产出内容清单。
+ * 只扫一层子项 + 各自的递归汇总，便于 UI 直接列「sessions.json / memory / plugins / logs」。
+ * 目录不存在 → 空清单（首次运行），不抛错。
+ */
+export function scanDataDir(dir: string): DataDirInventory {
+  const items: DataDirItem[] = [];
+  const errors: string[] = [];
+  let exists = false;
+  try { exists = fs.statSync(dir).isDirectory(); } catch { exists = false; }
+  if (!exists) return { dir, items, totalSize: 0, totalFiles: 0, errors };
+
+  statTree(dir, '', items, errors);
+  // 顶层：子项排在根汇总之前；同级按体积降序（大的先看）。
+  const top = items.filter((i) => i.name && !i.name.includes('/')).sort((a, b) => b.size - a.size || a.name.localeCompare(b.name));
+  const root = items.find((i) => i.name === '.');
+  return {
+    dir,
+    items: [...top, ...(root ? [root] : [])],
+    totalSize: root ? root.size : 0,
+    totalFiles: root ? root.files : 0,
+    errors,
+  };
+}
+
+/** 人类可读体积（与 UI 展示口径一致，放这里避免各处各写一套）。 */
+export function formatBytes(n: number): string {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return '0 B';
+  if (v < 1024) return v + ' B';
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB';
+  if (v < 1024 * 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB';
+  return (v / 1024 / 1024 / 1024).toFixed(2) + ' GB';
 }

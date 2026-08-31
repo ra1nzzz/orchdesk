@@ -261,6 +261,41 @@ input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;ut
 .feedback button{padding:2px 10px;border:1px solid var(--border-strong);border-radius:6px;font-size:11px}
 .feedback button:hover{background:var(--bg-hover)}
 
+/* ---- PRD FR-6 分叉点节点 + 血缘 + 回放时间线 ---- */
+.fork-origin{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--fg-faint);background:var(--bg-inset);border:1px dashed var(--border-strong);border-radius:7px;padding:5px 9px;margin:6px 0 2px}
+.fork-node{display:flex;align-items:center;gap:8px;margin:10px 0;font-size:11px;color:var(--fg-faint)}
+.fork-node .fn-line{flex:1;height:1px;background:repeating-linear-gradient(90deg,var(--border-strong) 0 4px,transparent 4px 8px)}
+.fork-node .fn-badge{display:inline-flex;align-items:center;gap:4px;flex:none;padding:2px 8px;border:1px solid var(--border-strong);border-radius:999px;color:var(--fg-dim);background:var(--bg-panel)}
+.fork-node .fn-meta{flex:none;max-width:52%;text-align:right}
+.replay{position:relative;padding-left:16px}
+.replay::before{content:"";position:absolute;left:5px;top:6px;bottom:6px;width:1px;background:var(--border-strong)}
+.rp-item{position:relative;padding:7px 0 7px 4px}
+.rp-item .rp-dot{position:absolute;left:-15px;top:12px;width:9px;height:9px;border-radius:50%;background:var(--fg-faint);border:2px solid var(--bg)}
+.rp-user .rp-dot{background:var(--accent)}
+.rp-agent .rp-dot{background:var(--ok)}
+.rp-tool .rp-dot{background:var(--warn)}
+.rp-subagent .rp-dot{background:var(--accent)}
+.rp-fork-origin .rp-dot{background:var(--fg-dim);border-style:dashed}
+.rp-head{gap:7px;align-items:center;flex-wrap:wrap}
+.rp-head .rp-seq{font-size:10.5px;color:var(--fg-faint)}
+.rp-head .rp-label{font-size:12px;font-weight:600;color:var(--fg-dim)}
+.rp-head .rp-ts{margin-left:auto;font-size:10.5px}
+.rp-detail{font-size:11.5px;color:var(--fg-faint);margin-top:3px;line-height:1.55;word-break:break-word}
+
+/* ---- PRD FR-8 沙箱日志检索 ---- */
+.sblog-bar{display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.sblog-stats{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:11px}
+.sblog{max-height:260px;overflow-y:auto}
+.sblog .al{gap:6px;align-items:center}
+.sblog .al > span{flex:none}
+
+/* ---- PRD FR-4.2 数据目录内容清单 ---- */
+.dir-inv{display:flex;flex-direction:column;gap:3px;margin-top:6px;max-height:220px;overflow-y:auto}
+.dir-inv .di-row{display:flex;align-items:center;gap:8px;font-size:11.5px;padding:3px 6px;border-radius:5px;background:var(--bg)}
+.dir-inv .di-row > span{white-space:nowrap}
+.dir-inv .di-row .mono{color:var(--fg-dim);min-width:0}
+.dir-inv .di-row .faint.mono{color:var(--fg-faint);font-variant-numeric:tabular-nums}
+
 /* Agent 消息 Markdown 渲染样式 */
 .md-body h1{font-size:16px;font-weight:700;margin:10px 0 4px;color:var(--fg)}
 .md-body h2{font-size:14px;font-weight:700;margin:8px 0 3px;color:var(--fg)}

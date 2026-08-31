@@ -20,6 +20,15 @@ import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow } from './dsh-runtime';
 import { getHostServices } from './host-services';
+import {
+  normalizeSandboxLog,
+  appendSandboxLog,
+  searchSandboxLog,
+  sandboxLogStats,
+  SANDBOX_LOG_MAX,
+  type SandboxLogEntry,
+  type SandboxLogQuery,
+} from './sandbox-log';
 import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
 import { initLogger, mirrorConsole, log, logModel, logFilePath } from './logger';
 import {
@@ -30,7 +39,9 @@ import {
   mergeSessionsData,
   migrateDataDirs,
   migrateDataFiles,
+  formatBytes,
   resolveDataDir,
+  scanDataDir,
   setDataDirResolver,
   type MigrateFileSpec,
 } from './data-dir';
@@ -95,6 +106,8 @@ const DATA_FILES: MigrateFileSpec[] = [
   // 凭据类：整份搬运，禁止深合并——合并会破坏 safeStorage 密文结构。
   { name: DATA_FILE_NAMES.guanji, mode: 'copy-if-absent' },
   { name: DATA_FILE_NAMES.hub, mode: 'copy-if-absent' },
+  // 沙箱日志：换数据目录后要能接着追溯历史判定，故随目录迁移。
+  { name: DATA_FILE_NAMES.sandboxLog, mode: 'copy-if-absent' },
 ];
 const DATA_DIRS = [DATA_DIR_NAMES.skills];
 
@@ -646,6 +659,7 @@ function sessionCwd(sessionId?: string): string {
 async function approvalGate(toolName: string, reason: string, sessionId?: string, target?: string): Promise<string | null> {
   let mode = 'default';
   try { mode = (await authzService?.getMode()) || 'default'; } catch { /* 缺省 default */ }
+  lastAuthMode = mode;
   // 偏执模式压倒白名单：用户切到 paranoid 的意图就是「全锁」，
   // 此前点过的「永久允许」不该悄悄再把门打开（可在设置页撤销白名单）。
   if (mode === 'paranoid') return 'paranoid（只读）模式下禁止该操作';
@@ -686,6 +700,67 @@ async function outboundGate(text: string, sessionId?: string): Promise<string | 
   return denied;
 }
 
+// ---------------------------------------------------------------------------
+// PRD FR-8 沙箱日志（可检索）
+// 此前所有沙箱判定只活在 executeTool 的 return 里，事后无法回答「Agent 刚才
+// 对磁盘 / 网络做了什么、哪次被拦下」。这里做统一埋点 + 写穿落盘。
+// 落盘失败只 WARN：日志是观测设施，不是安全门，绝不因为记不下来就拒绝执行。
+// ---------------------------------------------------------------------------
+
+let sandboxLog: SandboxLogEntry[] = [];
+
+function sandboxLogFile(): string {
+  return path.join(dataDir(), DATA_FILE_NAMES.sandboxLog);
+}
+
+/** 启动装载：坏文件 / 缺文件 → 空日志（与白名单同策略，不猜内容）。 */
+function loadSandboxLog(): number {
+  try {
+    sandboxLog = normalizeSandboxLog(JSON.parse(fs.readFileSync(sandboxLogFile(), 'utf-8')));
+  } catch {
+    sandboxLog = [];
+  }
+  return sandboxLog.length;
+}
+
+/** 写穿落盘（与授权白名单同一节奏：安全审计不留「刚发生就崩了」的窗口）。 */
+function persistSandboxLog(): boolean {
+  try {
+    const file = sandboxLogFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(sandboxLog, null, 2), 'utf-8');
+    return true;
+  } catch (err) {
+    log('WARN', 'sandbox', `沙箱日志落盘失败（不影响工具执行）: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/**
+ * 记一条沙箱判定。
+ * 入参缺 tool / target / decision 会被 normalizeSandboxEntry 丢弃 —— 那种条目
+ * 存进去也检索不到，不如不留。
+ */
+function recordSandbox(input: {
+  tool: string;
+  kind: SandboxLogEntry['kind'];
+  target: string;
+  decision: SandboxLogEntry['decision'];
+  reason?: string;
+  sessionId?: string;
+}): void {
+  const before = sandboxLog.length;
+  sandboxLog = appendSandboxLog(sandboxLog, {
+    ...input,
+    mode: lastAuthMode,
+    ts: Date.now(),
+  });
+  if (sandboxLog.length !== before) persistSandboxLog();
+}
+
+/** 最近一次读到的授权模式（getMode 是异步的，日志只能留快照）。 */
+let lastAuthMode = 'default';
+
 async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }): Promise<ToolResult> {
   const { name, arguments: args } = tool;
   const cwd = sessionCwd(sessionCtx?.sessionId);
@@ -693,44 +768,76 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
     switch (name) {
       case 'file_read': {
         const filePath = path.resolve(cwd, String(args.path || ''));
-        if (!isPathAllowed(filePath)) return { name, result: '', error: '路径不在允许范围内' };
+        const sid = sessionCtx?.sessionId;
+        if (!isPathAllowed(filePath)) {
+          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
+          return { name, result: '', error: '路径不在允许范围内' };
+        }
         const content = fs.readFileSync(filePath, 'utf-8');
+        recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'allowed', sessionId: sid });
         return { name, result: content.slice(0, 50000) }; // 限制 50KB
       }
       case 'file_write': {
         const filePath = path.resolve(cwd, String(args.path || ''));
         const content = String(args.content || '');
-        if (!isPathAllowed(filePath)) return { name, result: '', error: '路径不在允许范围内' };
+        const sid = sessionCtx?.sessionId;
+        if (!isPathAllowed(filePath)) {
+          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
+          return { name, result: '', error: '路径不在允许范围内' };
+        }
         // 写文件可覆盖白名单内任意内容 → 同样过授权门（与 shell 同一 helper）
         const denied = await approvalGate('file_write', `写入 ${filePath}`, sessionCtx?.sessionId, filePath);
-        if (denied) return { name, result: '', error: denied };
+        if (denied) {
+          recordSandbox({ tool: name, kind: 'approval', target: filePath, decision: 'denied', reason: denied, sessionId: sid });
+          return { name, result: '', error: denied };
+        }
         const dir = path.dirname(filePath);
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(filePath, content, 'utf-8');
+        recordSandbox({
+          tool: name, kind: 'approval', target: filePath, decision: 'allowed',
+          reason: `已写入 ${path.basename(filePath)} (${content.length} 字节)`, sessionId: sid,
+        });
         return { name, result: `已写入 ${path.basename(filePath)} (${content.length} 字节)` };
       }
       case 'file_list': {
         const dirPath = path.resolve(cwd, String(args.path || '.'));
-        if (!isPathAllowed(dirPath)) return { name, result: '', error: '路径不在允许范围内' };
+        const sid = sessionCtx?.sessionId;
+        if (!isPathAllowed(dirPath)) {
+          recordSandbox({ tool: name, kind: 'path', target: dirPath, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
+          return { name, result: '', error: '路径不在允许范围内' };
+        }
         const entries = fs.readdirSync(dirPath, { withFileTypes: true });
         const items = entries.map(e => `${e.isDirectory() ? '📁' : '📄'} ${e.name}`).join('\n');
+        recordSandbox({ tool: name, kind: 'path', target: dirPath, decision: 'allowed', sessionId: sid });
         return { name, result: items || '(空目录)' };
       }
       case 'shell_command': {
         const cmd = String(args.command || '');
         const cmdName = (cmd.split(/[\s/\\]+/)[0] || '').toLowerCase();
+        const sid = sessionCtx?.sessionId;
         if (!cmdName) return { name, result: '', error: '命令为空' };
         if (!ALLOWED_COMMAND_SET.has(cmdName)) {
+          recordSandbox({
+            tool: name, kind: 'command', target: cmd, decision: 'denied',
+            reason: `命令「${cmdName}」不在白名单中`, sessionId: sid,
+          });
           return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${ALLOWED_COMMANDS.slice(0, 20).join(', ')}...` };
         }
         // ---- 授权门（PRD L3/L4 / T-P3-2）：命令执行必须过审批 ----
         // 此前审批 UI 已建但工具链路从不触发（与 intent/trace 同款死挂点，BUG-021 修复）。
         const denied = await approvalGate('shell_command', cmd, sessionCtx?.sessionId, cmd);
-        if (denied) return { name, result: '', error: denied };
+        if (denied) {
+          recordSandbox({ tool: name, kind: 'approval', target: cmd, decision: 'denied', reason: denied, sessionId: sid });
+          return { name, result: '', error: denied };
+        }
         // PRD FR-12：删除 / 对外发送 / 不可逆命令在授权门之上再加一道补偿层二次确认
         // （L4 双确认）。普通命令（git/npm/ls…）判定为 other，不额外打扰。
         const outboundDenied = await outboundGate(cmd, sessionCtx?.sessionId);
-        if (outboundDenied) return { name, result: '', error: outboundDenied };
+        if (outboundDenied) {
+          recordSandbox({ tool: name, kind: 'outbound', target: cmd, decision: 'denied', reason: outboundDenied, sessionId: sid });
+          return { name, result: '', error: outboundDenied };
+        }
         // 进程隔离 + 不阻塞主进程：在子进程中异步执行。
         // cwd 用会话工作目录（set_cwd 可切换），缺省回落 resolveShellCwd()。
         const { exec } = await import('node:child_process');
@@ -753,25 +860,44 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
             });
             child.on('error', reject);
           });
+          recordSandbox({ tool: name, kind: 'approval', target: cmd, decision: 'allowed', sessionId: sid });
           return { name, result: output.slice(0, 50000) };
         } catch (err) {
+          recordSandbox({
+            tool: name, kind: 'command', target: cmd, decision: 'error',
+            reason: (err as Error).message, sessionId: sid,
+          });
           return { name, result: '', error: (err as Error).message.slice(0, 2000) };
         }
       }
       case 'web_fetch': {
         const url = String(args.url || '');
-        if (!url.startsWith('http://') && !url.startsWith('https://')) return { name, result: '', error: 'URL 必须以 http(s) 开头' };
+        const sid = sessionCtx?.sessionId;
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: 'URL 必须以 http(s) 开头', sessionId: sid });
+          return { name, result: '', error: 'URL 必须以 http(s) 开头' };
+        }
         // PRD FR-8：网络请求域名白名单。非白名单域名 = 边界外外发 → 补偿层二次确认。
         // 此前 v0.9.1 以「只读 GET 无不可逆外发」为由跳过，与 FR-12 明文冲突（外发即边界外 emission）。
         const policy = getHostServices()?.sandboxPolicy;
         const allowed = policy?.isDomainAllowed ? policy.isDomainAllowed(url) : true;
         if (!allowed) {
           const denied = await outboundGate(`请求接口 ${url}`, sessionCtx?.sessionId);
-          if (denied) return { name, result: '', error: `域名不在白名单：${denied}` };
+          if (denied) {
+            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: `域名不在白名单：${denied}`, sessionId: sid });
+            return { name, result: '', error: `域名不在白名单：${denied}` };
+          }
+          recordSandbox({ tool: name, kind: 'outbound', target: url, decision: 'allowed', reason: '非白名单域名经外发二次确认后放行', sessionId: sid });
         }
-        const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-        const text = await res.text();
-        return { name, result: text.slice(0, 30000) };
+        try {
+          const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+          const text = await res.text();
+          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
+          return { name, result: text.slice(0, 30000) };
+        } catch (err) {
+          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'error', reason: (err as Error).message, sessionId: sid });
+          return { name, result: '', error: (err as Error).message.slice(0, 2000) };
+        }
       }
       case 'memory_save': {
         // dsh memory 服务（global 域）落地——「记住 X」从口头应答变成真实持久化
@@ -784,19 +910,55 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
       }
       case 'set_cwd': {
         const resolved = path.resolve(String(args.path || ''));
-        if (!isPathAllowed(resolved)) return { name, result: '', error: '路径不在允许范围内' };
+        const sid = sessionCtx?.sessionId;
+        if (!isPathAllowed(resolved)) {
+          recordSandbox({ tool: name, kind: 'path', target: resolved, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
+          return { name, result: '', error: '路径不在允许范围内' };
+        }
         let isDir = false;
         try { isDir = fs.statSync(resolved).isDirectory(); } catch { /* not exist */ }
         if (!isDir) return { name, result: '', error: `目录不存在：${resolved}` };
         if (sessionCtx?.sessionId) sessionCwds.set(sessionCtx.sessionId, resolved);
+        recordSandbox({ tool: name, kind: 'path', target: resolved, decision: 'allowed', sessionId: sid });
         return { name, result: `工作目录已切换：${resolved}` };
       }
       default:
         return { name, result: '', error: `未知工具: ${name}` };
     }
   } catch (err) {
-    return { name, result: '', error: (err as Error).message };
+    // 执行期异常也是要可追溯的事实（file_read 读不存在的文件、磁盘满、权限被拒…）。
+    // 此前这类错误直接返回，沙箱日志里一条都没有，事后查不到「Agent 到底碰了什么」。
+    const message = (err as Error).message;
+    recordSandbox({
+      tool: name,
+      kind: sandboxKindOf(name),
+      target: sandboxTargetOf(name, args, cwd),
+      decision: 'error',
+      reason: message,
+      sessionId: sessionCtx?.sessionId,
+    });
+    return { name, result: '', error: message };
   }
+}
+
+/** 工具 → 判定类型（异常路径没有显式 kind，按工具归类以便检索）。 */
+function sandboxKindOf(toolName: string): SandboxLogEntry['kind'] {
+  if (toolName === 'shell_command') return 'command';
+  if (toolName === 'web_fetch') return 'network';
+  return 'path';
+}
+
+/** 工具 → 判定对象（取最能说明「碰了什么」的那一个入参）。 */
+function sandboxTargetOf(toolName: string, args: Record<string, unknown> | undefined, cwd: string): string {
+  const a = args || {};
+  const raw = toolName === 'shell_command' ? a.command
+    : toolName === 'web_fetch' ? a.url
+      : (a.path ?? a.content);
+  if (raw === undefined || raw === null || raw === '') return cwd;
+  const s = String(raw);
+  // 相对路径解析成绝对路径再记，否则检索「D:/x/y.txt」永远命中不了。
+  if (/^[a-zA-Z]:[\\/]|^\//.test(s)) return s;
+  try { return path.resolve(cwd, s); } catch { return s; }
 }
 
 
@@ -1480,7 +1642,33 @@ ipcMain.handle('orchdesk:sandbox-set-network-allow', (_e, list: string[]) => {
   const policy = getHostServices()?.sandboxPolicy;
   if (!policy?.setNetworkAllow) return { ok: false, reason: '沙箱服务未就绪' };
   policy.setNetworkAllow(Array.isArray(list) ? list : []);
-  return { ok: true, networkAllow: policy.getNetworkAllow ? policy.getNetworkAllow() : ['*'] };
+  const next = policy.getNetworkAllow ? policy.getNetworkAllow() : ['*'];
+  // 放宽网络白名单是安全相关配置变更 → 入沙箱日志，事后可追溯「什么时候放开了哪些域名」。
+  recordSandbox({
+    tool: 'sandbox.network',
+    kind: 'config',
+    target: next.join(','),
+    decision: 'allowed',
+    reason: `网络域名白名单已更新（${next.length} 项）`,
+  });
+  return { ok: true, networkAllow: next };
+});
+
+// PRD FR-8：沙箱日志检索（设置页入口）
+ipcMain.handle('orchdesk:sandbox-log', (_e, q: SandboxLogQuery | undefined) => {
+  const query = (q && typeof q === 'object' ? q : {}) as SandboxLogQuery;
+  return {
+    entries: searchSandboxLog(sandboxLog, query),
+    stats: sandboxLogStats(sandboxLog),
+    total: sandboxLog.length,
+    max: SANDBOX_LOG_MAX,
+  };
+});
+ipcMain.handle('orchdesk:sandbox-log-clear', () => {
+  const cleared = sandboxLog.length;
+  sandboxLog = [];
+  persistSandboxLog();
+  return { ok: true, cleared, entries: [], stats: sandboxLogStats(sandboxLog) };
 });
 
 // TRACE 用户反馈（PRD FR-7，第八死挂点修复）：渲染层每条 Agent 消息底部
@@ -1811,6 +1999,26 @@ ipcMain.handle('orchdesk:open-log-dir', async () => {
   }
 });
 
+/**
+ * PRD FR-4.2「数据目录 · 内容清单」：真实扫描数据目录。
+ * 设置页此前写死「~ 24 MB」——与实际磁盘无关的数字，等于拿假数据向用户承诺备份体积。
+ * 扫描失败（目录不存在 = 首次运行）返回空清单而不是报错。
+ */
+ipcMain.handle('orchdesk:data-dir-inventory', () => {
+  try {
+    const inv = scanDataDir(dataDir());
+    // 体积文案在主进程侧格式化（复用 data-dir.formatBytes），渲染层不再各写一套换算。
+    return {
+      ok: true,
+      ...inv,
+      items: inv.items.map((i) => ({ ...i, sizeText: formatBytes(i.size) })),
+      totalSizeText: formatBytes(inv.totalSize),
+    };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message, dir: dataDir(), items: [], totalSize: 0, totalFiles: 0, totalSizeText: '0 B', errors: [] };
+  }
+});
+
 /** 打开文件夹选择对话框 */
 ipcMain.handle('orchdesk:pick-folder', async () => {
   try {
@@ -1990,6 +2198,15 @@ app.whenReady().then(async () => {
   // BUG-014 根因修复：启动真实 Cordis 运行时（宿主服务 + 9 个插件），
   // 此前 packages/plugin/* 从未被加载，FR-7/9/10/11/12/13 在应用内全是空壳。
   await bootRuntime();
+
+  // PRD FR-8：沙箱日志装载（必须在 migrateLegacyData 之后——日志随数据目录迁移）。
+  // 坏文件 → 空日志，不阻断启动：日志是观测设施。
+  try {
+    const n = loadSandboxLog();
+    if (n > 0) log('INFO', 'sandbox', `沙箱日志已装载：${n} 条（${sandboxLogFile()}）`);
+  } catch (err) {
+    console.warn('[orchdesk] 沙箱日志装载失败:', (err as Error).message);
+  }
 
   // PRD FR-4.2：桌面集成开关全量重放（此前 6 项全是设置页空壳，见第十个死挂点）。
   // 必须在 createWindow 之前——全局快捷键/托盘都依赖 mainWindow 存在与否。

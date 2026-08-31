@@ -174,6 +174,11 @@
 
   let dynamicModels = [];
 
+  /* ---------- FR-6 分叉与回放（纯逻辑，与验证套件共用同一份实现） ----------
+   * session-fork.js 由 index.html 在 app.js 之前加载；缺失时 FORK 为 null，
+   * 分叉点选择与回放视图降级为不可用并如实提示（不静默退化成「全继承」）。 */
+  const FORK = (typeof window !== 'undefined' && window.OrchDeskFork) ? window.OrchDeskFork : null;
+
   /* ---------- 桥接（主进程 contextBridge；无桥接时显示"未连接"） ---------- */
   const bridge = (function () {
     const real = (typeof window !== 'undefined' && window.orchdesk) ? window.orchdesk : null;
@@ -207,6 +212,12 @@
       // 沙箱（PRD FR-8）
       getSandbox: () => Promise.resolve({ mode: 'workspace-write', networkAllow: ['*'] }),
       setNetworkAllow: (list) => Promise.resolve({ ok: false, reason: '主进程未接入', networkAllow: list }),
+      // PRD FR-8：沙箱日志检索（无桥时返回 null → loaded 保持 false，UI 标注未接入
+      // 而不是假装「空日志」—— 这两种状态的处置完全不同）
+      getSandboxLog: () => Promise.resolve(null),
+      clearSandboxLog: () => Promise.resolve({ ok: false, cleared: 0 }),
+      // PRD FR-4.2：数据目录内容清单（无桥时 ok=false，UI 不显示假体积）
+      getDataDirInventory: () => Promise.resolve({ ok: false, dir: '', items: [], totalSize: 0, totalFiles: 0, totalSizeText: '', errors: [] }),
       // 桌面集成（PRD FR-4.2）：无桥时 config 为 null → 开关降级为不可点并标注
       getDesktop: () => Promise.resolve({ config: null, shortcutLabel: 'Ctrl+Shift+Space', labels: {}, autostartEffective: false }),
       setDesktop: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
@@ -234,6 +245,10 @@
       openLogDir: () => Promise.resolve({ ok: false, reason: '未接入' }),
     };
   })();
+
+  /* ---------- PRD FR-8 沙箱日志：判定结果与类型的中文名 ---------- */
+  const SL_DECISION_LABELS = { all: '全部结果', allowed: '放行', denied: '拒绝', error: '出错' };
+  const SL_KIND_LABELS = { all: '全部类型', path: '路径', command: '命令', network: '网络', approval: '授权', outbound: '外发', config: '配置' };
 
   /* ---------- 状态 ---------- */
   const state = {
@@ -268,7 +283,18 @@
     traceBuiltin: false,
     // 桌面集成（PRD FR-4.2）：6 个开关此前全是 data-action="todo" 空壳。
     // null = 桥未接入（浏览器预览），UI 降级为不可点并标注。
-    desktop: null
+    desktop: null,
+    // 回放视图（PRD FR-6）：存放被回放的会话 id；非 null 时主区渲染只读时间线。
+    replayFor: null,
+    // 沙箱日志（PRD FR-8 可检索）：loaded=false 时 UI 标注「未接入」，
+    // 与「接进了但没记录」区分开 —— 这两种状态的处置完全不同。
+    sandboxLog: {
+      entries: [], stats: { total: 0, allowed: 0, denied: 0, error: 0, byTool: [] },
+      total: 0, max: 500, keyword: '', decision: 'all', kind: 'all', loaded: false,
+    },
+    // 数据目录内容清单（PRD FR-4.2）：真实扫描结果。ok=false = 未接入/扫描失败，
+    // UI 显示「未接入」而不是沿用写死的「~ 24 MB」。
+    dataDirInventory: { ok: false, dir: '', items: [], totalSize: 0, totalFiles: 0, totalSizeText: '', errors: [] }
   };
 
   const $ = (s) => document.querySelector(s);
@@ -282,6 +308,8 @@
   // 导入期间挂起 persist：persist-sessions 是「渲染层状态整体重写」，若在
   // 主进程导入落盘与渲染层重拉之间触发，会把导入数据整体冲掉（审阅阻断项）。
   let importSuspend = false;
+  /** 沙箱日志检索防抖句柄（PRD FR-8）。 */
+  let sblogTimer = 0;
 
   function persist() { if (importSuspend) return; persistSessions(); persistProjects(); }
 
@@ -364,6 +392,55 @@
   }
 
   /** 悬浮窗内容由渲染层推送（主进程不猜「当前会话」）。未开启悬浮窗时不发 IPC。 */
+  /* ---------- PRD FR-8 沙箱日志 ---------- */
+  /** 当前检索条件（从 state 直接组装，避免 UI 与请求各存一份）。 */
+  function sandboxLogQuery() {
+    return { keyword: state.sandboxLog.keyword, decision: state.sandboxLog.decision, kind: state.sandboxLog.kind, limit: 100 };
+  }
+
+  /** 合并主进程返回。r 为 null / 非对象 → 保持 loaded=false（UI 标注未接入）。 */
+  function applySandboxLog(r) {
+    if (!r || typeof r !== 'object' || !Array.isArray(r.entries)) return;
+    state.sandboxLog = {
+      entries: r.entries,
+      stats: r.stats || { total: 0, allowed: 0, denied: 0, error: 0, byTool: [] },
+      total: Number(r.total) || r.entries.length,
+      max: Number(r.max) || state.sandboxLog.max,
+      keyword: state.sandboxLog.keyword,
+      decision: state.sandboxLog.decision,
+      kind: state.sandboxLog.kind,
+      loaded: true,
+    };
+  }
+
+  /* ---------- PRD FR-4.2 数据目录内容清单 ---------- */
+  /**
+   * 重拉数据目录清单。清单只在启动时取一次，导入数据 / 导出快照之后体积会变，
+   * 所以给用户一个手动刷新入口 —— 否则 UI 上的数字会一直停在启动那一刻。
+   */
+  function refreshDataDirInventory() {
+    if (typeof bridge.getDataDirInventory !== 'function') {
+      state.dataDirInventory = { ok: false, dir: '', items: [], totalSize: 0, totalFiles: 0, totalSizeText: '', errors: [] };
+      if (state.page === 'settings') render();
+      return;
+    }
+    bridge.getDataDirInventory().then((r) => {
+      state.dataDirInventory = (r && typeof r === 'object')
+        ? r
+        : { ok: false, dir: '', items: [], totalSize: 0, totalFiles: 0, totalSizeText: '', errors: [] };
+      if (state.page === 'settings') render();
+    }).catch(() => {});
+  }
+
+  /** 重拉日志并只重绘设置区（不整体 render，避免打断输入框光标）。 */
+  function refreshSandboxLog() {
+    if (typeof bridge.getSandboxLog !== 'function') return;
+    bridge.getSandboxLog(sandboxLogQuery()).then((r) => {
+      applySandboxLog(r);
+      if (state.page === 'settings') render();
+    }).catch(() => {});
+  }
+
   function pushFloatingContext() {
     const d = state.desktop;
     if (!d || !d.config || !d.config.floating) return;
@@ -476,7 +553,7 @@
     return `<div class="proj-seg">
       <span class="seg-label">项目 / 任务</span>
       <div class="seg-tabs">
-        <button class="seg-tab active" data-action="todo">项目</button>
+        <span class="seg-tab active">项目</span>
       </div>
     </div>
     <div style="display:align-items:center;gap:4px;padding:4px 10px 8px">
@@ -714,6 +791,49 @@
     </div>`;
   }
 
+  /* ---------- FR-6 分叉点节点标记 ---------- */
+  function renderForkNode(fork, atTail) {
+    const when = new Date(fork.at).toLocaleString('zh-CN');
+    return `<div class="fork-node">
+      <span class="fn-line"></span>
+      <span class="fn-badge">${ic('fork', 13)} 分叉点</span>
+      <span class="fn-meta">继承自「${esc(fork.fromTitle || fork.from)}」第 ${fork.atIndex} 条消息之后 · ${esc(when)}${atTail ? ' · 其后为本分支独立写入' : ''}</span>
+    </div>`;
+  }
+
+  /* ---------- FR-6 回放视图（只读时间线，从会话数据重建） ---------- */
+  function renderReplay(s) {
+    const events = FORK ? FORK.buildReplayTimeline(s) : [];
+    const badgeOf = (kind) => ({
+      'fork-origin': 'info', user: 'info', agent: 'ok', tool: 'warn', subagent: 'info', feedback: 'ok',
+    }[kind] || 'info');
+    const labelOf = (kind) => (FORK.REPLAY_KIND_LABELS[kind] || kind);
+    return `<div style="flex:1;overflow-y:auto" id="msgScroll">
+      <div style="max-width:760px;margin:0 auto;padding:18px 16px 10px">
+        <div class="row" style="justify-content:space-between;margin-bottom:10px">
+          <div class="row"><b style="font-size:16px">回放 · ${esc(s.title)}</b><span class="badge info">只读</span></div>
+          <div class="row" style="gap:8px">
+            <span class="faint">${events.length} 个事件</span>
+            <button class="btn sm" data-action="replay-close" data-sid="${esc(s.id)}">返回会话</button>
+          </div>
+        </div>
+        <div class="faint" style="margin-bottom:10px">回放从会话数据重建，仅用于追溯，<b>不可编辑、不可继续对话</b>。</div>
+        ${events.length ? `<div class="replay">${events.map((ev) => `<div class="rp-item rp-${esc(ev.kind)}">
+          <span class="rp-dot"></span>
+          <div class="rp-main">
+            <div class="row rp-head">
+              <span class="rp-seq mono">#${ev.seq}</span>
+              <span class="badge ${badgeOf(ev.kind)}">${esc(labelOf(ev.kind))}</span>
+              <span class="rp-label">${esc(ev.label)}</span>
+              ${ev.status === 'running' ? '<span class="badge warn">进行中</span>' : ''}
+              <span class="faint rp-ts">${esc(ev.ts)}</span>
+            </div>
+            <div class="rp-detail">${ev.detail ? esc(ev.detail) : '<span class="faint">（无摘要）</span>'}</div>
+          </div>
+        </div>`).join('')}</div>` : '<div class="ctx-empty">该会话还没有可回放的事件</div>'}
+      </div></div>`;
+  }
+
   const VIEWS = {};
   VIEWS.session = {
     side() { return renderSideSession(); },
@@ -728,14 +848,30 @@
         return renderHomeScreen();
       }
       const s = state.sessions[state.sel];
+      // 回放视图（FR-6 只读）：优先于普通消息流，且不挂 composer。
+      if (state.replayFor === s.id) return renderReplay(s);
+
+      // 血缘提示 + 消息流中的分叉点节点标记（FR-6）
+      const fork = FORK ? FORK.normalizeFork(s.fork) : null;
+      const msgs = s.msgs || [];
+      const atTail = !!fork && fork.atIndex >= msgs.length;
+      const msgHtml = msgs
+        .map((m, i) => (fork && i === fork.atIndex ? renderForkNode(fork, atTail) : '') + renderMsg(m, s.id))
+        .join('') + (atTail ? renderForkNode(fork, true) : '');
+
       return `<div style="flex:1;overflow-y:auto" id="msgScroll">
         <div style="max-width:760px;margin:0 auto;padding:18px 16px 10px">
           <div class="row" style="justify-content:space-between;margin-bottom:4px">
             <div class="row"><b style="font-size:16px">${esc(s.title)}</b>
               <span class="badge info">${esc(s.expert)}</span></div>
-            <button class="iconbtn" data-action="toggle-ctx" title="切换右侧面板" style="transform:rotate(${state.ctxOpen ? 0 : 180}deg);transition:.15s">${ic('chev', 14)}</button></div>
+            <div class="row" style="gap:4px">
+              ${FORK ? `<button class="btn sm ghost" data-action="fork" data-sid="${esc(s.id)}" title="从此会话创建分支（可选分叉点）">${ic('fork', 13)} 分叉</button>` : ''}
+              ${FORK ? `<button class="btn sm ghost" data-action="replay-open" data-sid="${esc(s.id)}" title="只读回放本会话">${ic('clock', 13)} 回放</button>` : ''}
+              <button class="iconbtn" data-action="toggle-ctx" title="切换右侧面板" style="transform:rotate(${state.ctxOpen ? 0 : 180}deg);transition:.15s">${ic('chev', 14)}</button></div>
+          </div>
+          ${fork ? `<div class="fork-origin">${ic('fork', 13)} 分支自 <span class="mono">#${esc(fork.from)}</span>${fork.fromTitle ? `「${esc(fork.fromTitle)}」` : ''} · 继承前 ${fork.atIndex} 条 · ${esc(new Date(fork.at).toLocaleString('zh-CN'))}</div>` : ''}
           <div id="confirmZone"></div>
-          ${(s.msgs || []).map((m) => renderMsg(m, s.id)).join('')}
+          ${msgHtml}
         </div></div>
       ${renderComposer(s)}`;
     },
@@ -1108,6 +1244,35 @@
             ${state.compAudit.length ? state.compAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge warn">补偿</span><span class="mono faint">${(e.text || '').replace(/</g, '&lt;')}</span>${e.note ? `<span class="faint">${e.note}</span>` : ''}</div>`).join('') : '<div class="faint">暂无补偿动作记录（外发/不可逆操作后在此提供「补偿动作」）</div>'}
           </div>
           <div class="row" style="margin-top:8px"><button class="btn sm" data-action="comp-record">+ 记录补偿动作</button><span class="faint">不保证完全撤销，仅尽力补偿</span></div>
+          <div class="sec-title" style="margin:16px 0 8px">沙箱日志（PRD FR-8 · 可检索）</div>
+          <div class="faint" style="margin-bottom:6px">记录每一次沙箱判定：路径 / 命令 / 域名白名单、授权门、外发预判，以及执行成败。环形缓冲保留最近 ${state.sandboxLog.max} 条，随数据目录迁移。</div>
+          <div class="sblog-bar">
+            <input type="text" id="sblog-kw" class="inp mono" placeholder="检索：路径 / 命令 / 域名 / 会话 ID" style="flex:1;font-size:11.5px" value="${esc(state.sandboxLog.keyword)}">
+            <select id="sblog-decision" class="inp" style="width:96px">
+              ${['all', 'denied', 'allowed', 'error'].map((d) => `<option value="${d}"${state.sandboxLog.decision === d ? ' selected' : ''}>${SL_DECISION_LABELS[d]}</option>`).join('')}
+            </select>
+            <select id="sblog-kind" class="inp" style="width:110px">
+              ${['all', 'path', 'command', 'network', 'approval', 'outbound', 'config'].map((k) => `<option value="${k}"${state.sandboxLog.kind === k ? ' selected' : ''}>${SL_KIND_LABELS[k]}</option>`).join('')}
+            </select>
+            <button class="btn sm" data-action="sblog-clear" ${state.sandboxLog.total ? '' : 'disabled'}>清空</button>
+          </div>
+          <div class="sblog-stats">
+            <span class="badge info">共 ${state.sandboxLog.total} 条</span>
+            <span class="badge ok">放行 ${state.sandboxLog.stats.allowed}</span>
+            <span class="badge danger">拒绝 ${state.sandboxLog.stats.denied}</span>
+            ${state.sandboxLog.stats.error ? `<span class="badge warn">出错 ${state.sandboxLog.stats.error}</span>` : ''}
+            ${state.sandboxLog.stats.byTool.map((t) => `<span class="faint mono">${esc(t.tool)} ×${t.count}</span>`).join('')}
+          </div>
+          <div class="audit-log sblog">
+            ${state.sandboxLog.entries.length ? state.sandboxLog.entries.map((e) => `<div class="al">
+              <span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString('zh-CN')}</span>
+              <span class="badge ${e.decision === 'allowed' ? 'ok' : (e.decision === 'denied' ? 'danger' : 'warn')}">${SL_DECISION_LABELS[e.decision] || e.decision}</span>
+              <span class="badge info">${SL_KIND_LABELS[e.kind] || e.kind}</span>
+              <span class="mono faint">${esc(e.tool)}</span>
+              <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.target)}">${esc(e.target)}</span>
+              ${e.reason ? `<span class="faint" style="max-width:32%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.reason)}">${esc(e.reason)}</span>` : ''}
+            </div>`).join('') : `<div class="faint">${state.sandboxLog.loaded ? '暂无匹配记录（Agent 执行文件 / 命令 / 网络操作时写入）' : '沙箱日志未接入（主进程桥不可用）'}</div>`}
+          </div>
         </div>
         <div class="sec-title" id="settings-section-prompt"><span class="ico">${ic('at', 14)}</span>系统提示词库</div>
         <div class="card">
@@ -1133,9 +1298,16 @@
         </div>
         <div class="sec-title" id="settings-section-data"><span class="ico">${ic('folder', 14)}</span>数据目录</div>
         <div class="card">
-          <div class="row"><span class="mono">%APPDATA%/OrchDesk</span><span class="faint">· 本地优先，数据不出本机</span></div>
-          <div class="faint" style="margin-top:6px;font-size:11.5px">包含 sessions.db · memory · plugins · logs · 缓存</div>
-          <div class="row" style="margin-top:8px"><button class="btn sm" data-action="open-project-dir">打开目录</button><button class="btn sm" data-action="open-log-dir">打开日志</button><button class="btn sm" data-action="snapshot-data">导出快照</button><button class="btn sm primary" data-action="check-updates">检查更新（先快照）</button></div>
+          <div class="row"><span class="mono">${esc(state.dataDirInventory.dir || '%APPDATA%/OrchDesk')}</span><span class="faint">· 本地优先，数据不出本机</span></div>
+          ${state.dataDirInventory.ok
+    ? `<div class="faint" style="margin-top:6px;font-size:11.5px">共 ${esc(state.dataDirInventory.totalSizeText)} · ${state.dataDirInventory.totalFiles} 个文件${state.dataDirInventory.errors.length ? ` · <span class="badge warn">${state.dataDirInventory.errors.length} 项扫描失败</span>` : ''}</div>
+             <div class="dir-inv">${state.dataDirInventory.items.map((i) => `<div class="di-row">
+               <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(i.name)}">${ic(i.kind === 'dir' ? 'folder' : 'fileText', 12)} ${esc(i.name === '.' ? '（全部）' : i.name)}</span>
+               ${i.kind === 'dir' ? `<span class="faint">${i.files} 个文件</span>` : ''}
+               <span class="faint mono">${esc(i.sizeText || '')}</span>
+             </div>`).join('') || '<div class="faint">目录为空（首次运行尚未产生数据）</div>'}</div>`
+    : '<div class="faint" style="margin-top:6px;font-size:11.5px">内容清单未接入（主进程桥不可用）</div>'}
+          <div class="row" style="margin-top:8px"><button class="btn sm" data-action="open-project-dir">打开目录</button><button class="btn sm" data-action="open-log-dir">打开日志</button><button class="btn sm" data-action="dir-inv-refresh">刷新清单</button><button class="btn sm" data-action="snapshot-data">导出快照</button><button class="btn sm primary" data-action="check-updates">检查更新（先快照）</button></div>
           <div class="row" style="margin-top:6px"><button class="btn sm" data-action="export-data">导出数据</button><button class="btn sm" data-action="import-data">导入数据</button><span class="faint" style="font-size:11px">跨设备迁移 · 只补齐不覆盖</span></div>
         </div>
         <div class="sec-title" id="settings-section-about"><span class="ico">${ic('at', 14)}</span>关于</div>
@@ -1153,9 +1325,13 @@
         <div class="faint">模型、提示词、沙箱、授权、记忆等均为插件；关闭即卸载并回滚其注册（可逆效应），无残留。</div>
         <div class="sec-title">快捷操作</div>
         <div class="card" style="padding:10px">
-          <div class="row" style="padding:4px 0"><span>备份整个数据目录</span><span class="faint mono" style="margin-left:auto">~ 24 MB</span></div>
-          <div class="row" style="padding:4px 0"><span>清理 TRACE 遥测缓存</span><span class="faint mono" style="margin-left:auto">~ 1.2 MB</span></div>
-          <div class="row" style="padding:4px 0"><span>导出安装报告</span><span style="margin-left:auto"><button class="btn sm" data-action="todo">执行</button></span></div>
+          <div class="row" style="padding:4px 0"><span>备份整个数据目录</span>
+            <span class="faint mono" style="margin-left:auto">${state.dataDirInventory.ok ? esc(state.dataDirInventory.totalSizeText) : '未接入'}</span>
+            <button class="btn sm" data-action="export-data">导出</button></div>
+          <div class="row" style="padding:4px 0"><span>打开数据目录</span>
+            <span class="faint mono" style="margin-left:auto">${state.dataDirInventory.ok ? state.dataDirInventory.totalFiles + ' 个文件' : ''}</span>
+            <button class="btn sm" data-action="open-project-dir">打开</button></div>
+          <div class="row" style="padding:4px 0"><span>打开日志目录</span><button class="btn sm" style="margin-left:auto" data-action="open-log-dir">打开</button></div>
         </div>`;
     }
   };
@@ -1363,26 +1539,41 @@
     toast(`已重命名为「${s.title}」`, 'ok');
   }
 
-  async function doFork(sid, name) {
-    const src = state.sessions[sid]; if (!src) return;
+  /**
+   * 会话分叉（PRD FR-6）。
+   * @param sid     源会话
+   * @param name    分支名
+   * @param atIndex 分叉点：继承前 atIndex 条消息（缺省 = 全部继承）。
+   *                旧实现恒深拷贝全部消息，没有真正的「分叉点」概念。
+   */
+  async function doFork(sid, name, atIndex) {
+    const src = state.sessions[sid];
+    if (!src) return;
+    if (!FORK) { toast('分叉模块未加载（session-fork.js 缺失）', 'err'); return; }
+    const srcMsgs = Array.isArray(src.msgs) ? src.msgs : [];
     const id = 's' + Date.now().toString(36);
-    // clone() 此前未定义 → 点击「创建分支」必抛异常。改用 deepClone，
-    // 并继承源会话所属项目（此前硬编码 'p1'，会把分支塞进错误的项目组）。
     const s = deepClone(src);
     const pid = src.pid && src.pid !== '__task__' ? src.pid : (state.projects.find((p) => !p.archived) || {}).id || '__task__';
+    // 分叉点：由 FORK.makeForkLineage 夹到 [0, srcMsgs.length]，消息切片用同一个
+    // idx，保证「血缘记录的分叉点」与「实际继承的条数」永远一致。
+    const idx = FORK.makeForkLineage(src, Number(atIndex)).atIndex;
     s.id = id;
     s.title = name || ('分支-' + (src.title || sid));
     s.pid = pid;
     s.updated = '刚刚';
-    s.forkedFrom = sid;
-    s.forkedAt = new Date().toISOString();
-    // 消息深拷贝后仍为独立数组，后续写入互不影响
-    s.msgs = Array.isArray(s.msgs) ? s.msgs : [];
+    // 血缘：from + 分叉点 + 源标题快照（源被删后仍可读）
+    s.fork = FORK.makeForkLineage(src, idx);
+    delete s.forkedFrom; delete s.forkedAt;
+    // 只继承分叉点之前的消息。必须从 s.msgs（deepClone 产物）里切，不能从
+    // src.msgs 切 —— 后者元素仍是源会话的对象引用，分支与源会共享消息对象。
+    s.msgs = FORK.forkMessages(s.msgs, idx);
     state.sessions[id] = s;
     const proj = state.projects.find((p) => p.id === pid);
     if (proj && !proj.sessions.includes(id)) proj.sessions.unshift(id);
-    state.sel = id; persist(); render();
-    toast('已创建分支（继承前缀事件，独立写入）', 'ok');
+    state.sel = id; state.replayFor = null; persist(); render();
+    toast(idx >= srcMsgs.length
+      ? '已创建分支（继承全部消息，独立写入）'
+      : `已从第 ${idx} 条消息处分叉（继承前 ${idx} 条）`, 'ok');
   }
 
   async function doDeleteSession(sid) {
@@ -1603,16 +1794,39 @@
       </div>`);
   }
 
+  /** 分叉点选项文案：说明「继承到第几条之后」。 */
+  function forkOptionLabel(i, msgs) {
+    const n = msgs.length;
+    if (i >= n) return `全部 · 继承 ${n} 条`;
+    if (i <= 0) return '空起点 · 不继承任何消息';
+    const m = msgs[i - 1] || {};
+    const who = (m.r || m.role) === 'user' ? '你' : 'Agent';
+    const txt = String(m.x || m.text || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    return `第 ${i} 条（${who}：${txt || '（空消息）'}）之后`;
+  }
+
   function confirmNewBranch(sid) {
+    const s = state.sessions[sid];
+    const msgs = (s && Array.isArray(s.msgs)) ? s.msgs : [];
+    const n = msgs.length;
+    // 没有分叉模块 or 没有消息 → 不给分叉点选择，只做「全继承」（或空起点）。
+    const pickable = !!(FORK && n > 0);
     openModal(`<div class="mh">${ic('fork', 18)}<b>从此会话创建分支</b></div>
       <div class="mb">
-        <div>分支将继承当前 <span class="mono">#${sid}</span> 的全部事件前缀，但写入新事件 ID，<b>互不污染</b>。</div>
+        <div>分支继承 <span class="mono">#${sid}</span> 在<b>分叉点之前</b>的消息，之后写入独立会话，<b>互不污染</b>。</div>
         <div class="warn-list"><div>· 可在分叉点独立探索</div><div>· 主干不受影响</div><div>· 可随时合并或丢弃分支</div></div>
-        <div style="margin-top:10px">分支名：<input type="text" value="分支-${sid}-1" style="margin-top:4px"></div>
+        <div style="margin-top:10px">分支名：<input type="text" id="fork-name" value="分支-${sid}-1" style="margin-top:4px"></div>
+        ${pickable ? `<div style="margin-top:12px">
+          <div class="row" style="justify-content:space-between">
+            <span class="cm-label">分叉点</span><span class="tl mono" id="fork-at-label">${esc(forkOptionLabel(n, msgs))}</span>
+          </div>
+          <input type="range" id="fork-at" min="0" max="${n}" step="1" value="${n}" data-action="fork-slider" data-sid="${esc(sid)}" style="width:100%">
+          <div class="faint" style="font-size:11px;margin-top:2px">拖动选择从哪一条之后分出；默认继承全部 ${n} 条</div>
+        </div>` : `<div class="faint" style="margin-top:10px">${FORK ? '当前会话还没有消息，分支将从空起点开始。' : '分叉模块未加载，无法选择分叉点。'}</div>`}
       </div>
       <div class="mf">
         <button class="btn ghost" data-action="modal-cancel">取消</button>
-        <button class="btn primary" data-action="branch-confirm">创建分支</button>
+        <button class="btn primary" data-action="branch-confirm" data-sid="${esc(sid)}"${FORK ? '' : ' disabled'}>创建分支</button>
       </div>`);
   }
 
@@ -1786,7 +2000,8 @@
       }
 
       /* 会话 */
-      case 'sel': state.sel = id; pushFloatingContext(); render(); break;
+      // 切换会话即退出回放视图（回放只对被点开的那个会话有效）
+      case 'sel': state.sel = id; state.replayFor = null; pushFloatingContext(); render(); break;
       case 'newconv': doNewConv(); break;
       case 'home-send': {
         const homeInp = $('#homeComposer');
@@ -1912,8 +2127,20 @@
         pop.querySelector('[data-id="archive"]').onclick = () => { $('#menuRoot').innerHTML = ''; doArchiveSession(id); };
         pop.querySelector('[data-id="delete"]').onclick = async () => { $('#menuRoot').innerHTML = ''; await doDeleteSession(id); };
         break;
-      case 'fork': confirmNewBranch(state.sel); break;
-      case 'branch-confirm': { const inp = $('#modalRoot input[type=text]'); const nm = inp ? inp.value : ''; closeModal(); doFork(state.sel, nm); break; }
+      // 会话标题栏「分叉」（data-sid 优先；无则当前会话）
+      case 'fork': confirmNewBranch(el.dataset.sid || state.sel); break;
+      /* 创建分支（FR-6）：分叉点来自滑块，缺省 = 全继承 */
+      case 'branch-confirm': {
+        const inp = $('#modalRoot input[type=text]');
+        const nm = inp ? inp.value : '';
+        const at = $('#modalRoot #fork-at');
+        const sid = el.dataset.sid || state.sel;
+        closeModal();
+        doFork(sid, nm, at ? at.value : undefined);
+        break;
+      }
+      case 'replay-open': { state.replayFor = el.dataset.sid || state.sel; render(); break; }
+      case 'replay-close': { state.replayFor = null; render(); break; }
       case 'rename-confirm': { const inp = $('#modalRoot input[type=text]'); const sid = el.dataset.id; if (inp && sid) doRename(sid, inp.value); closeModal(); break; }
 
       /* composer */
@@ -1968,6 +2195,26 @@
       case 'confirm-yes': case 'confirm-no': { const z = $('#confirmZone'); z.innerHTML = ''; toast(a === 'confirm-yes' ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', a === 'confirm-yes' ? 'ok' : 'danger'); break; }
 
       /* 补偿层（T-P5-1） */
+      /* 沙箱日志（PRD FR-8 可检索）：检索条件变更由 input/change 监听驱动，
+         这里只处理「清空」这个破坏性动作。 */
+      /* 数据目录清单（PRD FR-4.2）：导入/导出之后体积会变，手动重扫。 */
+      case 'dir-inv-refresh': {
+        refreshDataDirInventory();
+        toast('正在重新扫描数据目录…', 'ok');
+        break;
+      }
+      case 'sblog-clear': {
+        if (!state.sandboxLog.total) break;
+        bridge.clearSandboxLog().then((r) => {
+          if (!r || !r.ok) { toast('清空失败（主进程未接入）', 'warn'); return; }
+          state.sandboxLog.entries = [];
+          state.sandboxLog.total = 0;
+          state.sandboxLog.stats = { total: 0, allowed: 0, denied: 0, error: 0, byTool: [] };
+          render();
+          toast(`已清空沙箱日志（${r.cleared} 条）`, 'ok');
+        }).catch(() => toast('清空失败', 'err'));
+        break;
+      }
       case 'sandbox-save-net': {
         const ta = document.getElementById('net-allow');
         const list = String((ta && ta.value) || '').split('\n').map((s) => s.trim()).filter(Boolean);
@@ -2301,7 +2548,17 @@
         } else { toast(`保存失败：${(r2 && r2.reason) || ''}`, 'danger'); }
         break;
       }
-      case 'todo': toast('该操作在真实版本中打开对应面板'); break;
+      // 兜底：UI 里不该再出现未接线动作。此前这里弹「该操作在真实版本中打开
+      // 对应面板」——可这就是真实版本，那句话等于用假承诺把死挂点糊过去。
+      // 现在未接线动作会在控制台报警，并在界面上如实说「未接线」。
+      case 'todo':
+        console.warn('[orchdesk] 未接线的动作被点击：', el.dataset.action, el.outerHTML.slice(0, 120));
+        toast('该动作尚未接线（已记录到控制台）', 'warn');
+        break;
+      default:
+        // 动作名拼错 / 新增动作忘了写分支 —— 别静默吞掉。
+        console.warn('[orchdesk] 未知的 data-action：', a);
+        break;
 
       /* T-P6-3 数据快照 + 更新检查 */
       case 'open-project-dir': {
@@ -2505,6 +2762,23 @@
 
   document.body.addEventListener('input', (e) => {
     if (e.target.id === 'composer') { updateOutboundWarn(e.target.value); return; }
+    // 沙箱日志检索：条件变化即重拉。防抖 350ms —— 每敲一个字都发一次 IPC 会
+    // 把输入变成卡顿源（日志体量可能上百条）。
+    if (e.target.id === 'sblog-kw') {
+      state.sandboxLog.keyword = e.target.value || '';
+      clearTimeout(sblogTimer);
+      sblogTimer = setTimeout(refreshSandboxLog, 350);
+      return;
+    }
+    if (e.target.dataset.action === 'fork-slider') {
+      const sid = e.target.dataset.sid;
+      const s = sid && state.sessions[sid];
+      const msgs = (s && Array.isArray(s.msgs)) ? s.msgs : [];
+      const v = Math.max(0, Math.min(msgs.length, parseInt(e.target.value, 10) || 0));
+      const lab = document.getElementById('fork-at-label');
+      // 不写 state：分叉点只在点「创建分支」的那一刻读取，拖动中不落任何数据。
+      if (lab) lab.textContent = forkOptionLabel(v, msgs);
+    }
     if (e.target.dataset.action === 'think-slider') {
       const levels = ['off', 'standard', 'deep', 'max'];
       const labels = ['关闭', '标准', '深度', '最大'];
@@ -2515,6 +2789,16 @@
     }
   });
   document.body.addEventListener('change', (e) => {
+    if (e.target.id === 'sblog-decision') {
+      state.sandboxLog.decision = e.target.value || 'all';
+      refreshSandboxLog();
+      return;
+    }
+    if (e.target.id === 'sblog-kind') {
+      state.sandboxLog.kind = e.target.value || 'all';
+      refreshSandboxLog();
+      return;
+    }
     if (e.target.id === 'mp-type') updateProtocolRow();
     if (e.target.id === 'default-model-pick' && e.target.value !== state.defaultModel) {
       state.defaultModel = e.target.value;
@@ -2617,6 +2901,14 @@
       bridge.getMemoryStats().then(r => { if (r) state.memoryStats = r; }).catch(() => {}),
       bridge.getCompensationAudit().then(r => { if (Array.isArray(r)) state.compAudit = r; }).catch(() => {}),
       bridge.getSandbox().then(r => { if (r && typeof r === 'object') state.sandbox = { mode: r.mode || 'workspace-write', networkAllow: Array.isArray(r.networkAllow) ? r.networkAllow : ['*'] }; }).catch(() => {}),
+      // 数据目录内容清单（PRD FR-4.2）：真实体积与文件数（此前 UI 写死「~ 24 MB」）
+      (typeof bridge.getDataDirInventory === 'function'
+        ? bridge.getDataDirInventory().then(r => { if (r && typeof r === 'object') state.dataDirInventory = r; })
+        : Promise.resolve()).catch(() => {}),
+      // 沙箱日志（PRD FR-8 可检索）：每次刷新设置页都会重拉，见 refreshSandboxLog
+      (typeof bridge.getSandboxLog === 'function'
+        ? bridge.getSandboxLog(sandboxLogQuery()).then(r => { applySandboxLog(r); })
+        : Promise.resolve()).catch(() => {}),
       // 桌面集成（PRD FR-4.2）：6 个开关的真实状态（此前 UI 硬编码 on/off，与系统无关）
       (typeof bridge.getDesktop === 'function'
         ? bridge.getDesktop().then(r => { if (r && r.config) state.desktop = r; })

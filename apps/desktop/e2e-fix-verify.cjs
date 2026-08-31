@@ -55,6 +55,12 @@ async function run() {
       s1: { id: 's1', pid: 'p1', title: '修复登录超时', expert: '全栈工程师', model: 'qwen3:14b', updated: '刚刚', ts: '10:00', msgs: [] },
       s2: { id: 's2', pid: 'p2', title: '周报草稿', expert: '内容编辑', model: 'qwen3:14b', updated: '昨天', ts: '09:00', msgs: [] },
     };
+    // 沙箱日志种子：形状同 sandbox-log.ts 的 SandboxLogEntry
+    window.__sblog = [
+      { id: 'sl-1', ts: Date.now() - 3000, tool: 'shell_command', kind: 'command', target: 'format C:', decision: 'denied', reason: '命令「format」不在白名单中', mode: 'default' },
+      { id: 'sl-2', ts: Date.now() - 2000, tool: 'file_write', kind: 'approval', target: 'D:/work/report.md', decision: 'allowed', reason: '已写入 report.md (12 字节)', mode: 'default', sessionId: 's1' },
+      { id: 'sl-3', ts: Date.now() - 1000, tool: 'web_fetch', kind: 'network', target: 'https://example.com/api', decision: 'error', reason: 'fetch failed', mode: 'trusted' },
+    ];
     window.orchdesk = {
       loadSessions: () => Promise.resolve(JSON.parse(JSON.stringify(seedSessions))),
       persistSessions: (arr) => Promise.resolve({ ok: true }),
@@ -104,6 +110,24 @@ async function run() {
         });
       },
       setFloatingContext: () => Promise.resolve({ ok: true }),
+      // PRD FR-8：沙箱日志（可检索）—— 内存态，验证检索/过滤/清空真的走了桥
+      getSandboxLog: (q) => {
+        const kw = String((q && q.keyword) || '').trim().toLowerCase();
+        const dec = (q && q.decision) || 'all';
+        const kind = (q && q.kind) || 'all';
+        const all = window.__sblog || [];
+        const entries = all.filter((e) => (!kw || (e.tool + ' ' + e.target + ' ' + (e.reason || '') + ' ' + (e.sessionId || '')).toLowerCase().includes(kw))
+          && (dec === 'all' || e.decision === dec) && (kind === 'all' || e.kind === kind)).slice().reverse().slice(0, (q && q.limit) || 100);
+        const stats = { total: all.length, allowed: all.filter((e) => e.decision === 'allowed').length,
+          denied: all.filter((e) => e.decision === 'denied').length, error: all.filter((e) => e.decision === 'error').length,
+          byTool: [{ tool: 'shell_command', count: all.filter((e) => e.tool === 'shell_command').length }] };
+        return Promise.resolve({ entries, stats, total: all.length, max: 500 });
+      },
+      clearSandboxLog: () => {
+        const n = (window.__sblog || []).length;
+        window.__sblog = [];
+        return Promise.resolve({ ok: true, cleared: n, entries: [], stats: { total: 0, allowed: 0, denied: 0, error: 0, byTool: [] } });
+      },
       // PRD FR-9：授权白名单（会话 / 永久，可查看可撤销）
       listGrants: () => Promise.resolve(window.__grants || []),
       addGrant: (input) => {
@@ -147,6 +171,24 @@ async function run() {
       getModelConfig: () => Promise.resolve({ providers: [{ n: '本地', type: 'ollama', models: [{ n: 'qwen3:14b' }] }], selectedModels: ['qwen3:14b'], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' }),
       saveModelConfig: () => Promise.resolve({ ok: true }),
       testModel: () => Promise.resolve({ ok: false }),
+      // PRD FR-4.2：数据目录内容清单。此前设置页写死「~ 24 MB」，与真实磁盘无关。
+      // 置 window.__dirInv = null 可模拟「主进程桥不可用」，验证 UI 显示「未接入」而非假数字。
+      getDataDirInventory: () => Promise.resolve(window.__dirInv === null
+        ? { ok: false, dir: '', items: [], totalSize: 0, totalFiles: 0, totalSizeText: '', errors: [] }
+        : {
+            ok: true,
+            dir: 'D:/mock/OrchDesk-Data',
+            items: [
+              { name: 'logs', size: 1258291, kind: 'dir', files: 12, mtime: Date.now(), sizeText: '1.2 MB' },
+              { name: 'sessions.json', size: 24576, kind: 'file', files: 1, mtime: Date.now(), sizeText: '24.0 KB' },
+              { name: 'plugins', size: 4096, kind: 'dir', files: 3, mtime: Date.now(), sizeText: '4.0 KB' },
+              { name: '.', size: 1286963, kind: 'dir', files: 16, mtime: Date.now(), sizeText: '1.2 MB' },
+            ],
+            totalSize: 1286963,
+            totalFiles: 16,
+            totalSizeText: '1.2 MB',
+            errors: [],
+          }),
     };
   });
 
@@ -428,6 +470,179 @@ async function run() {
   await page.locator('[data-action="grant-revoke"]').first().click();
   await page.waitForTimeout(500);
   await assert(await page.locator('.grant-list .gr-item').count() === 0, '撤销后白名单清空');
+
+  // ================================================================
+  // 测试组 8：会话分叉与回放（PRD FR-6）
+  // 此前「创建分支」恒深拷贝全部消息，没有分叉点概念，也没有回放视图。
+  // ================================================================
+  console.log('📋 测试组 8：会话分叉与回放');
+
+  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await page.waitForTimeout(500);
+
+  // 分叉模块已随 index.html 加载（否则整组能力全是死的）
+  const forkLoaded = await page.evaluate(() => !!(window.OrchDeskFork && typeof window.OrchDeskFork.makeForkLineage === 'function'));
+  await assert(forkLoaded, 'session-fork.js 已在渲染层装载（window.OrchDeskFork）');
+
+  // 计数器一律限定在 #msgScroll 内：组 5 往 DOM 注入过 2 条 renderMsg 兼容性
+  // fixture（.msg.user/.msg.agent），全域计数会把它们算进来。
+  const msgs = page.locator('#msgScroll .msg');
+  const srcMsgCount = await msgs.count();
+  await assert(srcMsgCount >= 2, '源会话至少有 2 条消息可供选择分叉点（count=' + srcMsgCount + ')');
+
+  // ---- 回放视图（只读时间线）----
+  await assert(await page.locator('[data-action="replay-open"]').count() > 0, '会话标题栏有「回放」入口');
+
+  await page.locator('[data-action="replay-open"]').first().click();
+  await page.waitForTimeout(400);
+  await assert(await page.locator('.replay').count() === 1, '回放视图 .replay 已渲染');
+
+  const rpCount = await page.locator('.rp-item').count();
+  await assert(rpCount >= srcMsgCount, `回放事件数 ${rpCount} 不少于消息数 ${srcMsgCount}`);
+
+  const rpKinds = await page.evaluate(() => Array.from(document.querySelectorAll('.rp-item')).map((e) => e.className));
+  await assert(rpKinds.some((c) => c.includes('rp-user')) && rpKinds.some((c) => c.includes('rp-agent')),
+    '回放时间线含用户输入与 Agent 回复两类事件');
+
+  // 只读：回放态下不该有 composer
+  await assert(await page.locator('#composer').count() === 0, '回放为只读视图，不挂 composer');
+
+  await page.locator('[data-action="replay-close"]').first().click();
+  await page.waitForTimeout(400);
+  await assert(await page.locator('.replay').count() === 0, '返回会话后回放视图关闭');
+  await assert(await page.locator('#composer').count() === 1, '返回会话后 composer 恢复');
+
+  // ---- 分叉点 ----
+  await page.locator('[data-action="fork"]').first().click();
+  await page.waitForTimeout(400);
+
+  await assert(await page.locator('#fork-at').count() === 1, '分支弹窗含分叉点滑块');
+  const sliderMax = await page.locator('#fork-at').getAttribute('max');
+  await assert(Number(sliderMax) === srcMsgCount, `滑块上限等于消息总数（max=${sliderMax}）`);
+
+  // 把分叉点拖到第 1 条之后：只用 page.fill 对 range 无效，需直接设值并派发 input
+  await page.evaluate(() => {
+    const el = document.getElementById('fork-at');
+    el.value = '1';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForTimeout(200);
+  const atLabel = await page.locator('#fork-at-label').innerText();
+  await assert(/第 1 条/.test(atLabel), '分叉点标签随拖动更新（' + atLabel.slice(0, 40) + '）');
+
+  await page.locator('#fork-name').fill('E2E分支');
+  await page.locator('[data-action="branch-confirm"]').click();
+  await page.waitForTimeout(600);
+
+  const branchMsgCount = await msgs.count();
+  await assert(branchMsgCount === 1, `分支只继承分叉点之前的 1 条消息（count=${branchMsgCount}）`);
+
+  await assert(await page.locator('.fork-origin').count() === 1, '分支顶部显示血缘提示（fork-origin）');
+  const originText = await page.locator('.fork-origin').innerText();
+  await assert(/继承前 1 条/.test(originText), '血缘提示写明继承条数（' + originText.slice(0, 50) + '）');
+
+  await assert(await page.locator('.fork-node').count() === 1, '消息流中标出分叉点节点（fork-node）');
+
+  // ---- 分支与源互不影响 ----
+  await page.locator('#composer').fill('分支独立消息');
+  await page.locator('[data-action="send"]').click();
+  await page.waitForTimeout(1800);
+  const afterSend = await msgs.count();
+  await assert(afterSend > 1, `分支内继续对话产生新消息（count=${afterSend}）`);
+
+  // 切回源会话：主干不受影响（既没多消息，也不该被标成分支）
+  await page.locator('.sess', { hasText: 'E2E测试消息' }).first().click();
+  await page.waitForTimeout(500);
+  const backCount = await msgs.count();
+  await assert(backCount === srcMsgCount,
+    `源会话消息数不变（${backCount} vs ${srcMsgCount}）—— 分支写入不污染主干`);
+  await assert(await page.locator('.fork-origin').count() === 0, '源会话不是分支，不显示血缘提示');
+
+  // ================================================================
+  // 测试组 9：沙箱日志检索（PRD FR-8）
+  // 此前所有沙箱判定只活在 executeTool 的 return 里，设置页无从检索。
+  // ================================================================
+  console.log('📋 测试组 9：沙箱日志检索');
+
+  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await page.waitForTimeout(500);
+
+  const sblog = page.locator('.sblog .al');
+  await assert(await page.locator('#sblog-kw').count() === 1, '设置页有沙箱日志检索框');
+  await assert(await sblog.count() === 3, `沙箱日志渲染 3 条（count=${await sblog.count()}）`);
+
+  const statsText = await page.locator('.sblog-stats').innerText();
+  await assert(/共 3 条/.test(statsText), '统计显示总条数（' + statsText.replace(/\s+/g, ' ').slice(0, 50) + '）');
+  await assert(/放行 1/.test(statsText) && /拒绝 1/.test(statsText) && /出错 1/.test(statsText), '统计区分放行/拒绝/出错');
+
+  // 关键词检索
+  await page.locator('#sblog-kw').fill('format');
+  await page.waitForTimeout(700);
+  await assert(await sblog.count() === 1, `关键词检索命中 1 条（count=${await sblog.count()}）`);
+  await assert((await sblog.first().innerText()).includes('拒绝'), '命中条目判定为拒绝');
+
+  // decision 过滤
+  await page.locator('#sblog-kw').fill('');
+  await page.waitForTimeout(700);
+  await page.locator('#sblog-decision').selectOption('allowed');
+  await page.waitForTimeout(600);
+  await assert(await sblog.count() === 1, `按「放行」过滤得 1 条（count=${await sblog.count()}）`);
+
+  // kind 过滤
+  await page.locator('#sblog-decision').selectOption('all');
+  await page.waitForTimeout(500);
+  await page.locator('#sblog-kind').selectOption('network');
+  await page.waitForTimeout(600);
+  await assert(await sblog.count() === 1, `按「网络」过滤得 1 条（count=${await sblog.count()}）`);
+
+  // 清空
+  await page.locator('#sblog-kind').selectOption('all');
+  await page.waitForTimeout(500);
+  await page.locator('[data-action="sblog-clear"]').click();
+  await page.waitForTimeout(600);
+  await assert(await sblog.count() === 0, `清空后日志列表为空（count=${await sblog.count()}）`);
+
+  // ================================================================
+  // 测试组 10：数据目录内容清单（PRD FR-4.2）
+  // 此前设置页写死「~ 24 MB」「~ 1.2 MB」，与真实磁盘毫无关系；「备份整个数据
+  // 目录」旁边标的体积是编的。真实清单来自主进程 scanDataDir。
+  // ================================================================
+  console.log('📋 测试组 10：数据目录内容清单');
+
+  // 设置页仍停留在组 9 的沙箱区，先确认数据目录卡片已渲染
+  const dirInv = page.locator('.dir-inv .di-row');
+  await assert(await page.locator('.dir-inv').count() === 1, '设置页有数据目录内容清单容器');
+  await assert(await dirInv.count() === 4, `清单渲染 4 项（3 子项 + 根汇总，count=${await dirInv.count()}）`);
+
+  const invText = await page.locator('.dir-inv').innerText();
+  await assert(/logs/.test(invText) && /sessions\.json/.test(invText) && /plugins/.test(invText),
+    '清单含 logs / sessions.json / plugins（' + invText.replace(/\s+/g, ' ').slice(0, 60) + '）');
+  await assert(/1\.2 MB/.test(invText) && /24\.0 KB/.test(invText),
+    '每项显示真实体积（不再写死「~ 24 MB」）：' + invText.replace(/\s+/g, ' ').slice(0, 70));
+  await assert(/12 个文件/.test(invText), '目录项显示其内文件数（' + invText.replace(/\s+/g, ' ').slice(0, 60) + '）');
+
+  // 汇总行：共 X · N 个文件（设置页整体渲染，分区导航只做高亮与滚动）
+  const settingsBody = await page.locator('body').innerText();
+  await assert(/共 1\.2 MB/.test(settingsBody) && /16 个文件/.test(settingsBody),
+    '汇总显示「共 1.2 MB · 16 个文件」（' + settingsBody.replace(/\s+/g, ' ').slice(0, 80) + '）');
+
+  // 快捷操作区不再写死假数字
+  await assert(!/~\s*24 MB/.test(settingsBody) && !/~\s*1\.2 MB/.test(settingsBody),
+    '设置页已无「~ 24 MB / ~ 1.2 MB」硬编码假数字');
+
+  // 刷新按钮真实存在并接了线（不是 data-action="todo" 空壳）
+  await assert(await page.locator('[data-action="dir-inv-refresh"]').count() === 1, '数据目录卡片有「刷新清单」按钮');
+  await page.locator('[data-action="dir-inv-refresh"]').click();
+  await page.waitForTimeout(600);
+  await assert(await dirInv.count() === 4, `刷新后清单仍为 4 项（count=${await dirInv.count()}）`);
+
+  // 桥不可用时显示「未接入」而不是沿用旧假数字
+  await page.evaluate(() => { window.__dirInv = null; });
+  await page.locator('[data-action="dir-inv-refresh"]').click();
+  await page.waitForTimeout(600);
+  const offText = await page.locator('body').innerText();
+  await assert(/内容清单未接入/.test(offText), '桥不可用时显示「内容清单未接入（主进程桥不可用）」');
+  await assert(await page.locator('.dir-inv').count() === 0, '桥不可用时不再渲染清单列表（避免展示陈旧数据）');
 
   // ================================================================
   // 总结
