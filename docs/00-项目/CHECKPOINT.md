@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.12.0`（未打 tag；v0.11.0 已发 Release） | SemVer，pre-1.0 阶段；`0.10.1` 为上一 Release |
-| **最新 Commit** | `0f2424d` | feat(fork/sandbox/datadir): 补 PRD 三处缺口（FR-6 分叉回放 / FR-8 沙箱日志 / FR-4.2 内容清单） |
+| **最新 Commit** | `ae92d0e` | feat(usage/events): FR-5 用量追踪 + FR-6 SessionEvent append-only 事件流（ADR-0009） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
