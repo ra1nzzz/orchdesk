@@ -640,6 +640,29 @@ async function approvalGate(toolName: string, reason: string, sessionId?: string
   return outcome === 'allowed-once' ? null : `操作未获批准（${outcome}）`;
 }
 
+/**
+ * 边界外补偿门（PRD FR-12，第九死挂点修复）。
+ * 三类高危（删除文件 / 对外发送 / 不可逆操作）经补偿层 withhold 判定 → 需确认时走
+ * 审批弹窗二次确认；无补偿服务/无审批通道时按 fail-open 放行但记 WARN——
+ * 与 firePreStep 同策略：基础设施缺失不锁死对话，但绝不静默。
+ */
+async function outboundGate(text: string, sessionId?: string): Promise<string | null> {
+  const svc = getService<CompensationServiceLike>('compensation');
+  if (!svc) return null;
+  let verdict: { needsConfirm?: boolean; category?: string; reason?: string } | null = null;
+  try {
+    const raw = await svc.withhold(String(text || ''));
+    verdict = raw as { needsConfirm?: boolean; category?: string; reason?: string } | null;
+  } catch (err) {
+    log('WARN', 'compensation', `外发预判失败（放行）: ${(err as Error).message}`);
+    return null;
+  }
+  if (!verdict?.needsConfirm) return null;
+  const category = String(verdict.category || 'other');
+  const denied = await approvalGate(`outbound:${category}`, String(verdict.reason || '跨边界/不可逆外发操作'), sessionId);
+  return denied;
+}
+
 async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }): Promise<ToolResult> {
   const { name, arguments: args } = tool;
   const cwd = sessionCwd(sessionCtx?.sessionId);
@@ -681,6 +704,10 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
         // 此前审批 UI 已建但工具链路从不触发（与 intent/trace 同款死挂点，BUG-021 修复）。
         const denied = await approvalGate('shell_command', cmd, sessionCtx?.sessionId);
         if (denied) return { name, result: '', error: denied };
+        // PRD FR-12：删除 / 对外发送 / 不可逆命令在授权门之上再加一道补偿层二次确认
+        // （L4 双确认）。普通命令（git/npm/ls…）判定为 other，不额外打扰。
+        const outboundDenied = await outboundGate(cmd, sessionCtx?.sessionId);
+        if (outboundDenied) return { name, result: '', error: outboundDenied };
         // 进程隔离 + 不阻塞主进程：在子进程中异步执行。
         // cwd 用会话工作目录（set_cwd 可切换），缺省回落 resolveShellCwd()。
         const { exec } = await import('node:child_process');
@@ -711,6 +738,14 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
       case 'web_fetch': {
         const url = String(args.url || '');
         if (!url.startsWith('http://') && !url.startsWith('https://')) return { name, result: '', error: 'URL 必须以 http(s) 开头' };
+        // PRD FR-8：网络请求域名白名单。非白名单域名 = 边界外外发 → 补偿层二次确认。
+        // 此前 v0.9.1 以「只读 GET 无不可逆外发」为由跳过，与 FR-12 明文冲突（外发即边界外 emission）。
+        const policy = getHostServices()?.sandboxPolicy;
+        const allowed = policy?.isDomainAllowed ? policy.isDomainAllowed(url) : true;
+        if (!allowed) {
+          const denied = await outboundGate(`请求接口 ${url}`, sessionCtx?.sessionId);
+          if (denied) return { name, result: '', error: `域名不在白名单：${denied}` };
+        }
         const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
         const text = await res.text();
         return { name, result: text.slice(0, 30000) };
@@ -1152,6 +1187,48 @@ ipcMain.handle('orchdesk:trace-set-enabled', (_e, enabled: boolean) => {
   }
 });
 
+// PRD FR-8：沙箱策略（模式 + 网络域名白名单）
+ipcMain.handle('orchdesk:sandbox-get', () => {
+  const policy = getHostServices()?.sandboxPolicy;
+  return {
+    mode: policy?.resolve?.().mode || 'workspace-write',
+    networkAllow: policy?.getNetworkAllow ? policy.getNetworkAllow() : ['*'],
+  };
+});
+ipcMain.handle('orchdesk:sandbox-set-network-allow', (_e, list: string[]) => {
+  const policy = getHostServices()?.sandboxPolicy;
+  if (!policy?.setNetworkAllow) return { ok: false, reason: '沙箱服务未就绪' };
+  policy.setNetworkAllow(Array.isArray(list) ? list : []);
+  return { ok: true, networkAllow: policy.getNetworkAllow ? policy.getNetworkAllow() : ['*'] };
+});
+
+// TRACE 用户反馈（PRD FR-7，第八死挂点修复）：渲染层每条 Agent 消息底部
+// 「有帮助 / 需改进」→ 真实写入 trace 遥测队列（source='user'）。
+// 此前按钮只改渲染层本地 Set + persist()，反馈从未进入遥测链路。
+interface TraceServiceLike {
+  recordFeedback(intent: string, feedback: string, sessionKey?: string, messageKey?: string): void;
+  queueSize(): { pending: number; retry: number; errors: number };
+}
+ipcMain.handle(
+  'orchdesk:trace-feedback',
+  (_e, payload: { intent?: string; feedback?: string; sessionKey?: string; messageKey?: string }) => {
+    const svc = getService<TraceServiceLike>('trace');
+    if (!svc) return { ok: false, reason: 'TRACE 插件未接入' };
+    const feedback = payload?.feedback === 'negative' ? 'negative' : payload?.feedback === 'neutral' ? 'neutral' : 'positive';
+    try {
+      svc.recordFeedback(
+        String(payload?.intent || 'unknown'),
+        feedback,
+        payload?.sessionKey ? String(payload.sessionKey) : undefined,
+        payload?.messageKey ? String(payload.messageKey) : undefined,
+      );
+      return { ok: true, queue: svc.queueSize() };
+    } catch (err) {
+      return { ok: false, reason: (err as Error).message };
+    }
+  },
+);
+
 ipcMain.on('orchdesk:authz-submit-decision', (_e, id: string, outcome: string) => {
   const pending = pendingApprovals.get(id);
   if (!pending) return;
@@ -1231,19 +1308,22 @@ ipcMain.handle('orchdesk:prompt-delete', (_e, id: string) => {
 interface CompensationServiceLike {
   classify(text: string): unknown;
   requiresWithhold(category: string): unknown;
-  withhold(input: unknown): Promise<unknown>;
-  compensate(input: unknown): unknown;
+  withhold(text: string): Promise<unknown> | unknown;
+  compensate(text: string, note?: string): unknown;
   getAudit(): unknown;
 }
 ipcMain.handle('orchdesk:comp-withhold', async (_e, text: string) => {
   const svc = getService<CompensationServiceLike>('compensation');
   if (!svc) return unavailable('补偿层插件未接入');
-  return svc.withhold({ text: String(text || '') });
+  // 契约修正（第九死挂点）：插件 withhold(text: string)，此前主进程包成 { text }
+  // 传给正则匹配 → 恒为 'other' →「不可撤销」警示条与二次确认从未触发。
+  return svc.withhold(String(text || ''));
 });
-ipcMain.handle('orchdesk:comp-compensate', (_e, input: unknown) => {
+ipcMain.handle('orchdesk:comp-compensate', (_e, text: string, note?: string) => {
   const svc = getService<CompensationServiceLike>('compensation');
   if (!svc) return unavailable('补偿层插件未接入');
-  return svc.compensate(input || {});
+  // 契约修正：插件 compensate(text, note)，此前只收首参，note 被丢弃。
+  return svc.compensate(String(text || ''), note ? String(note) : undefined);
 });
 ipcMain.handle('orchdesk:comp-audit', () => {
   const svc = getService<CompensationServiceLike>('compensation');

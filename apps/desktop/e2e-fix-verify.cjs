@@ -43,10 +43,22 @@ async function run() {
 
   // 拦截 fetch/XHR 以模拟 bridge
   await page.addInitScript(() => {
+    // Fixture 修正：此前 loadSessions/loadProjects 返回空数组 —— 侧栏/消息流断言
+    // （.proj-seg / .sess / 用户消息）在空数据下永远不可能通过，套件实际是空转的。
+    // 改为注入一组真实形状的种子数据（字段口径同 app.js createSessionInProject）。
+    const seedProjects = [
+      { id: 'p1', n: 'OrchDesk', sessions: ['s1'], archived: 0 },
+      { id: 'p2', n: '写作助手', sessions: ['s2'], archived: 0 },
+      { id: 'p3', n: '已归档', sessions: [], archived: 1 },
+    ];
+    const seedSessions = {
+      s1: { id: 's1', pid: 'p1', title: '修复登录超时', expert: '全栈工程师', model: 'qwen3:14b', updated: '刚刚', ts: '10:00', msgs: [] },
+      s2: { id: 's2', pid: 'p2', title: '周报草稿', expert: '内容编辑', model: 'qwen3:14b', updated: '昨天', ts: '09:00', msgs: [] },
+    };
     window.orchdesk = {
-      loadSessions: () => Promise.resolve([]),
+      loadSessions: () => Promise.resolve(JSON.parse(JSON.stringify(seedSessions))),
       persistSessions: (arr) => Promise.resolve({ ok: true }),
-      loadProjects: () => Promise.resolve([]),
+      loadProjects: () => Promise.resolve(JSON.parse(JSON.stringify(seedProjects))),
       persistProjects: (arr) => Promise.resolve({ ok: true }),
       onToolStep: () => () => {},
       getPluginRuntime: () => Promise.resolve({ ready: false, activeCount: 0, total: 0, plugins: [] }),
@@ -68,6 +80,14 @@ async function run() {
       savePrompt: () => Promise.resolve({ ok: true }),
       deletePrompt: () => Promise.resolve({ ok: true }),
       getMemoryStats: () => Promise.resolve({ usageRatio: 0.3, dumps: 1, recallHits: 2, domainCounts: { global: 0, project: 1, director: 0, worker: 0 } }),
+      // PRD FR-7：TRACE 用户反馈（v0.10.1 起的真实落点）
+      traceFeedback: () => Promise.resolve({ ok: true, queue: { pending: 1, retry: 0, errors: 0 } }),
+      // PRD FR-8：沙箱策略（网络域名白名单）
+      getSandbox: () => Promise.resolve({ mode: 'workspace-write', networkAllow: ['*'] }),
+      setNetworkAllow: (list) => Promise.resolve({ ok: true, networkAllow: list || ['*'] }),
+      withhold: (text) => Promise.resolve(/删除|发给|发送|curl|http/i.test(String(text || ''))
+        ? { needsConfirm: true, category: 'external-message', reason: 'E2E mock', warning: '⚠' }
+        : { needsConfirm: false, category: 'other', reason: '', warning: '' }),
       compensate: () => Promise.resolve({ id: 'cmp-e2e', ts: Date.now(), text: '', note: '', action: '' }),
       getCompensationAudit: () => Promise.resolve([]),
       createTempPlugin: () => Promise.resolve({ ok: false, reason: '未接入' }),

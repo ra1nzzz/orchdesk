@@ -372,6 +372,18 @@ export function errorRecords(): { rec: TraceRecord; reason: string; at: number }
   return errorQueue.map((e) => ({ rec: { ...e.rec }, reason: e.reason, at: e.at }));
 }
 
+/** 提供给主进程桥的服务面（PRD FR-7 死挂点修复的服务入口）。 */
+export interface TraceService {
+  /** 记录用户对某条 Agent 回答的语用反馈（Loop 结束的真实落点）。 */
+  recordFeedback(intent: IntentLabel | string, feedback: Feedback, sessionKey?: string, messageKey?: string): void;
+  /** 队列长度（可观测，不暴露内容）。 */
+  queueSize(): { pending: number; retry: number; errors: number };
+  /** 显式失败记录（保留原因，不静默丢失）。 */
+  errorRecords(): { rec: TraceRecord; reason: string; at: number }[];
+  /** 立即冲刷（绕过 batchSize 门控，仍受无 repoUrl/token 约束）。 */
+  flushNow(): Promise<FlushResult>;
+}
+
 // ---- 插件入口 ----
 
 export function apply(ctx: Context, config: TraceConfig): void {
@@ -411,6 +423,15 @@ export function apply(ctx: Context, config: TraceConfig): void {
     if (pending.length > 0 || retryQueue.length > 0) void flushNow();
   }, 30_000);
   ctx.effect(() => {
+    const anyCtx = ctx as unknown as { provide?: (n: string, v: unknown, b?: boolean) => void };
+    // 服务桥（第八死挂点修复）：recordFeedback 此前仅是模块级导出，主进程无服务可拿，
+    // 渲染层「有帮助/需改进」只改本地 Set —— 反馈从未进入遥测链路（PRD FR-7 要求）。
+    anyCtx.provide?.('trace', {
+      recordFeedback,
+      queueSize,
+      errorRecords,
+      flushNow,
+    } satisfies TraceService);
     return () => {
       clearInterval(flushTimer);
       // dispose 兜底：会话/进程退出前尽力上送滞留记录（不阻塞 dispose）。

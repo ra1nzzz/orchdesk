@@ -197,6 +197,11 @@
       deletePrompt: () => Promise.resolve({ ok: false }),
       // 记忆
       getMemoryStats: () => Promise.resolve(null),
+      // TRACE 用户反馈（PRD FR-7）
+      traceFeedback: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      // 沙箱（PRD FR-8）
+      getSandbox: () => Promise.resolve({ mode: 'workspace-write', networkAllow: ['*'] }),
+      setNetworkAllow: (list) => Promise.resolve({ ok: false, reason: '主进程未接入', networkAllow: list }),
       // 补偿层
       withhold: (text) => Promise.resolve({ needsConfirm: false, category: 'other', reason: '', warning: '' }),
       compensate: (text, note) => Promise.resolve({ id: 'cmp-' + Date.now().toString(36), ts: Date.now(), text: (text || '').slice(0, 80), note: note || '', action: '记录操作以便审计追溯' }),
@@ -243,6 +248,8 @@
     pluginRuntime: null,
     // 编排目录（multi 插件真实数据；null = 未接入，UI 回落兜底清单并标注）
     orchestrationCatalog: null,
+    // 沙箱策略（PRD FR-8）：模式 + 网络域名白名单（null = 未拉取，UI 回落默认）
+    sandbox: { mode: 'workspace-write', networkAllow: ['*'] },
     // 最近一次专家团派发结果（composeTeam 返回的 { rootId, nodes }）
     delegationLast: null,
     // TRACE 上报开关（默认开；bridge.traceStatus 拉取后覆盖）
@@ -340,7 +347,7 @@
     const tools = (m.tools && m.tools.length) ? `<details class="tools"><summary>${ic('chev', 14)} ${m.steps} 步 · ${m.tools.length} 个动作</summary>${m.tools.map((t) => `<div class="trow"><span class="tdot" style="background:${t.ph === 'running' ? 'var(--warn)' : 'var(--ok)'};${t.ph === 'running' ? 'animation:pulse 1.6s infinite' : ''}"></span><span class="mono">${esc(t.n)}</span><span class="faint" style="margin-left:auto">${t.ph === 'running' ? '执行中' : '完成'}</span></div>`).join('')}</details>` : '';
     const sub = m.sub ? `<div class="subagent"><span class="badge ${m.sub.state === 'running' ? 'warn' : 'info'}">SubAgent</span><span class="mono">${esc(m.sub.name)}</span><span class="phases faint">${m.sub.state === 'running' ? '执行中 · 即用即走' : '已回收并销毁'}</span></div>` : '';
     const fb = (m.feedback && state.feedback.has(sid + '|' + m.t)) ? `<div class="feedback" style="color:var(--ok)">已记录反馈 · 已脱敏遥测</div>`
-      : (m.feedback ? `<div class="feedback"><span>这条回答对你有帮助吗？</span><button data-action="trace" data-t="${m.t}">有帮助</button><button data-action="trace" data-t="${m.t}">需改进</button><span class="faint">反馈将用于改善回复质量</span></div>` : '');
+      : (m.feedback ? `<div class="feedback"><span>这条回答对你有帮助吗？</span><button data-action="trace" data-fb="positive" data-t="${m.t}">有帮助</button><button data-action="trace" data-fb="negative" data-t="${m.t}">需改进</button><span class="faint">反馈将用于改善回复质量</span></div>` : '');
     const raw = m.x || m.text || '';
     let txt;
     if (m.typing) {
@@ -1014,6 +1021,10 @@
               <div class="faint" style="font-size:11.5px;margin-top:4px">${m.blurb}</div>
             </div>`).join('')}
           </div>
+          <div class="sec-title" style="margin:16px 0 8px">网络域名白名单（PRD FR-8）</div>
+          <div class="faint" style="margin-bottom:6px">一行一个域名（如 <span class="mono">github.com</span>），<span class="mono">*</span> 表示不限；非白名单域名的抓取经补偿层二次确认（fail-closed）。</div>
+          <textarea class="inp mono" id="net-allow" rows="3" style="width:100%;font-size:11.5px">${esc((state.sandbox.networkAllow || ['*']).join('\n'))}</textarea>
+          <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="sandbox-save-net">保存白名单</button><span class="faint" id="net-allow-tip"></span></div>
           <div class="sec-title" style="margin:16px 0 8px">L0-L4 分级</div>
           <div class="levels">
             ${state.authLevels.length ? state.authLevels.map((l) => `<div class="lv"><span class="lv-n">L${l.level}</span><span class="lv-l">${l.label}</span><span class="faint">${l.scope}</span>${l.requiresApproval ? '<span class="badge warn">需授权</span>' : ''}</div>`).join('') : '<div class="faint">分级定义加载中…</div>'}
@@ -1846,6 +1857,22 @@
       case 'confirm-yes': case 'confirm-no': { const z = $('#confirmZone'); z.innerHTML = ''; toast(a === 'confirm-yes' ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', a === 'confirm-yes' ? 'ok' : 'danger'); break; }
 
       /* 补偿层（T-P5-1） */
+      case 'sandbox-save-net': {
+        const ta = document.getElementById('net-allow');
+        const list = String((ta && ta.value) || '').split('\n').map((s) => s.trim()).filter(Boolean);
+        const tip = document.getElementById('net-allow-tip');
+        bridge.setNetworkAllow(list.length ? list : ['*']).then((r) => {
+          if (r && r.ok) {
+            state.sandbox.networkAllow = r.networkAllow || ['*'];
+            if (tip) tip.textContent = `已保存（${state.sandbox.networkAllow.join('、')}）`;
+            toast('沙箱：网络域名白名单已更新', 'ok');
+          } else {
+            if (tip) tip.textContent = `保存失败：${(r && r.reason) || '未知原因'}`;
+            toast('沙箱白名单保存失败', 'warn');
+          }
+        }).catch(() => { if (tip) tip.textContent = '保存失败（主进程未接入）'; });
+        break;
+      }
       case 'comp-record': {
         openModal(`<div class="mh">${ic('warn', 18)}<b>记录补偿动作</b></div>
           <div class="mb">
@@ -1904,13 +1931,25 @@
         // key 必须与 renderMsg 的读取口径一致（sid|m.t）；此前硬编码 's1' 导致反馈永远显示不出来。
         const sid = state.sel || '';
         const key = sid + '|' + (el.dataset.t || '');
+        const feedback = el.dataset.fb === 'negative' ? 'negative' : 'positive';
         if (state.feedback.has(key)) state.feedback.delete(key);
         else state.feedback.add(key);
         // 反馈落盘，重启后仍在（此前仅存于内存 Set）
         const s = state.sessions[sid];
         if (s) { s.feedback = [...state.feedback].filter((k) => k.startsWith(sid + '|')); persist(); }
         render();
-        toast('TRACE：反馈已记录（脱敏后遥测）', 'ok');
+        // 真实遥测落点（第八死挂点修复）：经 IPC → trace 插件 recordFeedback（source='user'）。
+        // 此前按钮只改本地 Set，反馈从未进入遥测队列。
+        const msg = (s && s.msgs || []).find((m) => m.t === el.dataset.t);
+        bridge.traceFeedback({
+          intent: (msg && msg.intent) || 'unknown',
+          feedback,
+          sessionKey: sid,
+          messageKey: el.dataset.t || '',
+        }).then((r) => {
+          if (r && r.ok) toast(`TRACE：反馈已记录（待发 ${(r.queue && r.queue.pending) || 0} 条，脱敏后批量上送）`, 'ok');
+          else if (r && r.reason) toast(`TRACE 反馈未能入队：${r.reason}`, 'warn');
+        }).catch(() => {});
         break;
       }
 
@@ -2396,6 +2435,7 @@
       // 记忆 + 补偿 + 自进化
       bridge.getMemoryStats().then(r => { if (r) state.memoryStats = r; }).catch(() => {}),
       bridge.getCompensationAudit().then(r => { if (Array.isArray(r)) state.compAudit = r; }).catch(() => {}),
+      bridge.getSandbox().then(r => { if (r && typeof r === 'object') state.sandbox = { mode: r.mode || 'workspace-write', networkAllow: Array.isArray(r.networkAllow) ? r.networkAllow : ['*'] }; }).catch(() => {}),
       bridge.listTempPlugins().then(r => { if (Array.isArray(r)) state.tempPlugins = r; }).catch(() => {}),
       // 插件运行时真实状态（插件页开关据此显示，而非硬编码的 p.on）
       (typeof bridge.getPluginRuntime === 'function'

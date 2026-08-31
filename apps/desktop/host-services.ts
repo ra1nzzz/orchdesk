@@ -29,11 +29,18 @@ const SANDBOX_MODES: SandboxMode[] = ['read-only', 'workspace-write', 'danger-fu
 export interface SandboxPolicyLike {
   resolve(req?: { session?: { id: string } }): { mode: SandboxMode };
   setSandboxMode(session: { id: string }, mode: string): void;
+  /** PRD FR-8：网络请求域名白名单（['*'] = 不限）。可读写。 */
+  getNetworkAllow?(): string[];
+  setNetworkAllow?(list: string[]): void;
+  /** PRD FR-8：域名准入判定（供 web_fetch 等外发工具调用）。 */
+  isDomainAllowed?(url: string): boolean;
 }
 
 interface SandboxState {
   mode: SandboxMode;
   sessionModes: Record<string, SandboxMode>;
+  /** 网络域名白名单：'*' 表示不限制；支持后缀匹配（如 'github.com'）。 */
+  networkAllow: string[];
   audit: Array<{ ts: number; kind: 'sandbox-mode'; mode: string; sessionId?: string }>;
 }
 
@@ -44,7 +51,7 @@ function sandboxFile(): string {
 }
 
 function loadSandbox(): SandboxState {
-  const base: SandboxState = { mode: 'workspace-write', sessionModes: {}, audit: [] };
+  const base: SandboxState = { mode: 'workspace-write', sessionModes: {}, networkAllow: ['*'], audit: [] };
   try {
     const f = sandboxFile();
     if (!fs.existsSync(f)) return base;
@@ -52,11 +59,39 @@ function loadSandbox(): SandboxState {
     return {
       mode: SANDBOX_MODES.includes(raw.mode as SandboxMode) ? (raw.mode as SandboxMode) : 'workspace-write',
       sessionModes: raw.sessionModes && typeof raw.sessionModes === 'object' ? raw.sessionModes : {},
+      networkAllow: normalizeNetworkAllow(raw.networkAllow),
       audit: Array.isArray(raw.audit) ? raw.audit.slice(-200) : [],
     };
   } catch {
     return base;
   }
+}
+
+/** 归一化域名白名单：非法项丢弃；空数组回落 ['*']（不限），避免误配导致全网被封死。 */
+export function normalizeNetworkAllow(list: unknown): string[] {
+  if (!Array.isArray(list)) return ['*'];
+  const cleaned = list
+    .map((d) => String(d || '').trim().toLowerCase())
+    .filter((d) => d.length > 0 && d.length < 256 && !/[\s/]/.test(d));
+  return cleaned.length ? cleaned : ['*'];
+}
+
+/**
+ * PRD FR-8：网络请求域名白名单判定。
+ * 白名单含 '*' → 放行全部；否则 host 命中任一项（精确或后缀 .domain）→ 放行。
+ * 无法解析的 URL 一律拒绝（fail-closed）。
+ */
+export function isDomainAllowed(url: string): boolean {
+  const allow = normalizeNetworkAllow(loadSandbox().networkAllow);
+  if (allow.includes('*')) return true;
+  let host = '';
+  try {
+    host = new URL(String(url || '')).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (!host) return false;
+  return allow.some((d) => (d.startsWith('*.') ? host === d.slice(2) || host.endsWith(d.slice(1)) : host === d || host.endsWith('.' + d)));
 }
 
 function saveSandbox(state: SandboxState): void {
@@ -122,6 +157,8 @@ export interface AgentsServiceLike {
 
 export interface HostServices {
   approval: ApprovalServiceLike;
+  /** PRD FR-8：沙箱策略（模式 + 网络域名白名单），供主进程工具链直接查询。 */
+  sandboxPolicy: SandboxPolicyLike;
   /** 主进程注册 GUI 审批应答方（渲染层弹窗 → 回传 outcome）。 */
   setUiAnswerer(fn: ((req: ApprovalRequestLike) => Promise<string>) | null): void;
   /** 主进程注入 SubAgent 真实运行器。 */
@@ -168,6 +205,17 @@ export const hostServices = {
         else sandbox.mode = normalized;
         sandbox.audit.push({ ts: Date.now(), kind: 'sandbox-mode', mode: normalized, sessionId: session?.id });
         saveSandbox(sandbox);
+      },
+      // PRD FR-8：网络请求域名白名单（设置页可配，默认 ['*'] 不限）
+      getNetworkAllow() {
+        return normalizeNetworkAllow(sandbox.networkAllow);
+      },
+      setNetworkAllow(list) {
+        sandbox.networkAllow = normalizeNetworkAllow(list);
+        saveSandbox(sandbox);
+      },
+      isDomainAllowed(url) {
+        return isDomainAllowed(url);
       },
     };
 
@@ -263,6 +311,7 @@ export const hostServices = {
 
     currentHandle = {
       approval,
+      sandboxPolicy,
       setUiAnswerer(fn) { uiAnswerer = fn; },
       setAgentRunner(fn) { agentRunner = fn; },
     };

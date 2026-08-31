@@ -200,6 +200,24 @@ const { check, summary } = createChecker();
       '未知模式应降级为 read-only');
   });
 
+  await check('网络域名白名单（PRD FR-8）：默认不限、配置后精确/后缀命中、非法入参 fail-safe', () => {
+    const hs = require('./dist/host-services.js');
+    assert.deepStrictEqual(hs.normalizeNetworkAllow(null), ['*'], '非法值应回落 ["*"]');
+    assert.deepStrictEqual(hs.normalizeNetworkAllow(['  ', 'GITHUB.com ', 'bad/x']), ['github.com'],
+      '应去空白/小写/丢弃非法项');
+    const sp = require('./dist/dsh-runtime.js').getService('sandboxPolicy');
+    sp.setNetworkAllow(['*']);
+    assert.strictEqual(sp.isDomainAllowed('https://example.com/x'), true, '默认 * 应放行');
+    sp.setNetworkAllow(['github.com', '*.deepseek.com']);
+    assert.strictEqual(sp.isDomainAllowed('https://github.com/a/b'), true, '精确域名应放行');
+    assert.strictEqual(sp.isDomainAllowed('https://api.github.com/a'), true, '子域应放行');
+    assert.strictEqual(sp.isDomainAllowed('https://chat.deepseek.com'), true, '*. 后缀应放行');
+    assert.strictEqual(sp.isDomainAllowed('https://evil.com'), false, '未列域名应拒绝');
+    assert.strictEqual(sp.isDomainAllowed('not-a-url'), false, '无法解析应拒绝（fail-closed）');
+    assert.deepStrictEqual(sp.getNetworkAllow(), ['github.com', '*.deepseek.com'], '配置应可读回');
+    sp.setNetworkAllow(['*']); // 复位，避免影响后续用例
+  });
+
   // -------------------------------------------------------------------------
   console.log('== TRACE 配置注入（TOKEN 加密内置 + 用户开关）==');
   const rtMod = require('./dist/dsh-runtime.js'); // 同缓存单例；buildTraceConfig 为纯函数

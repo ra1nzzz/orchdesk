@@ -163,6 +163,26 @@ function tick(n = 3) {
     traceMod.recordFeedback({ sessionId: 's1', ts: Date.now(), helpful: true });
     assert(typeof traceMod.queueSize === 'function', '应暴露 queueSize');
   });
+  await check('ctx.trace 服务已暴露（第八死挂点：渲染层反馈 → 遥测队列的服务入口）', () => {
+    const svc = ctx.trace;
+    assert(svc && typeof svc.recordFeedback === 'function', 'ctx.trace 缺失 recordFeedback');
+    assert(typeof svc.queueSize === 'function' && typeof svc.flushNow === 'function', 'ctx.trace 应含 queueSize/flushNow');
+  });
+  await check('ctx.trace.recordFeedback 真入队（pending 增长）', () => {
+    const before = ctx.trace.queueSize().pending;
+    ctx.trace.recordFeedback('code_task', 'positive', 'sess-abc', 'msg-1');
+    const after = ctx.trace.queueSize().pending;
+    assert(after > before, `反馈应入队，before=${before} after=${after}`);
+  });
+  await check('compensation.withhold 契约：字符串入参命中外发/删除（对象入参此前恒不命中）', () => {
+    // 第九死挂点根因：主进程把 text 包成 { text } 传给 withhold(text: string)。
+    // 这里固化契约——入参必须是字符串，命中三类高危。
+    assert(ctx.compensation.withhold('把这份报告发给客户').needsConfirm === true, '对外发送应需确认');
+    assert(ctx.compensation.withhold('删除 /tmp/secret.txt').needsConfirm === true, '删除文件应需确认');
+    const cat = ctx.compensation.withhold('调用接口 POST https://x.dev').category;
+    assert(cat === 'network-egress', '网络外发应归类 network-egress，实际 ' + cat);
+    assert(ctx.compensation.withhold('今天天气不错').needsConfirm === false, '普通对话不应拦截');
+  });
 
   // ---------------- authz ----------------
   current = 'authz';

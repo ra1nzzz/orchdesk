@@ -130,6 +130,21 @@ const orchdesk = {
   withhold: (text: string): Promise<{ needsConfirm: boolean; category: string; reason: string; warning: string }> =>
     ipcRenderer.invoke('orchdesk:comp-withhold', text),
 
+  // ---- PRD FR-8 沙箱 ----
+  /** 沙箱策略快照（模式 + 网络域名白名单）。 */
+  getSandbox: (): Promise<{ mode: string; networkAllow: string[] }> =>
+    ipcRenderer.invoke('orchdesk:sandbox-get'),
+
+  /** 设置网络请求域名白名单（['*'] = 不限）。 */
+  setNetworkAllow: (list: string[]): Promise<{ ok: boolean; reason?: string; networkAllow?: string[] }> =>
+    ipcRenderer.invoke('orchdesk:sandbox-set-network-allow', list),
+
+  /** TRACE 用户反馈（PRD FR-7）：每条 Agent 消息底部标记 → 脱敏入遥测队列。 */
+  traceFeedback: (
+    payload: { intent?: string; feedback?: 'positive' | 'neutral' | 'negative'; sessionKey?: string; messageKey?: string },
+  ): Promise<{ ok: boolean; reason?: string; queue?: { pending: number; retry: number; errors: number } }> =>
+    ipcRenderer.invoke('orchdesk:trace-feedback', payload),
+
   /** 记录补偿动作。 */
   compensate: (text: string, note?: string): Promise<{ id: string; category: string; action: string; ts: number }> =>
     ipcRenderer.invoke('orchdesk:comp-compensate', text, note),
