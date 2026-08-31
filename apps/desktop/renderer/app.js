@@ -221,6 +221,12 @@
       setFloatingContext: () => Promise.resolve({ ok: false }),
       // 补偿层
       withhold: (text) => Promise.resolve({ needsConfirm: false, category: 'other', reason: '', warning: '' }),
+      // FR-6 事件流（ADR-0009）：无桥 → null，回放回退消息数组并标注「事件流未接入」
+      getSessionEvents: () => Promise.resolve(null),
+      appendForkEvent: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      // FR-5 用量追踪：无桥 → null，UI 标注「未接入」而非假 0
+      getUsage: () => Promise.resolve(null),
+      clearUsage: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
       compensate: (text, note) => Promise.resolve({ id: 'cmp-' + Date.now().toString(36), ts: Date.now(), text: (text || '').slice(0, 80), note: note || '', action: '记录操作以便审计追溯' }),
       getCompensationAudit: () => Promise.resolve([]),
       createTempPlugin: (spec) => Promise.resolve({ ok: false, reason: '主进程未接入（P1-5 seam）' }),
@@ -304,6 +310,14 @@
     // 记忆摘要方式（FR-10）：llm = 模型摘要，extractive = 抽取式兜底。
     // 必须显式展示 —— 否则「自动转储其实一直在兜底」这种降级无从发现。
     memorySummarize: { mode: 'extractive', provider: '', model: '', seam: false, loaded: false },
+    // FR-5 用量追踪：真实记账（只统计网关上报过 usage 的回合）。loaded=false = 未接入。
+    usage: {
+      loaded: false,
+      total: { promptTokens: 0, completionTokens: 0, totalTokens: 0, turns: 0 },
+      byModel: [], bySession: [],
+    },
+    // FR-6 回放数据源（ADR-0009）：事件流时间线。sid 不匹配当前回放会话 = 未加载。
+    sessionEvents: { sid: null, data: null, loaded: false },
     // 连接器（PRD FR-3）：真实后端注册表（凭证加密存储 + 保存即探测）。
     // loaded=false 时侧栏显示「未接入」，不能拿空数组冒充「都没配置」。
     connectors: { items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 }, loaded: false, expanded: null },
@@ -597,6 +611,87 @@
     return '<span class="ib badge">未启用</span>';
   }
 
+  /* ---------- FR-5 用量追踪 ---------- */
+  function refreshUsage() {
+    if (typeof bridge.getUsage !== 'function') {
+      state.usage = { ...state.usage, loaded: false };
+      if (state.page === 'settings') render();
+      return;
+    }
+    bridge.getUsage().then((r) => {
+      if (!r || typeof r !== 'object' || !r.total) return;
+      state.usage = {
+        loaded: true,
+        total: r.total,
+        byModel: Array.isArray(r.byModel) ? r.byModel : [],
+        bySession: Array.isArray(r.bySession) ? r.bySession : [],
+      };
+      if (state.page === 'settings') render();
+    }).catch(() => {
+      state.usage = { ...state.usage, loaded: false };
+      if (state.page === 'settings') render();
+    });
+  }
+
+  /** token 数量的人类可读形态（12.3k / 4.56M）。 */
+  function fmtTokens(n) {
+    const v = Number(n) || 0;
+    if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+    return String(v);
+  }
+
+  /** FR-5 用量卡片：真实记账（只统计网关上报过 usage 的回合）。「未接入」≠「0」。 */
+  function renderUsageCard() {
+    const u = state.usage;
+    if (!u.loaded) {
+      return `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px">
+        <div class="row" style="justify-content:space-between"><b style="font-size:12px">用量追踪（FR-5）</b><span class="badge">未接入</span></div>
+        <div class="faint" style="font-size:11.5px;margin-top:4px">主进程未接入用量桥接，无法显示真实记账。</div>
+      </div>`;
+    }
+    const rows = (u.byModel || []).map((m) => `<tr>
+      <td class="mono" style="font-size:11.5px">${esc(m.model)}</td>
+      <td style="text-align:right" class="mono">${fmtTokens(m.promptTokens)}</td>
+      <td style="text-align:right" class="mono">${fmtTokens(m.completionTokens)}</td>
+      <td style="text-align:right" class="mono"><b>${fmtTokens(m.totalTokens)}</b></td>
+      <td style="text-align:right" class="faint">${m.turns} 回合</td>
+    </tr>`).join('');
+    return `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px">
+      <div class="row" style="justify-content:space-between;margin-bottom:6px">
+        <b style="font-size:12px">用量追踪（FR-5）</b>
+        <span class="row" style="gap:8px">
+          <span class="faint" style="font-size:11px">合计 ↑${fmtTokens(u.total.promptTokens)} · ↓${fmtTokens(u.total.completionTokens)} · 总 ${fmtTokens(u.total.totalTokens)} · ${u.total.turns} 回合</span>
+          <button class="btn sm ghost" data-action="usage-refresh">刷新</button>
+          <button class="btn sm ghost" data-action="usage-clear">清空</button>
+        </span>
+      </div>
+      ${(u.total.turns ? `<table style="width:100%">
+        <tr><th style="text-align:left">模型</th><th style="text-align:right">输入 tokens</th><th style="text-align:right">输出 tokens</th><th style="text-align:right">合计</th><th style="text-align:right">回合</th></tr>
+        ${rows}
+      </table>` : '<div class="faint" style="font-size:11.5px">尚无用量记录 —— 网关未上报 usage 的回合不记账（「没上报」≠「0 token」）。</div>')}
+    </div>`;
+  }
+
+  /* ---------- FR-6 事件流回放数据源（ADR-0009） ---------- */
+  function refreshSessionEvents(sid) {
+    if (typeof bridge.getSessionEvents !== 'function') {
+      state.sessionEvents = { sid: sid, data: null, loaded: false };
+      render();
+      return;
+    }
+    bridge.getSessionEvents(sid).then((r) => {
+      // 异步竞态防线：回来时用户可能已切到另一个会话的回放
+      if (state.replayFor !== sid) return;
+      state.sessionEvents = { sid: sid, data: (r && typeof r === 'object') ? r : null, loaded: true };
+      render();
+    }).catch(() => {
+      if (state.replayFor !== sid) return;
+      state.sessionEvents = { sid: sid, data: null, loaded: false };
+      render();
+    });
+  }
+
   /* ---------- PRD FR-4.2 数据目录内容清单 ---------- */
   /**
    * 重拉数据目录清单。清单只在启动时取一次，导入数据 / 导出快照之后体积会变，
@@ -654,6 +749,9 @@
       : '';
     const tools = (m.tools && m.tools.length) ? `<details class="tools"><summary>${ic('chev', 14)} ${m.steps} 步 · ${m.tools.length} 个动作</summary>${m.tools.map((t) => `<div class="trow"><span class="tdot" style="background:${t.ph === 'running' ? 'var(--warn)' : 'var(--ok)'};${t.ph === 'running' ? 'animation:pulse 1.6s infinite' : ''}"></span><span class="mono">${esc(t.n)}</span><span class="faint" style="margin-left:auto">${t.ph === 'running' ? '执行中' : '完成'}</span></div>`).join('')}</details>` : '';
     const sub = m.sub ? `<div class="subagent"><span class="badge ${m.sub.state === 'running' ? 'warn' : 'info'}">SubAgent</span><span class="mono">${esc(m.sub.name)}</span><span class="phases faint">${m.sub.state === 'running' ? '执行中 · 即用即走' : '已回收并销毁'}</span></div>` : '';
+    // FR-5：单回合 token 徽标（网关没上报 usage 的回合没有该字段，不显示假 0）
+    const tok = (m.tok && Number.isFinite(m.tok.p) && Number.isFinite(m.tok.c))
+      ? `<span class="faint mono" style="font-size:10.5px;margin-left:6px">↑${fmtTokens(m.tok.p)} ↓${fmtTokens(m.tok.c)}</span>` : '';
     const fb = (m.feedback && state.feedback.has(sid + '|' + m.t)) ? `<div class="feedback" style="color:var(--ok)">已记录反馈 · 已脱敏遥测</div>`
       : (m.feedback ? `<div class="feedback"><span>这条回答对你有帮助吗？</span><button data-action="trace" data-fb="positive" data-t="${m.t}">有帮助</button><button data-action="trace" data-fb="negative" data-t="${m.t}">需改进</button><span class="faint">反馈将用于改善回复质量</span></div>` : '');
     const raw = m.x || m.text || '';
@@ -674,7 +772,7 @@
     }
     return `<div class="msg ${isU ? 'user' : 'agent'}${m.typing ? ' typing' : ''}">
       <div class="avatar">${isU ? '我' : 'AI'}</div>
-      <div class="body"><div class="meta"><b>${isU ? '你' : 'OrchDesk'}</b><span>${m.t}</span>${intentBadge}</div>
+      <div class="body"><div class="meta"><b>${isU ? '你' : 'OrchDesk'}</b><span>${m.t}</span>${intentBadge}${tok}</div>
       <div class="md-body">${txt}</div>${sub}${tools}${fb}</div></div>`;
   }
 
@@ -985,9 +1083,21 @@
     </div>`;
   }
 
-  /* ---------- FR-6 回放视图（只读时间线，从会话数据重建） ---------- */
+  /* ---------- FR-6 回放视图（只读时间线） ----------
+   * 数据源优先级（ADR-0009）：append-only 事件流 > 消息数组回退。
+   * 两种来源必须显式标注 —— 「事件流重建」与「历史会话回退」是不同的保证等级，
+   * 混用不分会让「模型可见必入日志」变成一句没人能验证的话。 */
+  function replaySourceNote() {
+    const ev = state.sessionEvents;
+    if (ev.loaded && ev.data && ev.data.source === 'event-log') return 'append-only 事件流重建（ADR-0009）';
+    if (ev.loaded && ev.data && ev.data.source === 'legacy') return '历史会话：事件流无记录，从消息数组重建';
+    return '从消息数组重建（事件流未接入）';
+  }
   function renderReplay(s) {
-    const events = FORK ? FORK.buildReplayTimeline(s) : [];
+    const ev = state.sessionEvents;
+    const events = (ev.loaded && ev.sid === s.id && ev.data && ev.data.source === 'event-log')
+      ? (ev.data.timeline || [])
+      : (FORK ? FORK.buildReplayTimeline(s) : []);
     const badgeOf = (kind) => ({
       'fork-origin': 'info', user: 'info', agent: 'ok', tool: 'warn', subagent: 'info', feedback: 'ok',
     }[kind] || 'info');
@@ -1001,7 +1111,7 @@
             <button class="btn sm" data-action="replay-close" data-sid="${esc(s.id)}">返回会话</button>
           </div>
         </div>
-        <div class="faint" style="margin-bottom:10px">回放从会话数据重建，仅用于追溯，<b>不可编辑、不可继续对话</b>。</div>
+        <div class="faint" style="margin-bottom:10px">回放自 ${esc(replaySourceNote())}，仅用于追溯，<b>不可编辑、不可继续对话</b>。</div>
         ${events.length ? `<div class="replay">${events.map((ev) => `<div class="rp-item rp-${esc(ev.kind)}">
           <span class="rp-dot"></span>
           <div class="rp-main">
@@ -1415,6 +1525,7 @@
             <input type="range" id="max-iter-pick" min="1" max="500" step="1" value="${state.maxToolIterations || 200}" style="flex:1">
             <span id="max-iter-val" class="mono" style="font-size:11px;color:var(--fg-dim);min-width:32px;text-align:right">${state.maxToolIterations || 200}</span>
           </div>
+          ${renderUsageCard()}
           <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
             <b style="font-size:12.5px;margin-bottom:10px;display:block">${state.mpEditing ? '编辑提供商' : '添加提供商'}</b>
             <div class="mp-form">
@@ -1903,6 +2014,11 @@
     const proj = state.projects.find((p) => p.id === pid);
     if (proj && !proj.sessions.includes(id)) proj.sessions.unshift(id);
     state.sel = id; state.replayFor = null; persist(); render();
+    // FR-6（ADR-0009）：分叉落事件——子日志只写一条 fork-origin 血缘，不拷贝父事件。
+    // 写失败不回滚分叉（sessions.json 仍是运行态事实源），只如实提示。
+    bridge.appendForkEvent({ newId: id, from: sid, fromTitle: src.title || sid, atIndex: idx, at: (s.fork && s.fork.at) || Date.now() })
+      .then((r) => { if (!r || r.ok !== true) toast('事件流未记录分叉血缘' + (r && r.reason ? '：' + r.reason : ''), 'warn'); })
+      .catch(() => toast('事件流未接入，分叉血缘未记录', 'warn'));
     toast(idx >= srcMsgs.length
       ? '已创建分支（继承全部消息，独立写入）'
       : `已从第 ${idx} 条消息处分叉（继承前 ${idx} 条）`, 'ok');
@@ -2285,7 +2401,7 @@
         state.page = id;
         // 进入设置页时重拉记忆域与沙箱日志：SubAgent 执行完会随时往 worker 域落结论，
         // 只靠启动时拉一次，用户看到的就是「空的」，会误判成功能没生效。
-        if (id === 'settings') { refreshMemoryDomain(); refreshMemorySummarize(); refreshSandboxLog(); }
+        if (id === 'settings') { refreshMemoryDomain(); refreshMemorySummarize(); refreshSandboxLog(); refreshUsage(); }
         if (id === 'plugins') { refreshConnectors(); refreshMarket(); }
         render();
         break;
@@ -2479,7 +2595,7 @@
         doFork(sid, nm, at ? at.value : undefined);
         break;
       }
-      case 'replay-open': { state.replayFor = el.dataset.sid || state.sel; render(); break; }
+      case 'replay-open': { state.replayFor = el.dataset.sid || state.sel; state.sessionEvents = { sid: null, data: null, loaded: false }; render(); refreshSessionEvents(state.replayFor); break; }
       case 'replay-close': { state.replayFor = null; render(); break; }
       case 'rename-confirm': { const inp = $('#modalRoot input[type=text]'); const sid = el.dataset.id; if (inp && sid) doRename(sid, inp.value); closeModal(); break; }
 
@@ -2831,6 +2947,15 @@
 
       /* 本地插件市场（PRD FR-3） */
       case 'market-refresh': refreshMarket(); break;
+
+      /* FR-5 用量追踪 */
+      case 'usage-refresh': refreshUsage(); break;
+      case 'usage-clear':
+        bridge.clearUsage().then((r) => {
+          toast(r && r.ok ? '用量记账已清空' : String(r && r.reason || '清空失败'), r && r.ok ? 'ok' : 'err');
+          refreshUsage();
+        }).catch(() => {});
+        break;
       case 'market-open-dir':
         if (typeof bridge.openMarketDir !== 'function') { toast('未接入', 'warn'); break; }
         bridge.openMarketDir().then((r) => {

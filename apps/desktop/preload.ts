@@ -194,6 +194,32 @@ const orchdesk = {
   openMarketDir: (): Promise<{ ok: boolean; dir?: string; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:market-open-dir'),
 
+  // ---- FR-6 SessionEvent 事件流（ADR-0009） ----
+  /** 会话回放数据源：事件流时间线（沿血缘链拼接）；source='legacy' = 历史会话无事件日志。 */
+  getSessionEvents: (sid: string): Promise<{
+    ok: boolean; source: 'event-log' | 'legacy'; count: number;
+    timeline: Array<{ seq: string; kind: string; label: string; detail: string; ts: string }>;
+    context?: Array<{ role: 'user' | 'assistant'; text: string }>;
+    reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:session-events', sid),
+
+  /** 分叉落事件：子日志写一条 fork-origin 血缘（append-only，不拷贝父事件）。 */
+  appendForkEvent: (payload: { newId: string; from: string; fromTitle?: string; atIndex: number; at?: number }): Promise<{ ok: boolean; count?: number; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:fork-event', payload),
+
+  // ---- FR-5 用量追踪 ----
+  /** 模型用量聚合（按模型 / 按会话 / 合计；只统计真实上报过 usage 的回合）。 */
+  getUsage: (): Promise<{
+    ok: boolean; reason?: string;
+    total: { promptTokens: number; completionTokens: number; totalTokens: number; turns: number };
+    byModel: Array<{ model: string; promptTokens: number; completionTokens: number; totalTokens: number; turns: number }>;
+    bySession: Array<{ sessionId: string; totalTokens: number; turns: number }>;
+  }> => ipcRenderer.invoke('orchdesk:usage'),
+
+  /** 清空用量记账。 */
+  clearUsage: (): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:usage-clear'),
+
   /** 当前记忆摘要方式（llm = 模型摘要；extractive = 抽取式兜底）。 */
   getMemorySummarizeStatus: (): Promise<{ seam: boolean; provider: string; model: string; mode: 'llm' | 'extractive' }> =>
     ipcRenderer.invoke('orchdesk:memory-summarize-status'),

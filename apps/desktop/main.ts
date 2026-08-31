@@ -38,6 +38,26 @@ import {
   type ConnectorFile,
 } from './connector-registry';
 import { hubClient } from './hub';
+import {
+  aggregateUsage,
+  appendUsageTurn,
+  defaultUsageFile,
+  normalizeApiUsage,
+  readUsageFile,
+  writeUsageFile,
+  type UsageEntry,
+  type UsageFile,
+} from './usage-registry';
+import {
+  appendEvents,
+  buildTimeline as buildEventTimeline,
+  collectLineageEvents,
+  eventFileFor,
+  readEvents,
+  rebuildContext,
+  sanitizeSessionId,
+  type SessionEvent,
+} from './session-events';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, listMarketPlugins, setMarketPluginEnabled, startupMarketPlugins, marketDir } from './dsh-runtime';
 import { normalizeEnabledMap } from './plugin-market';
 import { getHostServices } from './host-services';
@@ -152,6 +172,8 @@ const DATA_FILES: MigrateFileSpec[] = [
   // 解不开。这里仍随目录迁移，是为了保住「哪些连接器配过、上次探测结论」的追溯链；
   // 解不开的凭证会表现为「未配置」，UI 会明确提示重新录入，不会静默当一个能用的连接。
   { name: DATA_FILE_NAMES.connectors, mode: 'copy-if-absent' },
+  // FR-5 用量追踪：真实记账不因换目录断档（0 记录也是历史事实）。
+  { name: DATA_FILE_NAMES.usage, mode: 'copy-if-absent' },
 ];
 const DATA_DIRS = [DATA_DIR_NAMES.skills];
 
@@ -429,6 +451,8 @@ async function callOllama(provider: ModelProvider, model: string, messages: ApiM
     content,
     toolCalls,
     source: toolCalls.length ? 'native' : 'none',
+    // FR-5：Ollama 顶层 prompt_eval_count / eval_count → 归一化 usage
+    usage: normalizeApiUsage(data) || undefined,
     emptyReason: (!content && !toolCalls.length)
       ? emptyContentReason({
           provider: provider.name,
@@ -604,6 +628,9 @@ async function callOpenAICompatible(provider: ModelProvider, model: string, mess
       content,
       toolCalls,
       source: toolCalls.length ? 'native' : 'none',
+      // FR-5：chat（prompt_tokens）与 responses（input_tokens）两种形态统一归一化；
+      // 网关不回 usage → undefined，上层不伪造 0。
+      usage: normalizeApiUsage(data) || undefined,
       // 只有「去掉 tools 后成功拿到非空响应」才算真正的工具拒绝，
       // 若去掉 tools 仍是空响应，则不应把工具能力永久关闭。
       toolsRejected: canUseTools && !att.tools && content ? true : undefined,
@@ -1073,6 +1100,9 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
   const toolSteps: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }> = [];
   let finalReply = '';
   let stepCount = 0;
+  // FR-5：本回合累计 token 用量。null = 网关从未上报 usage（「没上报」≠「0 token」，
+  // 此时本回合不记用量条目，聚合里也不会出现这次回合）。
+  let turnUsage: { p: number; c: number; t: number } | null = null;
   const MAX_ITERATIONS = Math.max(1, Math.min(200, modelCfg.maxToolIterations || 20));
   // 网关明确拒绝工具协议 → 停止下发 tools，转「文本兜底解析」，
   // 避免每一轮都重复三次降级重试。进程级记忆让同 provider+model 的后续会话直接跳过 tools。
@@ -1107,6 +1137,12 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
       reply = await callModel(provider, model, apiMessages, wantsTools ? TOOL_DEFS : []);
     } catch (err) {
       return { text: `（模型调用失败）${(err as Error).message}`, intent: 'CONFIRM' };
+    }
+    if (reply.usage) {
+      const u = reply.usage;
+      turnUsage = turnUsage
+        ? { p: turnUsage.p + u.promptTokens, c: turnUsage.c + u.completionTokens, t: turnUsage.t + u.totalTokens }
+        : { p: u.promptTokens, c: u.completionTokens, t: u.totalTokens };
     }
     if (reply.toolsRejected) {
       providerRejectsTools = true;
@@ -1156,13 +1192,51 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
 
   // 持久化
   const s = store[sessionId] as Record<string, unknown> | undefined;
+  const turnTs = Date.now();
   if (s) {
     const msgs = (s.msgs as Array<Record<string, unknown>>) || [];
-    msgs.push({ role: 'user', text, t: nowTime(), ts: new Date().toISOString() });
-    msgs.push({ role: 'assistant', text: finalReply, model, t: nowTime(), ts: new Date().toISOString(), tools: toolSteps, steps: stepCount });
+    msgs.push({ role: 'user', text, t: nowTime(), ts: new Date(turnTs).toISOString() });
+    msgs.push({
+      role: 'assistant', text: finalReply, model, t: nowTime(), ts: new Date(turnTs).toISOString(),
+      tools: toolSteps, steps: stepCount,
+      // FR-5：单回合 token 用量徽标（网关没上报就没有该字段，UI 不显示）
+      ...(turnUsage ? { tok: { p: turnUsage.p, c: turnUsage.c } } : {}),
+    });
     s.msgs = msgs;
     s.updated = new Date().toISOString();
     saveStore();
+  }
+
+  // ---- SessionEvent append-only 双写（FR-6，ADR-0009）----
+  // 「模型可见必入日志」：用户输入与模型回复（含工具步骤、token 用量）在同一
+  // 持久化点追加进事件流。写失败不阻塞回合（事件流是回放权威源，不是运行态依赖）。
+  {
+    const evFile = eventFileFor(dataDir(), sessionId);
+    const evs: Array<Omit<SessionEvent, 'seq'>> = [
+      { ts: turnTs, kind: 'user', text },
+      {
+        ts: turnTs, kind: 'assistant', text: finalReply, model,
+        tools: toolSteps.map((t) => ({ name: t.n, phase: t.ph, result: t.result })),
+        ...(turnUsage ? { tok: { p: turnUsage.p, c: turnUsage.c } } : {}),
+      },
+    ];
+    const w = appendEvents(evFile, evs);
+    if (!w.ok) log('WARN', 'events', `会话事件追加失败: ${w.reason}`);
+  }
+
+  // ---- FR-5 用量记账：一回合一条目（网关从未上报 usage → 不记，不伪造 0）----
+  if (turnUsage) {
+    const entry: UsageEntry = {
+      ts: new Date(turnTs).toISOString(),
+      sessionId, provider: provider.name, model,
+      promptTokens: turnUsage.p, completionTokens: turnUsage.c, totalTokens: turnUsage.t,
+      steps: stepCount,
+    };
+    const usageFile = path.join(dataDir(), DATA_FILE_NAMES.usage);
+    const cur = readUsageFile(usageFile);
+    const next = appendUsageTurn(cur, entry);
+    const wr = writeUsageFile(usageFile, next);
+    if (!wr.ok) log('WARN', 'usage', `用量记账落盘失败: ${wr.reason}`);
   }
 
   return { text: finalReply, intent: 'ACT' };
@@ -1431,6 +1505,73 @@ ipcMain.handle('orchdesk:persist-sessions', async (_e, sessions: unknown[]) => {
   (sessions || []).forEach((s: any) => { if (s && s.id && Array.isArray(s.msgs)) store[s.id] = s; });
   saveStore();
   return { ok: true };
+});
+
+// ---- FR-6 SessionEvent 事件流桥接（ADR-0009）----
+/** 血缘加载器：沿 fork-origin 链读父日志；非法 sid / 缺文件 → 空日志（回放不中断）。 */
+function loadEventLog(sid: string): SessionEvent[] {
+  const clean = sanitizeSessionId(sid);
+  if (!clean) return [];
+  try {
+    return readEvents(eventFileFor(dataDir(), clean));
+  } catch {
+    return [];
+  }
+}
+
+/** 回放数据源：事件流时间线（沿血缘链拼接）；日志为空 → source='legacy'（渲染层回退消息数组重建并显式标注）。 */
+ipcMain.handle('orchdesk:session-events', async (_e, sid: string) => {
+  try {
+    const events = loadEventLog(String(sid || ''));
+    if (!events.length) return { ok: true, source: 'legacy', count: 0, timeline: [] };
+    return {
+      ok: true,
+      source: 'event-log',
+      count: events.length,
+      timeline: buildEventTimeline(loadEventLog, String(sid || '')),
+      // 上下文重建走全量血缘链（祖先前缀按 atIndex 截断后拼接），分叉子分支的
+      // 模型上下文不依赖消息数组切片（ADR-0009 §4）。
+      context: rebuildContext(collectLineageEvents(loadEventLog, String(sid || ''))),
+    };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message, source: 'legacy', count: 0, timeline: [] };
+  }
+});
+
+/** 分叉落事件（渲染层 doFork 调用）：子日志只写一条 fork-origin 血缘，不拷贝父事件。 */
+ipcMain.handle('orchdesk:fork-event', async (_e, payload: unknown) => {
+  const p = (payload || {}) as Record<string, unknown>;
+  const newId = sanitizeSessionId(p.newId);
+  if (!newId) return { ok: false, reason: '非法的新会话 id' };
+  const from = sanitizeSessionId(p.from);
+  if (!from) return { ok: false, reason: '非法的源会话 id' };
+  const atIndex = Number(p.atIndex);
+  if (!Number.isFinite(atIndex) || atIndex < 0) return { ok: false, reason: '分叉点必须是真数字（null 语义由渲染层夹紧）' };
+  try {
+    const w = appendEvents(eventFileFor(dataDir(), newId), [{
+      ts: Number(p.at) || Date.now(),
+      kind: 'fork-origin',
+      from, fromTitle: String(p.fromTitle || ''), atIndex: Math.floor(atIndex),
+    }]);
+    if (!w.ok) return { ok: false, reason: w.reason };
+    return { ok: true, count: w.written?.length || 0 };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
+
+// ---- FR-5 用量追踪桥接 ----
+ipcMain.handle('orchdesk:usage', async () => {
+  try {
+    const file = readUsageFile(path.join(dataDir(), DATA_FILE_NAMES.usage));
+    return { ok: true, ...aggregateUsage(file.entries) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message, total: { promptTokens: 0, completionTokens: 0, totalTokens: 0, turns: 0 }, byModel: [], bySession: [] };
+  }
+});
+ipcMain.handle('orchdesk:usage-clear', async () => {
+  const wr = writeUsageFile(path.join(dataDir(), DATA_FILE_NAMES.usage), defaultUsageFile());
+  return wr.ok ? { ok: true } : { ok: false, reason: wr.reason };
 });
 
 // 项目分组持久化（BUG：此前只存 sessions，重启后项目全丢、会话退化为「任务」组）

@@ -47,13 +47,22 @@ async function run() {
     // （.proj-seg / .sess / 用户消息）在空数据下永远不可能通过，套件实际是空转的。
     // 改为注入一组真实形状的种子数据（字段口径同 app.js createSessionInProject）。
     const seedProjects = [
-      { id: 'p1', n: 'OrchDesk', sessions: ['s1'], archived: 0 },
+      { id: 'p1', n: 'OrchDesk', sessions: ['s1', 's3'], archived: 0 },
       { id: 'p2', n: '写作助手', sessions: ['s2'], archived: 0 },
       { id: 'p3', n: '已归档', sessions: [], archived: 1 },
     ];
     const seedSessions = {
       s1: { id: 's1', pid: 'p1', title: '修复登录超时', expert: '全栈工程师', model: 'qwen3:14b', updated: '刚刚', ts: '10:00', msgs: [] },
       s2: { id: 's2', pid: 'p2', title: '周报草稿', expert: '内容编辑', model: 'qwen3:14b', updated: '昨天', ts: '09:00', msgs: [] },
+      // s3（FR-5/FR-6）：带 token 用量徽标的 assistant 消息 + 分叉/回放测试的数据基础
+      s3: {
+        id: 's3', pid: 'p1', title: '用量与回放', expert: '全栈工程师', model: 'usage-model', updated: '刚刚', ts: '11:00',
+        msgs: [
+          { role: 'user', text: '查一下磁盘占用', t: '11:00' },
+          { role: 'assistant', text: '磁盘占用 62%', model: 'usage-model', t: '11:01', tok: { p: 1230, c: 45 },
+            tools: [{ n: 'file_list', ph: 'done' }], steps: 1 },
+        ],
+      },
     };
     // 分层记忆种子（PRD FR-10）：worker 域两条 SubAgent 结论，其余域空。
     // worker 域非空是晋升链路能被看见的前提 —— 空域会让所有晋升按钮 disabled。
@@ -121,8 +130,41 @@ async function run() {
           error: 'bad-manifest: manifest.name 缺失或非字符串', manifest: null },
       ],
     };
+    // FR-5 用量追踪种子：按模型聚合两行。
+    window.__usage = {
+      total: { promptTokens: 123456, completionTokens: 4567, totalTokens: 128023, turns: 9 },
+      byModel: [
+        { model: 'usage-model', promptTokens: 120000, completionTokens: 4000, totalTokens: 124000, turns: 8 },
+        { model: 'qwen3:14b', promptTokens: 3456, completionTokens: 567, totalTokens: 4023, turns: 1 },
+      ],
+      bySession: [{ sessionId: 's3', totalTokens: 124000, turns: 8 }],
+    };
+    // FR-6 事件流种子（ADR-0009）：s3 有 append-only 日志（含分叉起点血缘演示另一会话）。
+    // appendForkEvent 的调用会记录进 window.__events.forks 供断言。
+    window.__events = {
+      s3: {
+        ok: true, source: 'event-log', count: 3,
+        timeline: [
+          { seq: 'p1#1', kind: 'user', label: '你', detail: '（父）之前的问题', ts: '2026/08/31 10:58:00' },
+          { seq: '#1', kind: 'user', label: '你', detail: '查一下磁盘占用', ts: '2026/08/31 11:00:00' },
+          { seq: '#2', kind: 'tool', label: '工具 · file_list', detail: 'logs/ build/ src/', ts: '2026/08/31 11:01:00' },
+          { seq: '#2', kind: 'agent', label: '模型 · usage-model', detail: '磁盘占用 62%', ts: '2026/08/31 11:01:00' },
+        ],
+        context: [{ role: 'user', text: '查一下磁盘占用' }, { role: 'assistant', text: '磁盘占用 62%' }],
+      },
+      forks: [],
+    };
     window.orchdesk = {
-      loadSessions: () => Promise.resolve(JSON.parse(JSON.stringify(seedSessions))),
+      // 启动路径要求 loadSessions 返回数组（remote.length 判断）。默认返回对象
+      // （走 wizard「首次运行」路径，前 13 组依赖该行为）；组 14 reload 前设置
+      // localStorage.__seedArr = '1' → 返回数组，种子会话真实进 state。
+      loadSessions: () => {
+        let arrMode = false;
+        try { arrMode = localStorage.getItem('__seedArr') === '1'; } catch (e) { /* ignore */ }
+        return Promise.resolve(arrMode
+          ? JSON.parse(JSON.stringify(Object.values(seedSessions)))
+          : JSON.parse(JSON.stringify(seedSessions)));
+      },
       persistSessions: (arr) => Promise.resolve({ ok: true }),
       loadProjects: () => Promise.resolve(JSON.parse(JSON.stringify(seedProjects))),
       persistProjects: (arr) => Promise.resolve({ ok: true }),
@@ -343,6 +385,19 @@ async function run() {
         return Promise.resolve({ ok: true, state: JSON.parse(JSON.stringify(m)) });
       },
       openMarketDir: () => Promise.resolve({ ok: true, dir: 'C:\\mock\\plugins' }),
+
+      // FR-5 用量追踪
+      getUsage: () => Promise.resolve(window.__usage === null
+        ? null
+        : JSON.parse(JSON.stringify(window.__usage))),
+      clearUsage: () => { window.__usage = { total: { promptTokens: 0, completionTokens: 0, totalTokens: 0, turns: 0 }, byModel: [], bySession: [] }; return Promise.resolve({ ok: true }); },
+
+      // FR-6 SessionEvent 事件流（ADR-0009）
+      getSessionEvents: (sid) => Promise.resolve(window.__events[sid]
+        ? JSON.parse(JSON.stringify(window.__events[sid]))
+        : { ok: true, source: 'legacy', count: 0, timeline: [] }),
+      appendForkEvent: (p) => { window.__events.forks.push(p); return Promise.resolve({ ok: true, count: 1 }); },
+
       // PRD FR-9：授权白名单（会话 / 永久，可查看可撤销）
       listGrants: () => Promise.resolve(window.__grants || []),
       addGrant: (input) => {
@@ -1116,6 +1171,78 @@ async function run() {
 
   // 打开插件目录按钮存在
   await assert(await page.locator('[data-action="market-open-dir"]').count() === 1, '有「打开插件目录」入口');
+
+  // ================================================================
+  // 测试组 14：用量追踪与事件流回放（FR-5 / FR-6，ADR-0009）
+  // FR-5：用量卡片按模型聚合 + 清空 + assistant 消息 token 徽标。
+  // FR-6：回放优先走 append-only 事件流（ADR-0009），无日志回退消息数组并显式标注；
+  //       分叉落 fork-origin 血缘事件（appendForkEvent）。
+  // ================================================================
+  console.log('📋 测试组 14：用量追踪与事件流回放');
+
+  // 前 13 组的会话操作（重命名/删除/分叉）污染了侧栏状态 —— reload 重置到种子态
+  // （addInitScript 会重新执行，种子数据与 mock 桥原样恢复）。打开数组模式让
+  // 种子会话（s3 带 tok 徽标 + 事件流）真实进 state。
+  await page.evaluate(() => { try { localStorage.setItem('__seedArr', '1'); } catch (e) { /* ignore */ } });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForTimeout(1000);
+  try {
+    const wzSkip = page.locator('[data-action="wz-skip"]');
+    if (await wzSkip.count() > 0) { await wzSkip.click({ force: true }); await page.waitForTimeout(300); }
+  } catch (e) { /* ignore */ }
+
+  // ---- FR-5 用量卡片 ----
+  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await page.waitForTimeout(800);
+  let settingsText = await page.locator('.main-inner').innerText();
+  await assert(/用量追踪（FR-5）/.test(settingsText), '模型管理区有用量卡片');
+  await assert(/128\.0k/.test(settingsText), '显示合计 tokens（128.0k）');
+  await assert(/usage-model/.test(settingsText), '按模型聚合显示 usage-model');
+
+  await page.locator('[data-action="usage-clear"]').click();
+  await page.waitForTimeout(600);
+  await assert(/尚无用量记录/.test(await page.locator('.main-inner').innerText()), '清空后显示「尚无用量记录」（不是假 0 卡片）');
+
+  // ---- FR-5 token 徽标：s3 的 assistant 消息 ----
+  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await page.waitForTimeout(500);
+  // 项目默认折叠 → 先展开 p1，再选会话 s3
+  const p1Toggle = page.locator('[data-action="proj-toggle"][data-id="p1"]');
+  if (await p1Toggle.count() > 0) { await p1Toggle.first().click(); await page.waitForTimeout(400); }
+  await page.locator('[data-action="sel"][data-id="s3"]').first().click();
+  await page.waitForTimeout(500);
+  await assert(/↑1\.2k ↓45/.test(await page.locator('#msgScroll').innerText()), 'assistant 消息显示 token 徽标（↑1.2k ↓45）');
+
+  // ---- FR-6 事件流回放（event-log 源）----
+  await page.locator('[data-action="replay-open"]').first().click();
+  await page.waitForTimeout(700);
+  let replayText = await page.locator('#msgScroll').innerText();
+  await assert(/append-only 事件流重建/.test(replayText), '回放标注「事件流重建」（ADR-0009 权威源）');
+  await assert(await page.locator('.rp-item').count() === 4, '事件流时间线 4 项（含工具步骤独立事件）');
+  await assert(/工具 · file_list/.test(replayText), '工具步骤成为独立时间线条目');
+
+  // ---- FR-6 桥断回退：诚实标注而非静默降级 ----
+  await page.locator('[data-action="replay-close"]').click();
+  await page.waitForTimeout(300);
+  await page.evaluate(() => { delete window.orchdesk.getSessionEvents; });
+  await page.locator('[data-action="sel"][data-id="s1"]').first().click();  await page.waitForTimeout(400);
+  await page.locator('[data-action="replay-open"]').first().click();
+  await page.waitForTimeout(700);
+  await assert(/事件流未接入/.test(await page.locator('#msgScroll').innerText()), '桥断时标注「事件流未接入」');
+
+  // ---- FR-6 分叉落血缘事件 ----
+  await page.locator('[data-action="replay-close"]').click();
+  await page.waitForTimeout(300);
+  await page.locator('[data-action="sel"][data-id="s3"]').first().click();
+  await page.waitForTimeout(400);
+  await page.locator('[data-action="fork"]').first().click();
+  await page.waitForTimeout(400);
+  await page.locator('[data-action="branch-confirm"]').click();
+  await page.waitForTimeout(900);
+  const forks = await page.evaluate(() => window.__events.forks);
+  await assert(forks.length >= 1 && forks[forks.length - 1].from === 's3', '分叉调用 appendForkEvent（from=s3）');
+  await assert(forks[forks.length - 1].atIndex === 2, '血缘 atIndex=2（s3 共 2 条消息，默认全继承）');
+  await assert(!!forks[forks.length - 1].newId, '血缘记录新分支 id');
 
   // ================================================================
   // 总结

@@ -47,6 +47,11 @@ export interface ModelReply {
    * 上层在 content 为空时优先展示，避免「模型返回空内容」这种无法定位的提示。
    */
   emptyReason?: string;
+  /**
+   * 本次调用的 token 用量（FR-5，三家 API 归一化后）。
+   * 网关不回 usage 字段时缺省——「没上报」≠「0 token」，上层不得伪造记账。
+   */
+  usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }
 
 export interface ToolResult {

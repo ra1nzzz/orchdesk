@@ -677,6 +677,75 @@ function lastAssistant(sessionId) {
   });
 
   // =========================================================================
+  console.log('== R. 用量追踪与 SessionEvent 双写（FR-5 / FR-6，ADR-0009）==');
+
+  // R1: 网关回 usage → 记账 + tok 徽标 + 事件流
+  writeModels({ id: 'p-us', name: '用量网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['usage-model'] }, 5);
+  reset();
+  responder = () => {
+    const u = { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165 };
+    return okJson({ choices: [{ message: { content: '带用量的回答' } }], usage: u });
+  };
+  out = await runAgentTurn(null, 's-usage', '用量测试输入', {});
+
+  await check('R1 网关上报 usage → assistant 消息带 tok 徽标（单回合累计）', () => {
+    const m = lastAssistant('s-usage');
+    assert.ok(m.tok, 'assistant 消息应带 tok: ' + JSON.stringify(m).slice(0, 200));
+    assert.strictEqual(m.tok.p, 120);
+    assert.strictEqual(m.tok.c, 45);
+  });
+
+  await check('R2 usage.json 落盘且 orchdesk:usage 聚合正确（「没上报」≠「0」对侧：上报了必须记）', () => {
+    const file = path.join(HOME, 'usage.json');
+    assert.ok(fs.existsSync(file), 'usage.json 应已落盘');
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    assert.ok(data.entries.length >= 1, '应至少 1 条回合条目');
+    const e = data.entries[data.entries.length - 1];
+    assert.strictEqual(e.totalTokens, 165, '应记录 165，实际 ' + e.totalTokens);
+    assert.strictEqual(e.sessionId, 's-usage');
+    assert.strictEqual(e.model, 'usage-model');
+  });
+
+  await check('R3 orchdesk:usage IPC 返回聚合（total + byModel + bySession）', async () => {
+    const u = await ipcHandlers.get('orchdesk:usage')(null);
+    assert.ok(u.ok !== false, 'usage IPC 应 ok: ' + JSON.stringify(u).slice(0, 150));
+    assert.ok(u.total.turns >= 1 && u.total.totalTokens >= 165, JSON.stringify(u.total));
+    assert.ok(u.byModel.some((m) => m.model === 'usage-model'), 'byModel 应含 usage-model');
+    assert.ok(u.bySession.some((s) => s.sessionId === 's-usage'), 'bySession 应含 s-usage');
+  });
+
+  await check('R4 SessionEvent 事件流：user + assistant（含 model）双写进 events/<sid>.ndjson', () => {
+    const evFile = path.join(HOME, 'events', 's-usage.ndjson');
+    assert.ok(fs.existsSync(evFile), '事件文件应存在: ' + evFile);
+    const evs = fs.readFileSync(evFile, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.strictEqual(evs[0].kind, 'user');
+    assert.strictEqual(evs[0].text, '用量测试输入', '「模型可见必入日志」：用户输入全文');
+    assert.strictEqual(evs[1].kind, 'assistant');
+    assert.strictEqual(evs[1].text, '带用量的回答');
+    assert.strictEqual(evs[1].model, 'usage-model');
+    assert.ok(evs[1].tok && evs[1].tok.p === 120, '事件也应带 token 用量');
+  });
+
+  await check('R5 orchdesk:session-events IPC → event-log 源时间线', async () => {
+    const r = await ipcHandlers.get('orchdesk:session-events')(null, 's-usage');
+    assert.strictEqual(r.source, 'event-log', '应从事件流取，实际 ' + r.source);
+    assert.ok(r.timeline.length >= 2, JSON.stringify(r.timeline || []).slice(0, 200));
+  });
+
+  // R6: 网关不回 usage → 不记账（助手消息无 tok 字段）
+  reset();
+  plan = [chat('没有用量的回答', undefined)];
+  out = await runAgentTurn(null, 's-nousage', '再来一条', {});
+
+  await check('R6 网关不回 usage → 不记条目、消息无 tok（不伪造 0）', () => {
+    const m = lastAssistant('s-nousage');
+    assert.ok(!m.tok, '不应有 tok 字段: ' + JSON.stringify(m.tok));
+    const before = JSON.parse(fs.readFileSync(path.join(HOME, 'usage.json'), 'utf-8'));
+    const mine = before.entries.filter((e) => e.sessionId === 's-nousage');
+    assert.strictEqual(mine.length, 0, '该会话不应有记账条目');
+  });
+
+  // =========================================================================
   const ok = summary();
 
   // 收尾：关服务 + 清临时目录

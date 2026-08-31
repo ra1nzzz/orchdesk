@@ -42,11 +42,15 @@ export const DATA_FILE_NAMES = {
   connectors: 'connectors.json',
   /** PRD FR-3 本地插件市场启用状态（目录内容本身在 dataDir()/plugins/）。 */
   market: 'plugin-market.json',
+  /** PRD FR-5 模型用量追踪（回合级条目 + 聚合；随数据目录迁移）。 */
+  usage: 'usage.json',
 } as const;
 
 /** 随数据目录迁移的目录名（与 DATA_FILE_NAMES 同理，集中登记）。 */
 export const DATA_DIR_NAMES = {
   skills: SKILLS_DIR_NAME,
+  /** PRD FR-6 SessionEvent append-only 事件日志（每会话一个 NDJSON，ADR-0009）。 */
+  events: 'events',
 } as const;
 
 // ---------------------------------------------------------------------------
