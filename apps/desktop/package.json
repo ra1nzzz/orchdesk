@@ -1,6 +1,6 @@
 {
   "name": "@orchdesk/desktop",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "OrchDesk 桌面壳（Electron 主进程 + 渲染层桥接）",
   "author": "OrchDesk Team",

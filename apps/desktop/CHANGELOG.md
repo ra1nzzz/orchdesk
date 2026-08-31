@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-31
+
+### Added
+- **usage/events**: FR-5 用量追踪 + FR-6 SessionEvent append-only 事件流（ADR-0009）
+- **market**: FR-3 本地插件市场注册表（manifest 校验 + 真热插拔，fail-closed）
+- **connector**: FR-3 连接器后端注册表（8 连接器 + 加密凭证 + 保存即探测）
+- **memory**: 补 FR-10 转储链（语义分块 + LLM 摘要 seam，第十五个死挂点）
+- **memory**: 补 FR-10 分层记忆晋升调用链（第十四个死挂点）
+- **fork/sandbox/datadir**: 补 PRD 三处缺口（FR-6 分叉回放 / FR-8 沙箱日志 / FR-4.2 内容清单）
+- **authz**: 授权白名单（会话/永久，可查看可撤销）（PRD FR-9，第十一个死挂点）
+- **desktop**: 桌面集成 6 项真实接线（PRD FR-4.2，第十个死挂点）
+
+### Fixed
+- **usage/events**: FR-5/FR-6 三方审阅交叉修复（2 BLOCKER + 4 采纳项）
+
+
 ## [0.11.0] - 2026-08-31
 
 ### Added
