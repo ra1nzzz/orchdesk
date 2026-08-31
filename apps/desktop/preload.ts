@@ -125,6 +125,29 @@ const orchdesk = {
   getMemoryStats: (): Promise<{ usageRatio: number; dumps: number; recallHits: number; domainCounts: Record<string, number> }> =>
     ipcRenderer.invoke('orchdesk:memory-stats'),
 
+  /** 列某域记忆条目（FR-10 四域可查）。null = 服务不可用。 */
+  listMemoryDomain: (domain: string): Promise<Array<{ id: string; text: string; origin: string; agent: string; createdAt: number }> | null> =>
+    ipcRenderer.invoke('orchdesk:memory-list', domain),
+
+  /** 单条晋升（worker 出域须过 Director 过滤）。 */
+  promoteMemory: (input: { id: string; from: string; to: string }): Promise<{ ok: boolean; reason: string }> =>
+    ipcRenderer.invoke('orchdesk:memory-promote', input),
+
+  /** 批量晋升 worker 域（每条过 Director 过滤，分批上限见主进程）。 */
+  promoteWorkerDomain: (to: string): Promise<{
+    ok: boolean; total: number; attempted: number; promoted: number; rejected: number; remaining: number;
+    reasons: Array<{ id: string; ok: boolean; reason: string }>;
+  }> => ipcRenderer.invoke('orchdesk:memory-promote-worker', { to }),
+
+  /** 晋升审计列表（含统计）。 */
+  getMemoryPromotions: (query?: Record<string, unknown>): Promise<{
+    entries: Array<Record<string, unknown>>; stats: Record<string, unknown>; total: number; max: number;
+  }> => ipcRenderer.invoke('orchdesk:memory-promotions', query || {}),
+
+  /** 清空晋升审计。 */
+  clearMemoryPromotions: (): Promise<{ ok: boolean; cleared: number }> =>
+    ipcRenderer.invoke('orchdesk:memory-promotions-clear'),
+
   /** 提示词库列表。 */
   listPrompts: (): Promise<Array<Record<string, unknown>>> =>
     ipcRenderer.invoke('orchdesk:prompt-list'),

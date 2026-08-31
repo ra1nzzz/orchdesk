@@ -58,6 +58,13 @@ export function setDirectorFilter(fn: DirectorFilter | null): void {
 /** Director 过滤默认超时（fail-closed：超时即拒绝）。 */
 const DIRECTOR_FILTER_TIMEOUT_MS = 5_000;
 
+/**
+ * Worker 结果入 worker 域的截断上限。
+ * Worker 输出可能很长（整段代码 / 大段日志），全量入记忆会挤爆向量语料。
+ * 截断只影响记忆条目，不影响 disposeSubAgent 事件里的 rec.result（完整保留）。
+ */
+const WORKER_RESULT_MAX = 4_000;
+
 /** 给 promise 加超时；超时即 reject（调用方转为拒绝）。 */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -67,6 +74,32 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
       (e) => { clearTimeout(t); reject(e instanceof Error ? e : new Error(String(e))); },
     );
   });
+}
+
+/**
+ * 取记忆服务（可选依赖）。
+ *
+ * 必须用 ctx.get 而非属性访问：Cordis Context 是代理，在 fiber ctx 上访问
+ * **未提供给该作用域**的服务属性会抛错；safeGet 会把这个错吞成 undefined，
+ * 表现出来就是「memory 插件明明装载了却拿不到」。ctx.get 对缺失服务返回
+ * undefined 且不抛错，是官方的取服务方式。
+ */
+function memoryServiceOf(ctx: Context):
+  | { record?: (d: string, t: string, s: { origin: string; agent?: string; sessionId?: string }) => unknown }
+  | undefined {
+  const getter = safeGet(ctx, 'get');
+  if (typeof getter === 'function') {
+    try {
+      return (getter as (n: string) => unknown).call(ctx, 'memory') as
+        | { record?: (d: string, t: string, s: { origin: string; agent?: string; sessionId?: string }) => unknown }
+        | undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return safeGet(ctx, 'memory') as
+    | { record?: (d: string, t: string, s: { origin: string; agent?: string; sessionId?: string }) => unknown }
+    | undefined;
 }
 
 /** 安全读取属性（Cordis Context 代理对未知服务属性访问会抛错）。 */
@@ -179,8 +212,33 @@ export function apply(ctx: Context, config: BrainConfig): void {
     rec.status = 'disposed';
     rec.finishedAt = Date.now();
     rec.result = result;
+    // FR-10 分层记忆的**源头**：Worker 输出先落 worker 域。
+    // 不落这一步，worker 域永远是空的 —— promote 链路写得再完整也是无米下锅
+    // （此前 brain 声明了 memory.commit 能力却从未落地，Worker 结果随 dispose 一起蒸发）。
+    // 注意：这里只是「留下结果」，不是「晋升」——晋升到上层必须过 Director 过滤（见 promoteWorkerOutput）。
+    commitWorkerResult(rec, result);
     emit({ kind: 'dispose', record: { ...rec } });
     registry.delete(id); // 销毁即清，无残留（ADR-0004 isolate）
+  }
+
+  /** 把 Worker 结果写入 worker 域（memory 插件可选依赖，缺失时静默跳过）。 */
+  function commitWorkerResult(rec: SubAgentRecord, result?: string): void {
+    if (!result || !result.trim()) return;
+    try {
+      // 必须用 ctx.get 而不是直接属性访问：Cordis Context 是代理，fiber ctx 上
+      // 访问**未提供给该作用域**的服务属性会抛错（safeGet 会把这个错吞成 undefined，
+      // 看起来就像「memory 插件没装载」）。ctx.get 对缺失服务返回 undefined，不抛错。
+      const mem = memoryServiceOf(ctx);
+      if (!mem || typeof mem.record !== 'function') return;
+      mem.record('worker', result.slice(0, WORKER_RESULT_MAX), {
+        origin: `subagent:${rec.id}`,
+        agent: String(rec.label || rec.id),
+        sessionId: String(rec.sessionId || ''),
+      });
+    } catch {
+      // 记忆写入失败绝不影响 dispose 语义：Worker 即用即走优先，
+      // 宁可丢一条记忆也不能让 dispose 抛错把 agent 泄漏在注册表里。
+    }
   }
 
   // Director 过滤：Worker 输出晋升主会话记忆须经 Director 批准（FR-10 / ADR-0004）。

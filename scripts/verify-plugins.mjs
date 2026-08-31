@@ -389,6 +389,85 @@ function tick(n = 3) {
     assert(hits.some((h) => h.entry && h.entry.id === 'g1'), '回灌的 global 条目应可召回，实际 ' + JSON.stringify(hits.map((h) => h.entry && h.entry.id)));
   });
 
+  // ---------------- 晋升链（FR-10，第十四个死挂点）----------------
+  // 插件的 promote() 一直写得很完整（fail-closed、brain 过滤、来源标注），
+  // 但全项目零调用方：Worker 域的条目进来就出不去，四域退化成「global + 三个摆设」。
+  // 这组测试锁的是晋升语义本身；调用链（IPC / UI）由 apps/desktop 侧套件验证。
+  current = 'memory/晋升';
+  console.log('== 晋升链（FR-10：Worker 输出须经 Director 过滤）==');
+
+  const brainMod = await import(pathToFileURL(require.resolve('../packages/plugin/brain/lib/index.js')).href);
+  const bh = ctx.brainHands;
+
+  await check('源头：dispose SubAgent 带结果 → 落 worker 域', async () => {
+    const before = mem.listDomain('worker').length;
+    const rec = await bh.dispatchSubAgent({ label: '产生结论', parentSession: 's1' });
+    await bh.disposeSubAgent(rec.id, 'Worker 结论：应当落进 worker 域，之后才能谈晋升');
+    const after = mem.listDomain('worker').length;
+    assert(after === before + 1, `worker 域应 +1，实际 ${before} → ${after}`);
+  });
+
+  await check('dispose 不带结果 → 不写记忆（空结论不入域）', async () => {
+    const before = mem.listDomain('worker').length;
+    const rec = await bh.dispatchSubAgent({ label: '无结论任务', parentSession: 's1' });
+    await bh.disposeSubAgent(rec.id);
+    assert(mem.listDomain('worker').length === before, '无结果不应写记忆');
+  });
+
+  await check('fail-closed：无 Director 过滤器时 worker→director 被拒', async () => {
+    brainMod.setDirectorFilter(null);
+    const e = mem.listDomain('worker')[0];
+    assert(e, 'worker 域应有条目（前置用例产出）');
+    const r = await mem.promote(e.id, 'worker', 'director');
+    assert(!r.ok, '无过滤器应拒绝，实际 ' + JSON.stringify(r));
+    assert(/filter/.test(String(r.reason)), '原因应说明过滤器不可用，实际 ' + r.reason);
+  });
+
+  await check('fail-closed 补全：worker→project 也须过过滤（不能绕过 Director）', async () => {
+    // 只锁 worker→director 一条边是不够的：worker→project 会绕过 Director 直写上层。
+    brainMod.setDirectorFilter(() => false);
+    const e = mem.listDomain('worker')[0];
+    const r = await mem.promote(e.id, 'worker', 'project');
+    assert(!r.ok, 'worker→project 同样须过过滤，实际 ' + JSON.stringify(r));
+  });
+
+  await check('Director 放行 → worker→director 晋升成功且条目换域', async () => {
+    brainMod.setDirectorFilter(() => true);
+    const e = mem.listDomain('worker')[0];
+    const beforeW = mem.listDomain('worker').length;
+    const r = await mem.promote(e.id, 'worker', 'director');
+    assert(r.ok, '放行后应晋升成功，实际 ' + JSON.stringify(r));
+    assert(mem.listDomain('worker').length === beforeW - 1, 'worker 域应减少一条');
+    assert(mem.listDomain('director').some((x) => x.id === e.id), 'director 域应出现该条目');
+  });
+
+  await check('director→project 不经 worker 过滤（Director 自己产出的内容）', async () => {
+    brainMod.setDirectorFilter(() => false); // 过滤器全拒：若误走 worker 过滤必然失败
+    const e = mem.listDomain('director')[0];
+    assert(e, 'director 域应有条目（前置用例晋升）');
+    const r = await mem.promote(e.id, 'director', 'project');
+    assert(r.ok, 'director 出域不应走 worker 过滤，实际 ' + JSON.stringify(r));
+    assert(mem.listDomain('project').some((x) => x.id === e.id), 'project 域应出现该条目');
+  });
+
+  await check('条目不存在 / 同域 → 拒绝且不产生副作用', async () => {
+    const r1 = await mem.promote('not-exist-id', 'project', 'global');
+    assert(!r1.ok && r1.reason === 'entry-not-found', '实际 ' + JSON.stringify(r1));
+    const e = mem.listDomain('project')[0];
+    const r2 = await mem.promote(e.id, 'project', 'project');
+    assert(!r2.ok && r2.reason === 'same-domain', '实际 ' + JSON.stringify(r2));
+    assert(mem.listDomain('project').some((x) => x.id === e.id), '被拒的晋升不得移动条目');
+  });
+
+  await check('晋升后来源标注改写（可追溯 origin=promote:from->to）', () => {
+    const e = mem.listDomain('project')[0];
+    const origin = String((e && e.source && e.source.origin) || '');
+    assert(/promote:director->project/.test(origin), '实际 ' + JSON.stringify(e && e.source));
+  });
+
+  // 恢复 fail-closed 默认，避免把「放行」状态泄漏给后续套件。
+  brainMod.setDirectorFilter(null);
+
   // ---------------- prompt ----------------
   current = 'prompt';
   console.log('== prompt（提示词库）==');

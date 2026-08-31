@@ -55,6 +55,19 @@ async function run() {
       s1: { id: 's1', pid: 'p1', title: '修复登录超时', expert: '全栈工程师', model: 'qwen3:14b', updated: '刚刚', ts: '10:00', msgs: [] },
       s2: { id: 's2', pid: 'p2', title: '周报草稿', expert: '内容编辑', model: 'qwen3:14b', updated: '昨天', ts: '09:00', msgs: [] },
     };
+    // 分层记忆种子（PRD FR-10）：worker 域两条 SubAgent 结论，其余域空。
+    // worker 域非空是晋升链路能被看见的前提 —— 空域会让所有晋升按钮 disabled。
+    window.__mem = {
+      worker: [
+        { id: 'w1', text: 'Worker 结论一：磁盘占用达到 80% 阈值', origin: 'subagent:W-1', agent: '临时任务', createdAt: Date.now() - 2000 },
+        { id: 'w2', text: 'Worker 结论二：建议清理构建缓存', origin: 'subagent:W-2', agent: '临时任务', createdAt: Date.now() - 1000 },
+      ],
+      director: [], project: [], global: [],
+    };
+    // 晋升审计种子：一条被 Director 驳回的（验证「被拦下也可见」）
+    window.__promo = [
+      { id: 'pm-0', ts: Date.now() - 5000, from: 'worker', to: 'director', memoryId: 'w0', preview: 'Worker 猜测：可能是缓存问题', ok: false, reason: 'director-rejected:未证实', actor: 'auto' },
+    ];
     // 沙箱日志种子：形状同 sandbox-log.ts 的 SandboxLogEntry
     window.__sblog = [
       { id: 'sl-1', ts: Date.now() - 3000, tool: 'shell_command', kind: 'command', target: 'format C:', decision: 'denied', reason: '命令「format」不在白名单中', mode: 'default' },
@@ -127,6 +140,58 @@ async function run() {
         const n = (window.__sblog || []).length;
         window.__sblog = [];
         return Promise.resolve({ ok: true, cleared: n, entries: [], stats: { total: 0, allowed: 0, denied: 0, error: 0, byTool: [] } });
+      },
+      // PRD FR-10：分层记忆晋升（第十四个死挂点）—— 内存态，验证晋升真的走了桥。
+      // 晋升是「把 Agent 的临时结论搬进长期记忆」，方向不可逆，UI 上每点一次
+      // 都必须真的搬走条目并留下审计，否则用户会以为点成功了实际没生效。
+      listMemoryDomain: (d) => Promise.resolve(Array.isArray(window.__mem[d]) ? window.__mem[d].slice() : null),
+      promoteMemory: ({ id, from, to }) => {
+        const list = window.__mem[from] || [];
+        const idx = list.findIndex((e) => e.id === id);
+        if (idx < 0 || !window.__mem[to]) return Promise.resolve({ ok: false, reason: 'entry-not-found' });
+        const e = list.splice(idx, 1)[0];
+        window.__mem[to].push(Object.assign({}, e, { origin: 'promote:' + from + '->' + to }));
+        window.__promo.push({
+          id: 'pm-' + Date.now(), ts: Date.now(), from, to, memoryId: id,
+          preview: e.text, ok: true, reason: 'promoted:' + from + '->' + to, actor: 'user',
+        });
+        return Promise.resolve({ ok: true, reason: 'promoted:' + from + '->' + to });
+      },
+      promoteWorkerDomain: (to) => {
+        const target = window.__mem[to] ? to : 'director';
+        const list = (window.__mem.worker || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+        const batch = list.slice(0, 20);
+        let promoted = 0;
+        for (const item of batch) {
+          const idx = window.__mem.worker.findIndex((e) => e.id === item.id);
+          if (idx < 0) continue;
+          window.__mem.worker.splice(idx, 1);
+          window.__mem[target].push(Object.assign({}, item, { origin: 'promote:worker->' + target }));
+          window.__promo.push({
+            id: 'pm-auto-' + Date.now() + '-' + item.id, ts: Date.now(), from: 'worker', to: target,
+            memoryId: item.id, preview: item.text, ok: true, reason: 'promoted:worker->' + target, actor: 'auto',
+          });
+          promoted++;
+        }
+        return Promise.resolve({
+          ok: true, total: list.length, attempted: batch.length, promoted,
+          rejected: batch.length - promoted, remaining: Math.max(0, list.length - batch.length), reasons: [],
+        });
+      },
+      getMemoryPromotions: (q) => {
+        const ok = q && (q.ok === true || q.ok === 'true') ? true : (q && (q.ok === false || q.ok === 'false') ? false : null);
+        const all = window.__promo || [];
+        const entries = all.filter((e) => ok === null || e.ok === ok).slice().reverse().slice(0, (q && q.limit) || 100);
+        const stats = {
+          total: all.length, promoted: all.filter((e) => e.ok).length, rejected: all.filter((e) => !e.ok).length,
+          byEdge: [{ edge: 'worker->director', count: all.filter((e) => e.from === 'worker').length }],
+        };
+        return Promise.resolve({ entries, stats, total: all.length, max: 200 });
+      },
+      clearMemoryPromotions: () => {
+        const n = (window.__promo || []).length;
+        window.__promo = [];
+        return Promise.resolve({ ok: true, cleared: n });
       },
       // PRD FR-9：授权白名单（会话 / 永久，可查看可撤销）
       listGrants: () => Promise.resolve(window.__grants || []),
@@ -567,11 +632,13 @@ async function run() {
   await page.locator('[data-action="nav"][data-id="settings"]').first().click();
   await page.waitForTimeout(500);
 
-  const sblog = page.locator('.sblog .al');
+  // 选择器必须收敛到沙箱日志自己的容器：设置页里有两个 .sblog（沙箱日志 +
+  // 晋升审计），用 .sblog 会两边一起数，且 innerText 在多个匹配上会 strict 报错。
+  const sblog = page.locator('.sl-log .al');
   await assert(await page.locator('#sblog-kw').count() === 1, '设置页有沙箱日志检索框');
   await assert(await sblog.count() === 3, `沙箱日志渲染 3 条（count=${await sblog.count()}）`);
 
-  const statsText = await page.locator('.sblog-stats').innerText();
+  const statsText = await page.locator('.sl-stats').innerText();
   await assert(/共 3 条/.test(statsText), '统计显示总条数（' + statsText.replace(/\s+/g, ' ').slice(0, 50) + '）');
   await assert(/放行 1/.test(statsText) && /拒绝 1/.test(statsText) && /出错 1/.test(statsText), '统计区分放行/拒绝/出错');
 
@@ -643,6 +710,90 @@ async function run() {
   const offText = await page.locator('body').innerText();
   await assert(/内容清单未接入/.test(offText), '桥不可用时显示「内容清单未接入（主进程桥不可用）」');
   await assert(await page.locator('.dir-inv').count() === 0, '桥不可用时不再渲染清单列表（避免展示陈旧数据）');
+
+  // ================================================================
+  // 测试组 11：分层记忆晋升（PRD FR-10，第十四个死挂点）
+  // 插件的 promote() 一直存在但零调用方：Worker 域的条目进来就出不去，
+  // 四域实际退化成「global + 三个摆设」。这组验证 UI 上的晋升按钮真的走了桥。
+  // ================================================================
+  console.log('📋 测试组 11：分层记忆晋升');
+
+  await assert(await page.locator('#settings-section-memory').count() === 1, '设置页有「分层记忆」分区');
+  await assert(await page.locator('[data-action="mem-domain"]').count() === 4,
+    `四域切换 tab 共 4 个（count=${await page.locator('[data-action="mem-domain"]').count()}）`);
+
+  const memItems = page.locator('.mem-item');
+  const mpLog = page.locator('.mp-log .al');
+  await assert(await memItems.count() === 2, `worker 域渲染 2 条（count=${await memItems.count()}）`);
+  // 列表按 createdAt 降序，first 是哪条取决于种子时间戳 —— 断言落在 .mem-list 整体
+  // 而不是 first()，避免把排序细节焊进测试。
+  const memListText = await page.locator('.mem-list').innerText();
+  await assert(/磁盘占用/.test(memListText) && /清理构建缓存/.test(memListText),
+    '条目显示正文摘要（' + memListText.replace(/\s+/g, ' ').slice(0, 60) + '）');
+
+  // 晋升按钮指向下一层（worker → 总监），不是同域也不是跳级
+  const promoteBtn = page.locator('[data-action="mem-promote"]').first();
+  await assert((await promoteBtn.innerText()).includes('总监'), `晋升按钮文案指向总监（${await promoteBtn.innerText()}）`);
+  // 记下被晋升的是哪条，稍后在 director 域比对（不依赖排序）
+  const promotedText = (await memItems.first().innerText()).slice(0, 12);
+
+  // 审计初始只有种子里的 1 条「被拦下」
+  await assert(await mpLog.count() === 1, `晋升审计初始 1 条（count=${await mpLog.count()}）`);
+  await assert((await mpLog.first().innerText()).includes('被拦下'), '被 Director 驳回的晋升也要可见（拦截证据不能只记成功）');
+
+  // 单条晋升：条目从 worker 移走，审计 +1
+  await promoteBtn.click();
+  await page.waitForTimeout(800);
+  await assert(await memItems.count() === 1, `晋升后 worker 域剩 1 条（count=${await memItems.count()}）`);
+  await assert(await mpLog.count() === 2, `晋升后审计 2 条（count=${await mpLog.count()}）`);
+  await assert((await page.locator('.mp-log').innerText()).includes('已晋升'), '新审计条目标记为「已晋升」');
+
+  // 切到 director 域，确认条目真的搬过来了（不是从 UI 上消失而已）
+  await page.locator('[data-action="mem-domain"][data-domain="director"]').click();
+  await page.waitForTimeout(700);
+  await assert(await memItems.count() === 1, `director 域出现 1 条（count=${await memItems.count()}）`);
+  await assert((await memItems.first().innerText()).includes(promotedText),
+    `搬过来的就是刚才那条（期望含「${promotedText}」，实际「${(await memItems.first().innerText()).slice(0, 30)}」）`);
+
+  // director 的下一层是 project（分层逐层晋升，不跳级）
+  await assert((await page.locator('[data-action="mem-promote"]').first().innerText()).includes('项目'),
+    'director 域的晋升按钮指向项目');
+
+  // 批量晋升：回 worker 域，把剩下 1 条一次性升走
+  await page.locator('[data-action="mem-domain"][data-domain="worker"]').click();
+  await page.waitForTimeout(700);
+  const batchBtn = page.locator('[data-action="mem-promote-worker"]');
+  await assert(await batchBtn.count() === 1, 'worker 域有「批量晋升本域」按钮');
+  await batchBtn.click();
+  await page.waitForTimeout(900);
+  await assert(await memItems.count() === 0, `批量晋升后 worker 域清空（count=${await memItems.count()}）`);
+  await assert(await mpLog.count() === 3, `批量晋升后审计 3 条（count=${await mpLog.count()}）`);
+
+  // 空域提示要说清成因（「还没跑过 SubAgent」与「桥断了」处置不同）
+  const emptyText = await page.locator('.mem-list').innerText();
+  await assert(/暂无条目/.test(emptyText), 'worker 域空时给出成因说明（' + emptyText.replace(/\s+/g, ' ').slice(0, 40) + '）');
+
+  // 审计过滤：<select> 传的是字符串，主进程侧必须同时吃布尔与字符串
+  await page.locator('#mp-ok').selectOption('false');
+  await page.waitForTimeout(700);
+  await assert(await mpLog.count() === 1, `只看被拦下得 1 条（count=${await mpLog.count()}）`);
+  await page.locator('#mp-ok').selectOption('true');
+  await page.waitForTimeout(700);
+  await assert(await mpLog.count() === 2, `只看已晋升得 2 条（count=${await mpLog.count()}）`);
+
+  // 清空审计
+  await page.locator('#mp-ok').selectOption('all');
+  await page.waitForTimeout(700);
+  await page.locator('[data-action="mp-clear"]').click();
+  await page.waitForTimeout(700);
+  await assert(await mpLog.count() === 0, `清空后审计为空（count=${await mpLog.count()}）`);
+
+  // 桥不可用时显示「未接入」，不伪装成空域
+  await page.evaluate(() => { window.__memOff = true; window.orchdesk.listMemoryDomain = () => Promise.resolve(null); });
+  await page.locator('[data-action="mem-refresh"]').click();
+  await page.waitForTimeout(700);
+  await assert(/记忆服务未接入/.test(await page.locator('.mem-list').innerText()),
+    '桥不可用时显示「记忆服务未接入（主进程桥不可用）」');
 
   // ================================================================
   // 总结

@@ -36,6 +36,8 @@ export const DATA_FILE_NAMES = {
   desktop: 'desktop.json',
   /** PRD FR-8 沙箱日志（可检索；随数据目录迁移，否则换目录后追溯断档）。 */
   sandboxLog: 'sandbox-log.json',
+  /** PRD FR-10 分层记忆晋升审计（随数据目录迁移：谁把什么从哪个域升到了哪个域）。 */
+  promotions: 'memory-promotions.json',
 } as const;
 
 /** 随数据目录迁移的目录名（与 DATA_FILE_NAMES 同理，集中登记）。 */

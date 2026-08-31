@@ -296,6 +296,14 @@ input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;ut
 .dir-inv .di-row .mono{color:var(--fg-dim);min-width:0}
 .dir-inv .di-row .faint.mono{color:var(--fg-faint);font-variant-numeric:tabular-nums}
 
+/* ---- PRD FR-10 分层记忆 ---- */
+.mem-list{display:flex;flex-direction:column;gap:6px;max-height:280px;overflow-y:auto}
+.mem-item{display:flex;flex-direction:column;gap:5px;padding:8px 10px;border-radius:7px;background:var(--bg);border:1px solid var(--border)}
+.mem-item .mi-text{font-size:12px;line-height:1.5;word-break:break-word;max-height:3em;overflow:hidden}
+.mem-item .mi-meta{display:flex;align-items:center;gap:8px;font-size:10.5px}
+.mem-item .mi-meta > span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mem-item .btn{align-self:flex-start}
+
 /* Agent 消息 Markdown 渲染样式 */
 .md-body h1{font-size:16px;font-weight:700;margin:10px 0 4px;color:var(--fg)}
 .md-body h2{font-size:14px;font-weight:700;margin:8px 0 3px;color:var(--fg)}

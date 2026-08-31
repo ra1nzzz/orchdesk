@@ -29,6 +29,16 @@ import {
   type SandboxLogEntry,
   type SandboxLogQuery,
 } from './sandbox-log';
+import {
+  normalizePromotionLog,
+  appendPromotionLog,
+  searchPromotionLog,
+  promotionStats,
+  PROMOTION_LOG_MAX,
+  isMemoryDomain,
+  type PromotionEntry,
+  type PromotionLogQuery,
+} from './memory-promotion';
 import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
 import { initLogger, mirrorConsole, log, logModel, logFilePath } from './logger';
 import {
@@ -108,6 +118,8 @@ const DATA_FILES: MigrateFileSpec[] = [
   { name: DATA_FILE_NAMES.hub, mode: 'copy-if-absent' },
   // 沙箱日志：换数据目录后要能接着追溯历史判定，故随目录迁移。
   { name: DATA_FILE_NAMES.sandboxLog, mode: 'copy-if-absent' },
+  // 晋升审计：同上。「谁把 Worker 的结论升进了长期记忆」是安全追溯链，不能因换目录断档。
+  { name: DATA_FILE_NAMES.promotions, mode: 'copy-if-absent' },
 ];
 const DATA_DIRS = [DATA_DIR_NAMES.skills];
 
@@ -1729,6 +1741,12 @@ interface MemoryServiceLike {
   recall?(query: string, opts?: { domain?: string; k?: number }): unknown;
   listDomain?(domain: string): unknown;
   record?(domain: string, text: string, source: { origin: string }): unknown;
+  /**
+   * 晋升（异步：worker 出域要 await Director 过滤）。
+   * 返回 { ok, reason }；reason 形如 `promoted:worker->director` /
+   * `director-rejected:<原因>` / `brain-filter-unavailable` / `entry-not-found`。
+   */
+  promote?(id: string, from: string, to: string): Promise<{ ok: boolean; reason: string }>;
 }
 ipcMain.handle('orchdesk:memory-stats', () => {
   const svc = getService<MemoryServiceLike>('memory');
@@ -1738,6 +1756,183 @@ ipcMain.handle('orchdesk:memory-recall', async (_e, query: string, opts: unknown
   const svc = getService<MemoryServiceLike>('memory');
   if (!svc?.recall) return null;
   return svc.recall(String(query || ''), opts || {});
+});
+
+// ---------------------------------------------------------------------------
+// PRD FR-10：分层记忆晋升（第十四个死挂点）
+// ---------------------------------------------------------------------------
+// 插件里 promote() 的实现是完整的 —— worker→director 走 brain 过滤、fail-closed、
+// 默认拒绝，全都写好了。但全项目**零调用方**：没有任何代码、没有任何按钮调用它。
+// 后果是 Worker 域的条目进来就出不去，四域实际退化为「global 域 + 三个摆设」，
+// PRD 那句「Worker 输出须经 Director 过滤才能晋升上层」等于没落地。
+//
+// 这里补的是调用链（桥），不是能力本身：
+//   - 单条晋升：用户在设置页点，方向任意，worker 出域必过 Director 过滤。
+//   - 批量晋升：一次性把 worker 域的结论过一遍 Director（见 PROMOTE_BATCH_MAX 注释）。
+//   - 晋升审计：成功与失败都记，写穿落盘（PRD「须显式操作并写审计」）。
+// ---------------------------------------------------------------------------
+
+let promotionLog: PromotionEntry[] = [];
+
+function promotionFile(): string {
+  return path.join(dataDir(), DATA_FILE_NAMES.promotions);
+}
+
+/** 启动装载：坏文件 / 缺文件 → 空审计（与沙箱日志同策略，不猜内容）。 */
+function loadPromotionLog(): number {
+  try {
+    promotionLog = normalizePromotionLog(JSON.parse(fs.readFileSync(promotionFile(), 'utf-8')));
+  } catch {
+    promotionLog = [];
+  }
+  return promotionLog.length;
+}
+
+/** 写穿落盘（与沙箱日志同节奏）。落盘失败只 WARN —— 审计不是安全门，
+ *  绝不能因为记不下来就回滚已经完成的晋升（那样 UI 会显示失败但实际已生效）。 */
+function persistPromotionLog(): boolean {
+  try {
+    const file = promotionFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(promotionLog, null, 2), 'utf-8');
+    return true;
+  } catch (err) {
+    log('WARN', 'memory', `晋升审计落盘失败（不影响晋升结果）: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** 取条目正文做审计摘要。取不到留空 —— 预览缺失不该让审计整条丢掉。 */
+function promotionPreview(svc: MemoryServiceLike | null, domain: string, id: string): string {
+  try {
+    const list = (svc?.listDomain?.(domain) as Array<{ id?: string; text?: string }> | undefined) || [];
+    const hit = list.find((e) => e && e.id === id);
+    return String(hit?.text || '');
+  } catch {
+    return '';
+  }
+}
+
+/** 记一条晋升审计（成功与失败都记：被拦下的晋升比成功的更有追溯价值）。 */
+function recordPromotion(input: {
+  from: string;
+  to: string;
+  memoryId: string;
+  preview: string;
+  ok: boolean;
+  reason: string;
+  actor: 'user' | 'auto';
+}): void {
+  if (!isMemoryDomain(input.from) || !isMemoryDomain(input.to)) return;
+  const before = promotionLog.length;
+  promotionLog = appendPromotionLog(promotionLog, { ...input, ts: Date.now() });
+  if (promotionLog.length !== before) {
+    persistPromotionLog();
+    log('INFO', 'memory', `记忆晋升${input.ok ? '成功' : '被拦'}：${input.from}→${input.to} · ${input.reason}（${input.actor}）`);
+  }
+}
+
+/** 列出某域条目（渲染层展示用；正文字段原样透传，截断由 UI 决定）。 */
+ipcMain.handle('orchdesk:memory-list', async (_e, domain: string) => {
+  const svc = getService<MemoryServiceLike>('memory');
+  if (!svc?.listDomain) return null;
+  if (!isMemoryDomain(domain)) return null;
+  try {
+    const list = (svc.listDomain(domain) as Array<unknown> | undefined) || [];
+    return list.map((e) => {
+      const r = e as { id?: string; text?: string; source?: { origin?: string; agent?: string }; createdAt?: number };
+      return {
+        id: String(r.id || ''),
+        text: String(r.text || ''),
+        origin: String(r.source?.origin || ''),
+        agent: String(r.source?.agent || ''),
+        createdAt: Number(r.createdAt) || 0,
+      };
+    });
+  } catch {
+    return null;
+  }
+});
+
+/** 单条晋升。domain 非法 / 服务缺失 → 拒绝且不入审计（参数错误不值得留痕）。 */
+ipcMain.handle('orchdesk:memory-promote', async (_e, input: unknown) => {
+  const r = (input || {}) as { id?: string; from?: string; to?: string };
+  const svc = getService<MemoryServiceLike>('memory');
+  if (!svc?.promote) return { ok: false, reason: 'memory-service-unavailable' };
+  if (!isMemoryDomain(r.from) || !isMemoryDomain(r.to)) return { ok: false, reason: 'bad-domain' };
+  const id = String(r.id || '').trim();
+  if (!id) return { ok: false, reason: 'bad-id' };
+
+  const preview = promotionPreview(svc, r.from, id);
+  let result: { ok: boolean; reason: string };
+  try {
+    result = await svc.promote(id, r.from, r.to);
+  } catch (err) {
+    result = { ok: false, reason: `error:${(err as Error).message}` };
+  }
+  recordPromotion({
+    from: r.from, to: r.to, memoryId: id, preview,
+    ok: result.ok, reason: result.reason, actor: 'user',
+  });
+  return result;
+});
+
+/**
+ * 批量晋升 worker 域 → director（自动通道：每条都要过 Director 过滤）。
+ *
+ * 为什么设上限：promote 是异步的，worker 出域要 await brain 过滤（默认 5s 超时）。
+ * worker 域理论上限 200 条，不设上限最坏情况是 UI 卡死十几分钟且无法中途取消。
+ * 一次处理 PROMOTE_BATCH_MAX 条（按时间正序，先处理最早的），剩下的报 remaining，
+ * 用户想继续再点一次 —— 宁可多按几下，也不要一个点不动的按钮。
+ */
+const PROMOTE_BATCH_MAX = 20;
+
+ipcMain.handle('orchdesk:memory-promote-worker', async (_e, input: unknown) => {
+  const r = (input || {}) as { to?: string };
+  const svc = getService<MemoryServiceLike>('memory');
+  if (!svc?.promote || !svc?.listDomain) return { ok: false, reason: 'memory-service-unavailable' };
+  const to = isMemoryDomain(r.to) ? r.to : 'director';
+  const list = ((svc.listDomain('worker') as Array<{ id?: string; text?: string; createdAt?: number }> | undefined) || [])
+    .filter((e) => e && String(e.id || ''))
+    .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
+
+  const batch = list.slice(0, PROMOTE_BATCH_MAX);
+  const out = { ok: true, total: list.length, attempted: batch.length, promoted: 0, rejected: 0, remaining: Math.max(0, list.length - batch.length), reasons: [] as Array<{ id: string; ok: boolean; reason: string }> };
+  for (const item of batch) {
+    const id = String(item.id || '');
+    let result: { ok: boolean; reason: string };
+    try {
+      result = await svc.promote(id, 'worker', to);
+    } catch (err) {
+      result = { ok: false, reason: `error:${(err as Error).message}` };
+    }
+    if (result.ok) out.promoted++;
+    else out.rejected++;
+    out.reasons.push({ id, ok: result.ok, reason: result.reason });
+    recordPromotion({
+      from: 'worker', to, memoryId: id, preview: String(item.text || ''),
+      ok: result.ok, reason: result.reason, actor: 'auto',
+    });
+  }
+  return out;
+});
+
+/** 晋升审计可查（关键词 / 源域 / 目标域 / 成功失败 四维过滤）。 */
+ipcMain.handle('orchdesk:memory-promotions', async (_e, query: unknown) => {
+  const q = (query || {}) as PromotionLogQuery;
+  return {
+    entries: searchPromotionLog(promotionLog, q),
+    stats: promotionStats(promotionLog),
+    total: promotionLog.length,
+    max: PROMOTION_LOG_MAX,
+  };
+});
+
+ipcMain.handle('orchdesk:memory-promotions-clear', async () => {
+  const cleared = promotionLog.length;
+  promotionLog = [];
+  persistPromotionLog();
+  return { ok: true, cleared };
 });
 
 // ---- 系统提示词库（prompt 插件）----
@@ -2206,6 +2401,14 @@ app.whenReady().then(async () => {
     if (n > 0) log('INFO', 'sandbox', `沙箱日志已装载：${n} 条（${sandboxLogFile()}）`);
   } catch (err) {
     console.warn('[orchdesk] 沙箱日志装载失败:', (err as Error).message);
+  }
+
+  // PRD FR-10：晋升审计装载（同样在 migrateLegacyData 之后，审计随目录迁移）。
+  try {
+    const n = loadPromotionLog();
+    if (n > 0) log('INFO', 'memory', `晋升审计已装载：${n} 条（${promotionFile()}）`);
+  } catch (err) {
+    console.warn('[orchdesk] 晋升审计装载失败:', (err as Error).message);
   }
 
   // PRD FR-4.2：桌面集成开关全量重放（此前 6 项全是设置页空壳，见第十个死挂点）。

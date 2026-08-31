@@ -294,7 +294,16 @@
     },
     // 数据目录内容清单（PRD FR-4.2）：真实扫描结果。ok=false = 未接入/扫描失败，
     // UI 显示「未接入」而不是沿用写死的「~ 24 MB」。
-    dataDirInventory: { ok: false, dir: '', items: [], totalSize: 0, totalFiles: 0, totalSizeText: '', errors: [] }
+    dataDirInventory: { ok: false, dir: '', items: [], totalSize: 0, totalFiles: 0, totalSizeText: '', errors: [] },
+    // 分层记忆（PRD FR-10）：四域可查 + 晋升。loaded=false = 桥不可用，
+    // 与「接进了但域是空的」区分开 —— worker 域空有两种完全不同的成因
+    // （还没跑过 SubAgent vs 桥断了），UI 必须说清楚是哪一种。
+    memory: { domain: 'worker', items: [], stats: null, loaded: false, busy: false },
+    // 晋升审计（PRD FR-10「须显式操作并写审计」）：成功与失败都记。
+    memoryPromotions: {
+      entries: [], stats: { total: 0, promoted: 0, rejected: 0, byEdge: [] },
+      total: 0, max: 200, ok: 'all', loaded: false,
+    },
   };
 
   const $ = (s) => document.querySelector(s);
@@ -411,6 +420,77 @@
       kind: state.sandboxLog.kind,
       loaded: true,
     };
+  }
+
+  /* ---------- PRD FR-10 分层记忆与晋升 ---------- */
+  // 四域与晋升方向。worker 的临时结论只能逐层往上走：worker → director → project → global。
+  // global 是终点，没有再上一层的去处（跨项目长期记忆，写进去就是最终形态）。
+  const MEM_DOMAIN_LABELS = { global: '全局', project: '项目', director: '总监', worker: '临时' };
+  const MEM_DOMAIN_DESC = {
+    global: '跨项目长期事实（写入即最终形态，无上层）',
+    project: '当前项目沉淀（来自 director 晋升）',
+    director: '总监域（Worker 结论经 Director 过滤后落此）',
+    worker: 'SubAgent 临时结果（即用即走，出域须过 Director 过滤）',
+  };
+  /** 晋升的下一层。null = 已在顶层。 */
+  const MEM_NEXT_DOMAIN = { worker: 'director', director: 'project', project: 'global', global: null };
+
+  const MEM_REASON_LABELS = {
+    'memory-service-unavailable': '记忆服务未加载',
+    'bad-domain': '域名参数非法',
+    'bad-id': '条目 id 非法',
+    'entry-not-found': '条目不存在（可能已被晋升走）',
+    'same-domain': '源域与目标域相同',
+    'brain-filter-unavailable': 'Director 过滤器不可用（fail-closed，默认拒绝）',
+    'director-filter-pending': 'Director 过滤回调未注入（fail-closed，默认拒绝）',
+    'director-filter-timeout': 'Director 过滤超时（fail-closed，按拒绝处理）',
+  };
+
+  /** 把插件返回的英文 reason 翻成中文；未登记的按前缀归类后原样带出。 */
+  function memReasonText(reason) {
+    const r = String(reason || '');
+    if (MEM_REASON_LABELS[r]) return MEM_REASON_LABELS[r];
+    if (r.startsWith('director-rejected:')) return `Director 驳回（${r.slice('director-rejected:'.length)}）`;
+    if (r.startsWith('promoted:')) return `已晋升 ${r.slice('promoted:'.length).replace('->', ' → ')}`;
+    if (r.startsWith('error:')) return `执行异常：${r.slice('error:'.length)}`;
+    return r;
+  }
+
+  /** 重拉当前域条目 + 四域统计。桥不可用时保持 loaded=false。 */
+  function refreshMemoryDomain() {
+    if (typeof bridge.listMemoryDomain !== 'function') {
+      state.memory = { ...state.memory, items: [], stats: null, loaded: false };
+      if (state.page === 'settings') render();
+      return;
+    }
+    bridge.listMemoryDomain(state.memory.domain).then((r) => {
+      state.memory.items = Array.isArray(r) ? r : [];
+      // null = 服务不可用（主进程侧域名非法 / memory 插件未加载都会回 null）。
+      // 必须和「接进了但域是空的」区分开：前者要报「未接入」，后者才说「暂无条目」。
+      // 把 null 当空数组会让「记忆服务根本没起来」看起来像「还没跑过 SubAgent」。
+      state.memory.loaded = Array.isArray(r);
+      if (state.page === 'settings') render();
+    }).catch(() => {
+      state.memory.loaded = false;
+      if (state.page === 'settings') render();
+    });
+    refreshMemoryPromotions();
+  }
+
+  function refreshMemoryPromotions() {
+    if (typeof bridge.getMemoryPromotions !== 'function') return;
+    bridge.getMemoryPromotions({ ok: state.memoryPromotions.ok, limit: 60 }).then((r) => {
+      if (!r || typeof r !== 'object' || !Array.isArray(r.entries)) return;
+      state.memoryPromotions = {
+        entries: r.entries,
+        stats: r.stats || { total: 0, promoted: 0, rejected: 0, byEdge: [] },
+        total: Number(r.total) || r.entries.length,
+        max: Number(r.max) || state.memoryPromotions.max,
+        ok: state.memoryPromotions.ok,
+        loaded: true,
+      };
+      if (state.page === 'settings') render();
+    }).catch(() => {});
   }
 
   /* ---------- PRD FR-4.2 数据目录内容清单 ---------- */
@@ -1256,14 +1336,14 @@
             </select>
             <button class="btn sm" data-action="sblog-clear" ${state.sandboxLog.total ? '' : 'disabled'}>清空</button>
           </div>
-          <div class="sblog-stats">
+          <div class="sblog-stats sl-stats">
             <span class="badge info">共 ${state.sandboxLog.total} 条</span>
             <span class="badge ok">放行 ${state.sandboxLog.stats.allowed}</span>
             <span class="badge danger">拒绝 ${state.sandboxLog.stats.denied}</span>
             ${state.sandboxLog.stats.error ? `<span class="badge warn">出错 ${state.sandboxLog.stats.error}</span>` : ''}
             ${state.sandboxLog.stats.byTool.map((t) => `<span class="faint mono">${esc(t.tool)} ×${t.count}</span>`).join('')}
           </div>
-          <div class="audit-log sblog">
+          <div class="audit-log sblog sl-log">
             ${state.sandboxLog.entries.length ? state.sandboxLog.entries.map((e) => `<div class="al">
               <span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString('zh-CN')}</span>
               <span class="badge ${e.decision === 'allowed' ? 'ok' : (e.decision === 'denied' ? 'danger' : 'warn')}">${SL_DECISION_LABELS[e.decision] || e.decision}</span>
@@ -1295,6 +1375,56 @@
           ${desktopItem('floating', '悬浮窗', '桌面常驻小窗，点击唤起主窗')}
           ${desktopItem('notify', '开机提醒', '关键事件系统通知')}
           <div class="desktop-item"><div><div class="di-name">TRACE 遥测</div><div class="di-desc" id="trace-desc">脱敏遥测上报至 OrchDesk 公开仓库（仅白名单字段，不含任何消息内容）</div></div><div class="switch ${state.traceEnabled ? 'on' : ''}" id="trace-switch" data-action="trace-toggle"></div></div>
+        </div>
+        <div class="sec-title" id="settings-section-memory"><span class="ico">${ic('archive', 14)}</span>分层记忆（PRD FR-10）</div>
+        <div class="card">
+          <div class="faint" style="margin-bottom:8px">四域物理隔离，各落独立文件。Worker 出域（→ 总监 / 项目 / 全局）一律经 Director 过滤，<b>fail-closed</b>：过滤器缺失、超时、抛错都按拒绝处理。</div>
+          <div class="row" style="margin-bottom:6px;gap:6px">
+            ${['worker', 'director', 'project', 'global'].map((d) => {
+    const n = state.memory.stats && typeof state.memory.stats[d] === 'number' ? state.memory.stats[d] : null;
+    return `<span class="seg-tab ${state.memory.domain === d ? 'active' : ''}" data-action="mem-domain" data-domain="${d}" title="${esc(MEM_DOMAIN_DESC[d])}">${MEM_DOMAIN_LABELS[d]}${n === null ? '' : ` ${n}`}</span>`;
+  }).join('')}
+            <button class="btn sm" style="margin-left:auto" data-action="mem-refresh" ${state.memory.busy ? 'disabled' : ''}>刷新</button>
+          </div>
+          <div class="faint" style="margin-bottom:8px;font-size:11.5px">${esc(MEM_DOMAIN_DESC[state.memory.domain])}</div>
+          ${state.memory.domain === 'worker' ? `<div class="row" style="margin-bottom:8px"><button class="btn sm primary" data-action="mem-promote-worker" ${(state.memory.busy || !state.memory.items.length) ? 'disabled' : ''}>批量晋升本域（逐条过 Director 过滤）</button><span class="faint" style="font-size:11px">一次最多 20 条，按时间正序</span></div>` : ''}
+          <div class="mem-list">
+            ${state.memory.items.length ? state.memory.items.slice().sort((a, b) => Number(b.createdAt) - Number(a.createdAt)).map((e) => {
+    const to = MEM_NEXT_DOMAIN[state.memory.domain];
+    return `<div class="mem-item">
+                <div class="mi-text" title="${esc(e.text)}">${esc(String(e.text || '').slice(0, 160))}</div>
+                <div class="mi-meta">
+                  <span class="mono faint">${esc(e.origin || '—')}</span>
+                  ${e.agent ? `<span class="faint">${esc(e.agent)}</span>` : ''}
+                  <span class="faint mono" style="margin-left:auto">${e.createdAt ? new Date(e.createdAt).toLocaleString('zh-CN') : ''}</span>
+                </div>
+                ${to ? `<button class="btn sm" data-action="mem-promote" data-id="${esc(e.id)}" data-from="${esc(state.memory.domain)}" data-to="${to}" ${state.memory.busy ? 'disabled' : ''}>晋升 → ${MEM_DOMAIN_LABELS[to]}</button>` : '<span class="faint" style="font-size:11px">已在顶层</span>'}
+              </div>`;
+  }).join('') : `<div class="faint">${state.memory.loaded ? (state.memory.domain === 'worker' ? '本域暂无条目（SubAgent 执行完被回收时，其结论会落到这里）' : '本域暂无条目（由下层晋升而来）') : '记忆服务未接入（主进程桥不可用）'}</div>`}
+          </div>
+          <div class="sec-title" style="margin:16px 0 8px">晋升审计</div>
+          <div class="sblog-bar">
+            <select id="mp-ok" class="inp" style="width:120px">
+              ${[['all', '全部'], ['true', '已晋升'], ['false', '被拦下']].map(([v, t]) => `<option value="${v}"${state.memoryPromotions.ok === v ? ' selected' : ''}>${t}</option>`).join('')}
+            </select>
+            <button class="btn sm" data-action="mp-clear" ${state.memoryPromotions.total ? '' : 'disabled'}>清空</button>
+          </div>
+          <div class="sblog-stats mp-stats">
+            <span class="badge info">共 ${state.memoryPromotions.total} 条</span>
+            <span class="badge ok">已晋升 ${state.memoryPromotions.stats.promoted}</span>
+            <span class="badge danger">被拦下 ${state.memoryPromotions.stats.rejected}</span>
+            ${state.memoryPromotions.stats.byEdge.map((x) => `<span class="faint mono">${esc(x.edge)} ×${x.count}</span>`).join('')}
+          </div>
+          <div class="audit-log sblog mp-log">
+            ${state.memoryPromotions.entries.length ? state.memoryPromotions.entries.map((e) => `<div class="al">
+              <span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString('zh-CN')}</span>
+              <span class="badge ${e.ok ? 'ok' : 'danger'}">${e.ok ? '已晋升' : '被拦下'}</span>
+              <span class="mono faint">${esc(e.from)} → ${esc(e.to)}</span>
+              <span class="badge info">${e.actor === 'auto' ? '自动' : '手动'}</span>
+              <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.preview)}">${esc(e.preview) || '<span class="faint">（无预览）</span>'}</span>
+              <span class="faint" style="max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(memReasonText(e.reason))}">${esc(memReasonText(e.reason))}</span>
+            </div>`).join('') : `<div class="faint">${state.memoryPromotions.loaded ? '暂无晋升记录（在此点「晋升」后写入）' : '晋升审计未接入（主进程桥不可用）'}</div>`}
+          </div>
         </div>
         <div class="sec-title" id="settings-section-data"><span class="ico">${ic('folder', 14)}</span>数据目录</div>
         <div class="card">
@@ -1949,7 +2079,14 @@
     const el = e.target.closest('[data-action]'); if (!el) return;
     const a = el.dataset.action, id = el.dataset.id;
     switch (a) {
-      case 'nav': state.page = id; render(); break;
+      case 'nav': {
+        state.page = id;
+        // 进入设置页时重拉记忆域与沙箱日志：SubAgent 执行完会随时往 worker 域落结论，
+        // 只靠启动时拉一次，用户看到的就是「空的」，会误判成功能没生效。
+        if (id === 'settings') { refreshMemoryDomain(); refreshSandboxLog(); }
+        render();
+        break;
+      }
       case 'settings-nav': state.settingsSection = id; render(); break;
       case 'toggle-theme': { state.theme = state.theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = state.theme; break; }
       case 'toggle-ctx': state.ctxOpen = !state.ctxOpen; render(); break;
@@ -2201,6 +2338,68 @@
       case 'dir-inv-refresh': {
         refreshDataDirInventory();
         toast('正在重新扫描数据目录…', 'ok');
+        break;
+      }
+
+      /* 分层记忆晋升（PRD FR-10，第十四个死挂点）：
+         插件的 promote() 一直存在但零调用方，这里补的是调用链。 */
+      case 'mem-domain': {
+        state.memory.domain = el.dataset.domain || 'worker';
+        refreshMemoryDomain();
+        break;
+      }
+      case 'mem-refresh': {
+        refreshMemoryDomain();
+        break;
+      }
+      case 'mem-promote': {
+        const id = el.dataset.id || '';
+        const from = el.dataset.from || state.memory.domain;
+        const to = el.dataset.to || '';
+        if (!id || !to) { toast('晋升参数缺失', 'warn'); break; }
+        if (typeof bridge.promoteMemory !== 'function') { toast('晋升未接入（主进程桥不可用）', 'warn'); break; }
+        state.memory.busy = true; render();
+        bridge.promoteMemory({ id, from, to }).then((r) => {
+          state.memory.busy = false;
+          const ok = !!(r && r.ok);
+          // 被 Director 驳回不是错误：那是过滤在正常工作。用 warn 而不是 err，
+          // 否则用户会以为功能坏了，实际是「这条结论没被放行」。
+          toast(memReasonText(r && r.reason), ok ? 'ok' : 'warn');
+          refreshMemoryDomain();
+        }).catch((err) => {
+          state.memory.busy = false;
+          toast(`晋升失败：${(err && err.message) || err}`, 'err');
+          render();
+        });
+        break;
+      }
+      case 'mem-promote-worker': {
+        if (typeof bridge.promoteWorkerDomain !== 'function') { toast('批量晋升未接入（主进程桥不可用）', 'warn'); break; }
+        state.memory.busy = true; render();
+        bridge.promoteWorkerDomain('director').then((r) => {
+          state.memory.busy = false;
+          if (!r || !r.ok) { toast(`批量晋升失败：${(r && r.reason) || '未知原因'}`, 'warn'); render(); return; }
+          // 全部被拒不是失败 —— Director 就是干这个的。只报事实，不报情绪。
+          toast(`已处理 ${r.attempted} 条：晋升 ${r.promoted} · 驳回 ${r.rejected}${r.remaining ? ` · 还剩 ${r.remaining} 条，可再点一次` : ''}`, r.promoted ? 'ok' : 'warn');
+          refreshMemoryDomain();
+        }).catch((err) => {
+          state.memory.busy = false;
+          toast(`批量晋升异常：${(err && err.message) || err}`, 'err');
+          render();
+        });
+        break;
+      }
+      case 'mp-clear': {
+        if (!state.memoryPromotions.total) break;
+        bridge.clearMemoryPromotions().then((r) => {
+          if (!r || !r.ok) { toast('清空失败（主进程未接入）', 'warn'); return; }
+          state.memoryPromotions = {
+            entries: [], stats: { total: 0, promoted: 0, rejected: 0, byEdge: [] },
+            total: 0, max: state.memoryPromotions.max, ok: state.memoryPromotions.ok, loaded: true,
+          };
+          render();
+          toast(`已清空晋升审计（${r.cleared} 条）`, 'ok');
+        }).catch(() => toast('清空失败', 'err'));
         break;
       }
       case 'sblog-clear': {
@@ -2799,6 +2998,13 @@
       refreshSandboxLog();
       return;
     }
+    // 晋升审计过滤（PRD FR-10）。<select> 的 value 一定是字符串，故主进程侧
+    // 的 ok 参数同时吃布尔与 'true'/'false'（只认布尔会让过滤静默失效）。
+    if (e.target.id === 'mp-ok') {
+      state.memoryPromotions.ok = e.target.value || 'all';
+      refreshMemoryPromotions();
+      return;
+    }
     if (e.target.id === 'mp-type') updateProtocolRow();
     if (e.target.id === 'default-model-pick' && e.target.value !== state.defaultModel) {
       state.defaultModel = e.target.value;
@@ -2898,7 +3104,13 @@
       bridge.listPrompts().then(r => { if (Array.isArray(r)) state.promptDocs = r; }).catch(() => {}),
       bridge.mergePrompts('main').then(r => { if (r?.conflicts) state.promptConflicts = r.conflicts; }).catch(() => {}),
       // 记忆 + 补偿 + 自进化
-      bridge.getMemoryStats().then(r => { if (r) state.memoryStats = r; }).catch(() => {}),
+      bridge.getMemoryStats().then(r => {
+        if (!r) return;
+        state.memoryStats = r;
+        // 四域真实计数（seg-tab 上显示的数字）。此前插件统计只被拉来存着，
+        // 从没进过 UI —— 用户看不到 worker 域到底有没有东西。
+        if (r.domainCounts && typeof r.domainCounts === 'object') state.memory.stats = r.domainCounts;
+      }).catch(() => {}),
       bridge.getCompensationAudit().then(r => { if (Array.isArray(r)) state.compAudit = r; }).catch(() => {}),
       bridge.getSandbox().then(r => { if (r && typeof r === 'object') state.sandbox = { mode: r.mode || 'workspace-write', networkAllow: Array.isArray(r.networkAllow) ? r.networkAllow : ['*'] }; }).catch(() => {}),
       // 数据目录内容清单（PRD FR-4.2）：真实体积与文件数（此前 UI 写死「~ 24 MB」）

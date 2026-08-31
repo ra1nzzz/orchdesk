@@ -304,8 +304,11 @@ export function apply(ctx: Context, config: MemoryConfig): void {
     if (!entry) return { ok: false, reason: 'entry-not-found' };
     if (from === to) return { ok: false, reason: 'same-domain' };
 
-    // worker → director：必须过 brain.promoteWorkerOutput（fail-closed，默认拒绝）。
-    if (from === 'worker' && to === 'director') {
+    // worker 出域（→director / project / global）一律过 brain 过滤（fail-closed，默认拒绝）。
+    // 只锁 worker→director 一条边是不够的：worker→project / worker→global 会绕过 Director
+    // 直接写上层，等于给「Worker 直写上层记忆」留后门 —— PRD FR-10 要求的是
+    // 「Worker 输出须经 Director 过滤才能晋升上层」，即**任何出 worker 域的方向**。
+    if (from === 'worker') {
       const brain = (ctx as unknown as { get?: (n: string) => unknown }).get?.('brainHands') as
         | { promoteWorkerOutput: (o: string) => Promise<{ approved: boolean; reason: string }> }
         | undefined;
