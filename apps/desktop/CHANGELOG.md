@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-31
+
+### Added
+- **trace,comp,sandbox**: wire user feedback telemetry, outbound compensation gate and network allowlist (eighth/ninth dead hooks, FR-7/FR-8/FR-12); repair rotten e2e fixture
+
+
 ## [0.10.1] - 2026-08-30
 
 ### Fixed
