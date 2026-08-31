@@ -35,12 +35,27 @@ function makeElectronStub(opts = {}) {
   const ipcListeners = new Map();
   /** 渲染层收到的所有 webContents.send（审批链路端到端测试用）。 */
   const webSent = [];
+  /** 系统登录项写入历史（FR-4.2 自启动断言用）：最新一条即当前生效设置。 */
+  const loginItems = [];
+  /** Tray 实例（FR-4.2：断言托盘开关真的创建/销毁了系统托盘）。 */
+  const trayInstances = [];
+  /** 所有构造过的 BrowserWindow（FR-4.2：断言悬浮窗真的被创建）。 */
+  const windows = [];
+  const shortcut = makeGlobalShortcutStub();
+  const notifications = [];
 
   return {
     home,
     ipcHandlers,
     ipcListeners,
     webSent,
+    loginItems,
+    trayInstances,
+    windows,
+    /** 已注册的全局加速器（FR-4.2）。 */
+    get shortcuts() { return shortcut.registered; },
+    /** 已发出的系统通知（FR-4.2）。 */
+    get notifications() { return notifications; },
     app: {
       isPackaged: false,
       name: 'OrchDesk',
@@ -48,20 +63,40 @@ function makeElectronStub(opts = {}) {
       whenReady: () => { if (opts.onReady) setImmediate(opts.onReady); return Promise.resolve(); },
       on: () => {},
       quit: () => {},
+      setLoginItemSettings: (s) => { loginItems.push(s); },
+      getLoginItemSettings: () => loginItems[loginItems.length - 1] || { openAtLogin: false },
     },
     ipcMain: {
       handle: (ch, fn) => { ipcHandlers.set(ch, fn); },
       on: (ch, fn) => { ipcListeners.set(ch, fn); },
     },
     BrowserWindow: class {
-      constructor() { this.webContents = { send: (ch, payload) => { webSent.push({ ch, payload }); } }; this.destroyed = false; }
+      constructor(opts) { this.opts = opts || {}; this.webContents = { send: (ch, payload) => { webSent.push({ ch, payload }); } }; this.destroyed = false; this.loaded = null; windows.push(this); }
       isDestroyed() { return this.destroyed; }
       once() {}
-      loadFile() {}
+      on() {}
+      loadFile(p) { this.loaded = p; }
+      loadURL(u) { this.loaded = u; }
       show() {}
+      hide() {}
+      focus() {}
+      close() { this.destroyed = true; }
+      isMinimized() { return false; }
+      isVisible() { return true; }
+      isFocused() { return false; }
       static getAllWindows() { return []; }
     },
-    Tray: class { setToolTip() {} setContextMenu() {} },
+    Tray: class {
+      constructor() { trayInstances.push(this); this.destroyed = false; }
+      setToolTip() {}
+      setContextMenu() {}
+      on() {}
+      destroy() { this.destroyed = true; }
+    },
+    /** 桌面集成（FR-4.2）桩：记录系统副作用，供断言「开关真的接到了系统」。 */
+    globalShortcut: shortcut,
+    Notification: makeNotificationStub(notifications),
+    screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) },
     Menu: { buildFromTemplate: () => ({}) },
     nativeImage: { createEmpty: () => ({}), createFromPath: () => ({}) },
     contextBridge: { exposeInMainWorld: () => {} },
@@ -75,6 +110,38 @@ function makeElectronStub(opts = {}) {
       showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
       showSaveDialog: async () => ({ canceled: true, filePath: '' }),
     },
+  };
+}
+
+/**
+ * globalShortcut 桩：register 返回 true 并记账，isRegistered/unregister/unregisterAll 同步状态。
+ * 断言侧通过 stub.shortcuts 读取当前注册集合。
+ */
+function makeGlobalShortcutStub() {
+  const registered = new Map();
+  return {
+    registered,
+    register: (acc, fn) => {
+      if (registered.has(acc)) return false;
+      registered.set(acc, fn);
+      return true;
+    },
+    isRegistered: (acc) => registered.has(acc),
+    unregister: (acc) => registered.delete(acc),
+    unregisterAll: () => registered.clear(),
+  };
+}
+
+/**
+ * Notification 桩：记录 {title, body}，isSupported() 恒 true。
+ * 断言侧通过 stub.notifications 读取。
+ */
+function makeNotificationStub(sink) {
+  const out = sink || [];
+  return class {
+    static isSupported() { return true; }
+    constructor(opts) { this.opts = opts; }
+    show() { out.push(this.opts || {}); }
   };
 }
 

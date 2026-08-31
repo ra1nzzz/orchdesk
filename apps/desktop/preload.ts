@@ -139,6 +139,26 @@ const orchdesk = {
   setNetworkAllow: (list: string[]): Promise<{ ok: boolean; reason?: string; networkAllow?: string[] }> =>
     ipcRenderer.invoke('orchdesk:sandbox-set-network-allow', list),
 
+  // ---- PRD FR-4.2 桌面集成（托盘 / 快捷键 / 自启动 / 更新 / 悬浮窗 / 通知） ----
+  /** 桌面集成开关快照（含快捷键读法与自启动的**系统实际**状态）。 */
+  getDesktop: (): Promise<{
+    config: Record<string, boolean>;
+    shortcutLabel: string;
+    labels: Record<string, string>;
+    autostartEffective: boolean;
+  }> => ipcRenderer.invoke('orchdesk:desktop-get'),
+
+  /** 切换单个桌面集成开关（返回落盘后的完整配置）。 */
+  setDesktop: (
+    key: string,
+    value: boolean,
+  ): Promise<{ ok: boolean; reason?: string; warning?: string; changed?: boolean; config?: Record<string, boolean>; autostartEffective?: boolean }> =>
+    ipcRenderer.invoke('orchdesk:desktop-set', key, value),
+
+  /** 悬浮窗上下文：切换会话时推送（主进程不猜「当前会话」）。 */
+  setFloatingContext: (ctx: { title?: string; sessions?: number }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('orchdesk:desktop-floating-context', ctx),
+
   /** TRACE 用户反馈（PRD FR-7）：每条 Agent 消息底部标记 → 脱敏入遥测队列。 */
   traceFeedback: (
     payload: { intent?: string; feedback?: 'positive' | 'neutral' | 'negative'; sessionKey?: string; messageKey?: string },

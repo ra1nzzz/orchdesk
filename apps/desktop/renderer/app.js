@@ -202,6 +202,10 @@
       // 沙箱（PRD FR-8）
       getSandbox: () => Promise.resolve({ mode: 'workspace-write', networkAllow: ['*'] }),
       setNetworkAllow: (list) => Promise.resolve({ ok: false, reason: '主进程未接入', networkAllow: list }),
+      // 桌面集成（PRD FR-4.2）：无桥时 config 为 null → 开关降级为不可点并标注
+      getDesktop: () => Promise.resolve({ config: null, shortcutLabel: 'Ctrl+Shift+Space', labels: {}, autostartEffective: false }),
+      setDesktop: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      setFloatingContext: () => Promise.resolve({ ok: false }),
       // 补偿层
       withhold: (text) => Promise.resolve({ needsConfirm: false, category: 'other', reason: '', warning: '' }),
       compensate: (text, note) => Promise.resolve({ id: 'cmp-' + Date.now().toString(36), ts: Date.now(), text: (text || '').slice(0, 80), note: note || '', action: '记录操作以便审计追溯' }),
@@ -254,7 +258,10 @@
     delegationLast: null,
     // TRACE 上报开关（默认开；bridge.traceStatus 拉取后覆盖）
     traceEnabled: true,
-    traceBuiltin: false
+    traceBuiltin: false,
+    // 桌面集成（PRD FR-4.2）：6 个开关此前全是 data-action="todo" 空壳。
+    // null = 桥未接入（浏览器预览），UI 降级为不可点并标注。
+    desktop: null
   };
 
   const $ = (s) => document.querySelector(s);
@@ -338,6 +345,39 @@
   /* ---------- 渲染：消息（外部/用户可控内容统一转义，防 XSS） ---------- */
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  }
+
+  /* ---------- PRD FR-4.2 桌面集成 ---------- */
+  /** 自启动描述如实反映「系统实际状态」：写了但系统没接受 → 明确提示，不假装已生效。 */
+  function desktopAutostartDesc() {
+    const d = state.desktop;
+    if (!d) return '开机时启动 OrchDesk';
+    if (d.config.autostart && d.autostartEffective === false) return '开机时启动 · 系统未接受该设置';
+    return '开机时启动 OrchDesk';
+  }
+
+  /** 悬浮窗内容由渲染层推送（主进程不猜「当前会话」）。未开启悬浮窗时不发 IPC。 */
+  function pushFloatingContext() {
+    const d = state.desktop;
+    if (!d || !d.config || !d.config.floating) return;
+    if (typeof bridge.setFloatingContext !== 'function') return;
+    const cur = state.sessions[state.sel];
+    const sessions = Object.values(state.sessions).filter((s) => s && s.msgs && s.msgs.length).length;
+    bridge.setFloatingContext({ title: (cur && cur.title) || '', sessions }).catch(() => {});
+  }
+
+  /**
+   * 单个桌面集成开关。state.desktop 为 null（桥未接入 / 浏览器预览）时降级为
+   * 不可点 + 标注「未接入」，避免又出现「UI 可点但不生效」的死挂点。
+   */
+  function desktopItem(key, name, desc, mono) {
+    const d = state.desktop;
+    const on = !!(d && d.config && d.config[key]);
+    const disabled = !d;
+    return `<div class="desktop-item"${disabled ? ' title="主进程未接入，当前为浏览器预览"' : ''}>
+      <div><div class="di-name">${esc(name)}</div><div class="di-desc${mono ? ' mono' : ''}" data-desktop-desc="${esc(key)}">${esc(desc)}</div></div>
+      <div class="switch ${on ? 'on' : ''}${disabled ? ' disabled' : ''}" data-action="desktop-toggle" data-dk="${esc(key)}" role="switch" aria-checked="${on}" aria-label="${esc(name)}"></div>
+    </div>`;
   }
   function renderMsg(m, sid) {
     const isU = (m.r || m.role) === 'user';
@@ -1053,13 +1093,13 @@
         </div>
         <div class="sec-title" id="settings-section-desktop"><span class="ico">${ic('settings', 14)}</span>桌面集成</div>
         <div class="desktop-grid">
-          <div class="desktop-item"><div><div class="di-name">系统托盘</div><div class="di-desc">关闭窗口后继续运行</div></div><div class="switch on" data-action="todo"></div></div>
-          <div class="desktop-item"><div><div class="di-name">全局快捷键</div><div class="di-desc mono">Ctrl+Shift+Space</div></div><div class="switch on" data-action="todo"></div></div>
-          <div class="desktop-item"><div><div class="di-name">登录自启动</div><div class="di-desc">开机时启动 OrchDesk</div></div><div class="switch" data-action="todo"></div></div>
-          <div class="desktop-item"><div><div class="di-name">自动更新</div><div class="di-desc">新版本静默下载</div></div><div class="switch on" data-action="todo"></div></div>
+          ${desktopItem('tray', '系统托盘', '关闭窗口后继续运行')}
+          ${desktopItem('shortcut', '全局快捷键', state.desktop && state.desktop.shortcutLabel ? state.desktop.shortcutLabel : 'Ctrl+Shift+Space', true)}
+          ${desktopItem('autostart', '登录自启动', desktopAutostartDesc())}
+          ${desktopItem('autoupdate', '自动更新', '新版本静默下载（退出时安装）')}
+          ${desktopItem('floating', '悬浮窗', '桌面常驻小窗，点击唤起主窗')}
+          ${desktopItem('notify', '开机提醒', '关键事件系统通知')}
           <div class="desktop-item"><div><div class="di-name">TRACE 遥测</div><div class="di-desc" id="trace-desc">脱敏遥测上报至 OrchDesk 公开仓库（仅白名单字段，不含任何消息内容）</div></div><div class="switch ${state.traceEnabled ? 'on' : ''}" id="trace-switch" data-action="trace-toggle"></div></div>
-          <div class="desktop-item"><div><div class="di-name">悬浮窗</div><div class="di-desc">桌面浮动小窗</div></div><div class="switch" data-action="todo"></div></div>
-          <div class="desktop-item"><div><div class="di-name">开机提醒</div><div class="di-desc">关键事件系统通知</div></div><div class="switch on" data-action="todo"></div></div>
         </div>
         <div class="sec-title" id="settings-section-data"><span class="ico">${ic('folder', 14)}</span>数据目录</div>
         <div class="card">
@@ -1703,7 +1743,7 @@
       }
 
       /* 会话 */
-      case 'sel': state.sel = id; render(); break;
+      case 'sel': state.sel = id; pushFloatingContext(); render(); break;
       case 'newconv': doNewConv(); break;
       case 'home-send': {
         const homeInp = $('#homeComposer');
@@ -2290,6 +2330,38 @@
         }).catch((e) => toast('切换失败: ' + ((e && e.message) || e), 'err'));
         break;
       }
+      /* 桌面集成开关（PRD FR-4.2）：此前 6 项全是 data-action="todo" 空壳 */
+      case 'desktop-toggle': {
+        const key = el.dataset.dk;
+        if (!state.desktop || !state.desktop.config || !(key in state.desktop.config)) break;
+        const next = !state.desktop.config[key];
+        const label = (state.desktop.labels && state.desktop.labels[key]) || key;
+        // 乐观更新：先响应用户点击，失败再回滚（设置项切换的即时反馈要求）
+        state.desktop.config[key] = next;
+        el.classList.toggle('on', next);
+        el.setAttribute('aria-checked', String(next));
+        bridge.setDesktop(key, next).then((r) => {
+          if (!r || !r.ok) {
+            state.desktop.config[key] = !next;
+            el.classList.toggle('on', !next);
+            el.setAttribute('aria-checked', String(!next));
+            toast((r && r.reason) || '切换失败', 'err');
+            return;
+          }
+          if (r.config) state.desktop.config = r.config;
+          if (typeof r.autostartEffective === 'boolean') state.desktop.autostartEffective = r.autostartEffective;
+          const descEl = document.querySelector(`[data-desktop-desc="${key}"]`);
+          if (descEl && key === 'autostart') descEl.textContent = desktopAutostartDesc();
+          // 悬浮窗刚开启时先推一次上下文，否则小窗显示「未选择会话」直到下次切会话
+          if (key === 'floating' && next) pushFloatingContext();
+          toast(r.warning ? r.warning : `${label}已${next ? '开启' : '关闭'}`, r.warning ? 'err' : 'ok');
+        }).catch((e) => {
+          state.desktop.config[key] = !next;
+          el.classList.toggle('on', !next);
+          toast('切换失败: ' + ((e && e.message) || e), 'err');
+        });
+        break;
+      }
       case 'team-compose': {
         const tid = el.dataset.tid;
         const tn = el.dataset.tn || '专家团';
@@ -2436,6 +2508,10 @@
       bridge.getMemoryStats().then(r => { if (r) state.memoryStats = r; }).catch(() => {}),
       bridge.getCompensationAudit().then(r => { if (Array.isArray(r)) state.compAudit = r; }).catch(() => {}),
       bridge.getSandbox().then(r => { if (r && typeof r === 'object') state.sandbox = { mode: r.mode || 'workspace-write', networkAllow: Array.isArray(r.networkAllow) ? r.networkAllow : ['*'] }; }).catch(() => {}),
+      // 桌面集成（PRD FR-4.2）：6 个开关的真实状态（此前 UI 硬编码 on/off，与系统无关）
+      (typeof bridge.getDesktop === 'function'
+        ? bridge.getDesktop().then(r => { if (r && r.config) state.desktop = r; })
+        : Promise.resolve()).catch(() => {}),
       bridge.listTempPlugins().then(r => { if (Array.isArray(r)) state.tempPlugins = r; }).catch(() => {}),
       // 插件运行时真实状态（插件页开关据此显示，而非硬编码的 p.on）
       (typeof bridge.getPluginRuntime === 'function'

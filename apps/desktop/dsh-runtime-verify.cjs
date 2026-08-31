@@ -299,6 +299,101 @@ const { check, summary } = createChecker();
   });
 
   // -------------------------------------------------------------------------
+  // 桌面集成（PRD FR-4.2）—— 第十个死挂点的防回归
+  // 断言重点不是「配置能存能读」，而是**每个开关都真的触发了对应的系统副作用**：
+  // 托盘 → Tray 实例、快捷键 → globalShortcut、自启动 → 系统登录项、悬浮窗 → BrowserWindow。
+  // -------------------------------------------------------------------------
+  const desktopMod = require('./dist/desktop-integration.js');
+
+  await check('桌面集成纯逻辑：归一化拒绝未知键、字符串 "false" 不恒真、缺失回落默认', () => {
+    const d = desktopMod.normalizeDesktopConfig({ tray: 'false', shortcut: 0, nope: true });
+    assert.strictEqual(d.tray, false, '字符串 "false" 应归一为 false（否则手改 JSON 会让开关恒开）');
+    assert.strictEqual(d.shortcut, false, '0 应归一为 false');
+    assert.strictEqual(d.notify, true, '未提供的键应回落默认（notify 默认开）');
+    assert.strictEqual('nope' in d, false, '未知键应丢弃，不污染配置');
+    assert.deepStrictEqual(desktopMod.normalizeDesktopConfig(null), desktopMod.DEFAULT_DESKTOP_CONFIG, '非法入参回落默认');
+  });
+
+  await check('desktop-get 返回真实配置：6 键齐全 + 快捷键读法 + 自启动系统实际状态', async () => {
+    const r = await ipcHandlers.get('orchdesk:desktop-get')();
+    for (const k of desktopMod.DESKTOP_KEYS) {
+      assert.strictEqual(typeof r.config[k], 'boolean', `config.${k} 应为布尔`);
+    }
+    assert.strictEqual(r.shortcutLabel, 'Ctrl+Shift+Space', '快捷键读法应返回给 UI');
+    assert.strictEqual(r.labels.tray, '系统托盘', '应返回中文标签');
+    assert.strictEqual(typeof r.autostartEffective, 'boolean', '自启动需展示系统实际状态而非意愿值');
+  });
+
+  await check('desktop-set 托盘：开 → 真创建 Tray；关 → 真销毁（此前开关与系统无关）', async () => {
+    const before = electronStub.trayInstances.length;
+    let r = await ipcHandlers.get('orchdesk:desktop-set')({}, 'tray', true);
+    assert.strictEqual(r.ok, true, '切换应成功');
+    assert.ok(electronStub.trayInstances.length >= before, '开启托盘应创建 Tray 实例');
+    const created = electronStub.trayInstances[electronStub.trayInstances.length - 1];
+    assert.strictEqual(created.destroyed, false, '新托盘应处于未销毁状态');
+    r = await ipcHandlers.get('orchdesk:desktop-set')({}, 'tray', false);
+    assert.strictEqual(r.config.tray, false, '配置应落为 false');
+    assert.strictEqual(electronStub.trayInstances[electronStub.trayInstances.length - 1].destroyed, true, '关闭托盘必须真的 destroy（否则关掉后托盘仍常驻）');
+  });
+
+  await check('desktop-set 快捷键：开 → 注册加速器；关 → 注销（退出未注销会残留）', async () => {
+    const acc = desktopMod.SHORTCUT_ACCELERATOR;
+    await ipcHandlers.get('orchdesk:desktop-set')({}, 'shortcut', true);
+    assert.strictEqual(electronStub.globalShortcut.isRegistered(acc), true, '开启应注册全局快捷键');
+    await ipcHandlers.get('orchdesk:desktop-set')({}, 'shortcut', false);
+    assert.strictEqual(electronStub.globalShortcut.isRegistered(acc), false, '关闭必须真的注销加速器');
+    await ipcHandlers.get('orchdesk:desktop-set')({}, 'shortcut', true);
+  });
+
+  await check('desktop-set 自启动：写系统登录项 + autostartEffective 回读真实值', async () => {
+    const r = await ipcHandlers.get('orchdesk:desktop-set')({}, 'autostart', true);
+    assert.strictEqual(r.ok, true, '写入系统登录项应成功');
+    const last = electronStub.loginItems[electronStub.loginItems.length - 1];
+    assert.strictEqual(last.openAtLogin, true, '应真的调用 app.setLoginItemSettings({openAtLogin:true})');
+    assert.strictEqual(r.autostartEffective, true, '应回读系统实际状态');
+    const off = await ipcHandlers.get('orchdesk:desktop-set')({}, 'autostart', false);
+    assert.strictEqual(off.autostartEffective, false, '关闭后系统状态应为 false');
+  });
+
+  await check('desktop-set 悬浮窗：开 → 创建无边框置顶窗口并渲染上下文', async () => {
+    const before = electronStub.windows.length;
+    await ipcHandlers.get('orchdesk:desktop-set')({}, 'floating', true);
+    assert.strictEqual(electronStub.windows.length, before + 1, '开启悬浮窗应真的创建 BrowserWindow');
+    const win = electronStub.windows[electronStub.windows.length - 1];
+    assert.strictEqual(win.opts.frame, false, '悬浮窗应无边框');
+    assert.strictEqual(win.opts.alwaysOnTop, true, '悬浮窗应置顶');
+    assert.strictEqual(win.opts.skipTaskbar, true, '悬浮窗不应占任务栏');
+    assert.strictEqual(win.opts.webPreferences.nodeIntegration, false, '悬浮窗渲染进程同样禁用 node');
+  });
+
+  await check('desktop-floating-context：会话上下文入窗（标题截断 80、负数会话归零）', async () => {
+    const r = await ipcHandlers.get('orchdesk:desktop-floating-context')({}, { title: 'x'.repeat(200), sessions: -5 });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.context.title.length, 80, '超长标题应截断，避免小窗撑爆');
+    assert.strictEqual(r.context.sessions, 0, '负数会话数应归零');
+    const win = electronStub.windows[electronStub.windows.length - 1];
+    assert.ok(String(win.loaded || '').includes('data:text/html'), '悬浮窗内容应已加载');
+    assert.ok(String(win.loaded || '').includes('x'.repeat(80)), '推送的标题应真的渲染进小窗');
+    await ipcHandlers.get('orchdesk:desktop-set')({}, 'floating', false);
+  });
+
+  await check('desktop-set 未知键被拒绝（拼写错误静默丢弃比报错更难查）', async () => {
+    const r = await ipcHandlers.get('orchdesk:desktop-set')({}, 'trayy', true);
+    assert.strictEqual(r.ok, false, '未知键应拒绝');
+    assert.ok(/未知/.test(String(r.reason)), '应给出明确原因');
+    assert.strictEqual('trayy' in r.config, false, '拒绝时不应写入配置');
+  });
+
+  await check('桌面集成配置落盘并可重新读回（重启后开关保持）', async () => {
+    await ipcHandlers.get('orchdesk:desktop-set')({}, 'notify', false);
+    const file = desktopMod.desktopConfigFile(ddMod.getDataDir());
+    assert.ok(fs.existsSync(file), `desktop.json 应落盘：${file}`);
+    const reread = desktopMod.loadDesktopConfig(ddMod.getDataDir());
+    assert.strictEqual(reread.notify, false, '重读应反映刚写入的值');
+    await ipcHandlers.get('orchdesk:desktop-set')({}, 'notify', true);
+  });
+
+  // -------------------------------------------------------------------------
   const ok = summary();
 
   try { fs.rmSync(HOME, { recursive: true, force: true }); } catch {}

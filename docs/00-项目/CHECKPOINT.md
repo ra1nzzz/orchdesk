@@ -9,7 +9,7 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.11.0`（已打 tag `v0.11.0`，GitHub Release 由 CI 生成） | SemVer，pre-1.0 阶段；`0.10.1` 为上一 Release |
+| **当前版本** | `0.12.0`（未打 tag；v0.11.0 已发 Release） | SemVer，pre-1.0 阶段；`0.10.1` 为上一 Release |
 | **最新 Commit** | `8e722e1` | chore: release v0.10.0（feat: TRACE 上传桥，TOKEN 加密内置 + 设置页开关） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
@@ -49,6 +49,7 @@
 > **v0.11.0 交付（第八、第九死挂点 + FR-8 网络白名单 + E2E 套件腐化修复）**：① **TRACE 用户反馈不进遥测**（FR-7）——渲染层「有帮助/需改进」按钮只改本地 Set + persist，`recordFeedback` 从不落地。修复：trace 插件 `provide('trace')`（recordFeedback/queueSize/errorRecords/flushNow）+ `orchdesk:trace-feedback` IPC + preload 桥 + 按钮带 `data-fb` 正负区分，反馈真实入队（source='user'）。② **补偿层工具级未接线**（FR-12）+ **契约 bug**——`comp-withhold` 把 text 包成 `{text}` 传给 `withhold(text: string)`，正则恒不匹配 →「不可修复」警示条与二次确认从未触发；`comp-compensate` 丢弃 note。修复：契约改字符串、note 透传、新增 `outboundGate()` 接进工具链（web_fetch 非白名单域名 + shell 删除/外发命令过补偿层二次确认）。③ **FR-8 网络域名白名单**——sandboxPolicy 新增 `networkAllow`/`isDomainAllowed`（`*` 不限，精确+子域+`*.` 后缀匹配，非法 URL fail-closed）+ 设置页可编辑 + IPC。④ **E2E 套件腐化修复**——`e2e-fix-verify.cjs` 的 mock bridge 返回空 sessions/projects，侧栏/消息流 5 项断言在空数据下永不可能通过（套件空转），改为注入真实形状种子数据并补齐新桥方法 → 16 项/5 失败 → 29 项全绿。verify 337/337。
 
 
+> **v0.12.0 交付（第十个死挂点：桌面集成 6 项全是空壳｜PRD FR-4.2）**：设置页「桌面集成」2×3 网格中，系统托盘 / 全局快捷键 / 登录自启动 / 自动更新 / 悬浮窗 / 开机提醒 **6 项全部是 `data-action="todo"` 占位**——UI 可点、不落盘、更无系统副作用（托盘其实在启动时被无条件 `createTray()`，与开关无关）。修复（新增 `apps/desktop/desktop-integration.ts`：**纯逻辑、零 electron 依赖**，与 data-dir.ts 同一约定）：① **配置层**——6 键归一化（未知键丢弃、字符串 `'false'` 不恒真、缺失回落默认）、`desktop.json` 落盘（登记进 `DATA_FILE_NAMES` 随数据目录迁移）、`setDesktopKey` 拒绝未知键（拼写错误静默丢弃比报错更难查）。② **副作用层**（main.ts，按配置重放、切换时只重放受影响的那一项）：托盘 → `Tray` 创建 / `destroy`；快捷键 → `globalShortcut` 注册 / 注销 `CommandOrControl+Shift+Space`（退出前 `unregisterAll`，否则 Windows 上残留导致快捷键失灵）；自启动 → `app.setLoginItemSettings` 且**回读系统实际状态**（写入可能被系统拒绝，UI 展示实际值而非意愿值）；自动更新 → 延迟 8s 后台 `checkForUpdates`（默认开，退出时安装）；悬浮窗 → 无边框 `alwaysOnTop` + `skipTaskbar` 小窗（沙箱渲染进程，靠 BrowserWindow 'focus' 事件实现「点击唤起主窗」，页面内不发 IPC），内容由渲染层推送会话上下文（主进程不猜）；开机提醒 → 启动完成 / 发现新版发系统通知。③ **渲染层**——6 开关改真实绑定 `data-action="desktop-toggle"`，乐观更新 + 失败回滚；桥未接入时降级为 `.disabled` 不可点并标注（不再出现「UI 可点但不生效」）。④ **验证**——新增 9 项 dsh-runtime 用例（断言重点不是配置能存能读，而是**每个开关真的触发了对应系统副作用**：Tray 实例被 destroy、加速器被注销、登录项被写入、悬浮窗 BrowserWindow 被创建）+ 8 项 E2E（6 开关 key 与 PRD 一致、无 todo 空壳残留、点击翻转）；`scripts/verify-kit.cjs` 补齐 `globalShortcut` / `Notification` / `screen` / `Tray.destroy` / `app.setLoginItemSettings` / BrowserWindow 实例台账。verify 337→346。
 > 详细：差距盘点（30%）见 [PRD差距盘点-2026-08-29](../99-归档/PRD差距盘点-2026-08-29.md)；
 > 补齐复盘（75%）见 [PRD差距补齐-2026-08-29](../99-归档/PRD差距补齐-2026-08-29.md)。
 
@@ -252,5 +253,5 @@ git push origin main --follow-tags  # 推送 + 触发 CI
 
 ---
 
-*最后更新：2026-08-29（第二轮补齐：数据目录统一 / 导出导入 / 模型闭环线级验证 / 编排与 TRACE 真实闭环验证 / vendor 路径修复，验证 158→308）*
+*最后更新：2026-08-30（第十批：桌面集成 6 项真实接线（PRD FR-4.2）+ verify 337→346）*
 *上游文档：[current-state.md](./current-state.md) | [VERSION-GOVERNANCE.md](./VERSION-GOVERNANCE.md) | [PRD差距补齐复盘](../99-归档/PRD差距补齐-2026-08-29.md) | 变更日志 `apps/desktop/CHANGELOG.md`（仓库根，docs 外）*

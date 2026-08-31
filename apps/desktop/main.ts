@@ -1,8 +1,21 @@
 /// <reference types="electron" />
-import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, safeStorage, shell, globalShortcut, Notification, screen } from 'electron';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import {
+  DEFAULT_DESKTOP_CONFIG,
+  DESKTOP_LABELS,
+  SHORTCUT_ACCELERATOR,
+  SHORTCUT_LABEL,
+  floatingWindowHtml,
+  isDesktopKey,
+  loadDesktopConfig,
+  saveDesktopConfig,
+  setDesktopKey,
+  type DesktopConfig,
+  type DesktopKey,
+} from './desktop-integration';
 import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep } from './dsh-runtime';
@@ -968,14 +981,210 @@ function createWindow(): void {
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
 
+// ---------------------------------------------------------------------------
+// 桌面集成（PRD FR-4.2）：系统托盘 / 全局快捷键 / 登录自启动 / 自动更新 / 悬浮窗 / 开机提醒
+// ----------------------------------------------------------------------------
+// 第十个死挂点：设置页这 6 个开关此前全是 data-action="todo" 空壳 —— UI 可点、不落盘、
+// 更无任何系统副作用。这里按「配置落 desktop.json，副作用在此重放」接线：
+// 切换开关时只重放**受影响的那一项**，避免每次点击都去写系统登录项。
+// 纯逻辑（归一化 / 落盘 / 悬浮窗内容）在 desktop-integration.ts（零 electron 依赖）。
+let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG };
+let floatingWindow: BrowserWindow | null = null;
+/** 悬浮窗展示的上下文（由渲染层在切换会话时推送，避免主进程猜「当前会话」）。 */
+let floatingContext: { title: string; sessions: number } = { title: '', sessions: 0 };
+
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+/** 全局快捷键语义：没有窗口 → 创建；可见且聚焦 → 隐藏；否则 → 唤起。 */
+function toggleMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isVisible() && mainWindow.isFocused()) mainWindow.hide();
+  else showMainWindow();
+}
+
 function createTray(): void {
+  if (tray) return;
   tray = new Tray(nativeImage.createEmpty());
   const contextMenu = Menu.buildFromTemplate([
-    { label: '打开主窗', click: () => mainWindow?.show() },
+    { label: '打开主窗', click: () => showMainWindow() },
     { label: '退出', click: () => app.quit() },
   ]);
   tray.setToolTip('OrchDesk');
   tray.setContextMenu(contextMenu);
+  tray.on('click', () => showMainWindow());
+  tray.on('double-click', () => showMainWindow());
+}
+
+function destroyTray(): void {
+  if (!tray) return;
+  try {
+    tray.destroy();
+  } catch {
+    // 已销毁：destroy 抛错不应阻断开关切换
+  }
+  tray = null;
+}
+
+/** 系统托盘：关闭后是否继续常驻。 */
+function applyTray(on: boolean): void {
+  if (on) createTray();
+  else destroyTray();
+}
+
+/** 全局快捷键 Ctrl(Cmd)+Shift+Space：注册/注销唯一加速器。 */
+function applyShortcut(on: boolean): void {
+  try {
+    if (on) {
+      if (globalShortcut.isRegistered(SHORTCUT_ACCELERATOR)) return;
+      const ok = globalShortcut.register(SHORTCUT_ACCELERATOR, () => toggleMainWindow());
+      if (!ok) log('WARN', 'desktop', `全局快捷键注册失败（${SHORTCUT_LABEL}）：可能被其它应用占用`);
+    } else {
+      globalShortcut.unregister(SHORTCUT_ACCELERATOR);
+    }
+  } catch (err) {
+    log('WARN', 'desktop', `全局快捷键接线异常：${(err as Error).message}`);
+  }
+}
+
+/** 读系统登录项真实状态（写入可能被系统拒绝，UI 必须展示实际值而非意愿值）。 */
+function readLoginItemSettings(): { openAtLogin?: boolean } {
+  try {
+    return app.getLoginItemSettings() as { openAtLogin?: boolean };
+  } catch {
+    return {};
+  }
+}
+
+/** 登录自启动：写系统登录项（Windows 注册表 / macOS LaunchAgent）。 */
+function applyAutostart(on: boolean): { ok: boolean; reason?: string } {
+  try {
+    app.setLoginItemSettings({ openAtLogin: on, openAsHidden: on });
+    return { ok: true };
+  } catch (err) {
+    const reason = (err as Error).message;
+    log('WARN', 'desktop', `登录自启动写入失败：${reason}`);
+    return { ok: false, reason };
+  }
+}
+
+/** 开机提醒：关键事件（启动完成 / 更新可用）发系统通知。 */
+function notifyDesktop(title: string, body: string): boolean {
+  if (!desktopConfig.notify) return false;
+  try {
+    if (Notification.isSupported && !Notification.isSupported()) return false;
+    new Notification({ title, body }).show();
+    return true;
+  } catch (err) {
+    log('WARN', 'desktop', `系统通知发送失败：${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** 自动更新：延迟后台检查（不阻塞首屏），有新版时按配置发通知。 */
+function applyAutoUpdate(on: boolean): void {
+  if (!on) return;
+  setTimeout(() => {
+    void checkForUpdates()
+      .then((r) => {
+        if (r?.update?.available) {
+          notifyDesktop('OrchDesk 有新版本', String(r.update.note || `v${r.update.version || ''} 已下载，退出后安装`));
+        }
+      })
+      .catch((err) => log('WARN', 'desktop', `自动更新检查异常：${(err as Error).message}`));
+  }, 8000);
+}
+
+function floatingPosition(): { x: number; y: number } {
+  try {
+    const area = screen.getPrimaryDisplay().workAreaSize;
+    return { x: Math.max(0, area.width - 288 - 16), y: Math.max(0, area.height - 120 - 48) };
+  } catch {
+    return { x: 0, y: 0 };
+  }
+}
+
+function renderFloatingWindow(): void {
+  if (!floatingWindow || floatingWindow.isDestroyed()) return;
+  const title = floatingContext.title || 'OrchDesk';
+  const html = floatingWindowHtml({
+    title,
+    subtitle: floatingContext.title ? '当前会话' : '未选择会话',
+    sessions: floatingContext.sessions,
+  });
+  void floatingWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+}
+
+function createFloatingWindow(): void {
+  if (floatingWindow && !floatingWindow.isDestroyed()) {
+    renderFloatingWindow();
+    return;
+  }
+  floatingWindow = new BrowserWindow({
+    width: 288,
+    height: 96,
+    frame: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    ...floatingPosition(),
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+  });
+  floatingWindow.on('closed', () => { floatingWindow = null; });
+  // 悬浮窗是沙箱渲染进程，页面内无 ipcRenderer —— 用窗口聚焦事件实现「点击唤起主窗」。
+  floatingWindow.on('focus', () => showMainWindow());
+  floatingWindow.once('ready-to-show', () => floatingWindow?.show());
+  renderFloatingWindow();
+}
+
+function destroyFloatingWindow(): void {
+  if (!floatingWindow) return;
+  try {
+    if (!floatingWindow.isDestroyed()) floatingWindow.close();
+  } catch {
+    // 已关闭
+  }
+  floatingWindow = null;
+}
+
+function applyFloating(on: boolean): void {
+  if (on) createFloatingWindow();
+  else destroyFloatingWindow();
+}
+
+/**
+ * 全量重放（启动时）。顺序无关，但自启动写系统项放最后，失败不影响其余。
+ * 整体 try/catch：桌面集成为增强项，任一系统能力不可用都不该阻断主窗启动。
+ */
+function applyDesktopConfig(): void {
+  try {
+    applyTray(desktopConfig.tray);
+    applyShortcut(desktopConfig.shortcut);
+    applyFloating(desktopConfig.floating);
+    applyAutoUpdate(desktopConfig.autoupdate);
+    const r = applyAutostart(desktopConfig.autostart);
+    if (!r.ok) log('WARN', 'desktop', `登录自启动未生效：${r.reason}`);
+    log('INFO', 'desktop', `桌面集成已应用：${desktopSummary()}`);
+  } catch (err) {
+    log('WARN', 'desktop', `桌面集成应用异常：${(err as Error).message}`);
+  }
+}
+
+function desktopSummary(): string {
+  return (Object.keys(desktopConfig) as DesktopKey[])
+    .map((k) => `${DESKTOP_LABELS[k]}=${desktopConfig[k] ? '开' : '关'}`)
+    .join(' / ');
 }
 
 // ---------------------------------------------------------------------------
@@ -1459,6 +1668,55 @@ async function checkForUpdates(): Promise<{ snapshot: { ok: boolean; dir?: strin
 ipcMain.handle('orchdesk:snapshot-data', async () => snapshotData());
 ipcMain.handle('orchdesk:check-updates', async () => checkForUpdates());
 
+// ---------------------------------------------------------------------------
+// 桌面集成（PRD FR-4.2）：设置页 6 个开关此前是 data-action="todo" 空壳
+// ---------------------------------------------------------------------------
+ipcMain.handle('orchdesk:desktop-get', async () => {
+  desktopConfig = loadDesktopConfig(dataDir());
+  return {
+    config: { ...desktopConfig },
+    shortcutLabel: SHORTCUT_LABEL,
+    labels: { ...DESKTOP_LABELS },
+    /** 自启动真实生效状态（系统可能拒绝写入，UI 需如实展示）。 */
+    autostartEffective: readLoginItemSettings().openAtLogin === true,
+  };
+});
+
+ipcMain.handle('orchdesk:desktop-set', async (_e, key: unknown, value: unknown) => {
+  const res = setDesktopKey(desktopConfig, key, value);
+  if (!res.ok || !res.key) return { ok: false, config: { ...desktopConfig }, reason: res.reason };
+  desktopConfig = saveDesktopConfig(res.config, dataDir());
+  // 只重放受影响的那一项：切换「自动更新」不该去动系统登录项。
+  switch (res.key) {
+    case 'tray': applyTray(desktopConfig.tray); break;
+    case 'shortcut': applyShortcut(desktopConfig.shortcut); break;
+    case 'autostart': {
+      const r = applyAutostart(desktopConfig.autostart);
+      if (!r.ok) return { ok: true, config: { ...desktopConfig }, warning: `系统未接受自启动设置：${r.reason}` };
+      break;
+    }
+    case 'autoupdate': if (desktopConfig.autoupdate) applyAutoUpdate(true); break;
+    case 'floating': applyFloating(desktopConfig.floating); break;
+    case 'notify': if (desktopConfig.notify) notifyDesktop('OrchDesk', '系统通知已开启'); break;
+  }
+  log('INFO', 'desktop', `桌面集成开关变更：${DESKTOP_LABELS[res.key]} → ${desktopConfig[res.key] ? '开' : '关'}`);
+  return {
+    ok: true,
+    config: { ...desktopConfig },
+    changed: res.changed,
+    autostartEffective: readLoginItemSettings().openAtLogin === true,
+  };
+});
+
+/** 悬浮窗上下文：渲染层切换会话时推送（主进程不猜「当前会话」）。 */
+ipcMain.handle('orchdesk:desktop-floating-context', async (_e, ctx: { title?: string; sessions?: number }) => {
+  const safeTitle = String(ctx?.title || '').trim().slice(0, 80);
+  const safeSessions = Number.isFinite(ctx?.sessions) ? Math.max(0, Math.trunc(Number(ctx.sessions))) : 0;
+  floatingContext = { title: safeTitle, sessions: safeSessions };
+  if (floatingWindow && !floatingWindow.isDestroyed()) renderFloatingWindow();
+  return { ok: true, context: { ...floatingContext } };
+});
+
 /** 用系统默认文件管理器打开数据目录（项目目录 = userData）。 */
 ipcMain.handle('orchdesk:open-project-dir', async () => {
   try {
@@ -1661,11 +1919,19 @@ app.whenReady().then(async () => {
   // 此前 packages/plugin/* 从未被加载，FR-7/9/10/11/12/13 在应用内全是空壳。
   await bootRuntime();
 
+  // PRD FR-4.2：桌面集成开关全量重放（此前 6 项全是设置页空壳，见第十个死挂点）。
+  // 必须在 createWindow 之前——全局快捷键/托盘都依赖 mainWindow 存在与否。
+  desktopConfig = loadDesktopConfig(dataDir());
+  applyDesktopConfig();
+
   createWindow();
-  createTray();
+  // 托盘由 applyTray 按配置决定是否创建；此处不再无条件 createTray()。
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+
+  // 开机提醒（FR-4.2）：启动完成发一条系统通知，配置关闭时静默跳过。
+  if (desktopConfig.notify) notifyDesktop('OrchDesk 已启动', '点击托盘图标或按 ' + SHORTCUT_LABEL + ' 唤起主窗');
 });
 
 app.on('window-all-closed', () => {
@@ -1673,6 +1939,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  // 注销全局快捷键：不注销会在进程退出后残留加速器（Windows 上表现为快捷键失灵）
+  try { globalShortcut.unregisterAll(); } catch { /* 忽略 */ }
+  destroyFloatingWindow();
   // 触发全部插件的逆效应（卸载无残留）
   void stopRuntime();
 });

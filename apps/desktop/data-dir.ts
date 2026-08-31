@@ -32,6 +32,8 @@ export const DATA_FILE_NAMES = {
   models: 'models.json',
   guanji: 'guanji.json',
   hub: 'hub.json',
+  /** PRD FR-4.2 桌面集成开关（托盘 / 快捷键 / 自启动 / 更新 / 悬浮窗 / 通知）。 */
+  desktop: 'desktop.json',
 } as const;
 
 /** 随数据目录迁移的目录名（与 DATA_FILE_NAMES 同理，集中登记）。 */

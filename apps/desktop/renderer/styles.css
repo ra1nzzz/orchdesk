@@ -228,6 +228,8 @@ h1.pg{font-size:17px;font-weight:700;margin-bottom:2px}
 .switch{position:relative;width:34px;height:19px;border-radius:10px;background:var(--border-strong);transition:.2s;flex:none}
 .switch::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
 .switch.on{background:var(--ok)} .switch.on::after{left:17px}
+/* 桌面集成开关（FR-4.2）：桥未接入时不可点，避免「UI 可点但不生效」的死挂点 */
+.switch.disabled{opacity:.45;cursor:not-allowed}
 input[type=text],input[type=search],select,textarea{width:100%;padding:7px 10px;border:1px solid var(--border-strong);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;font-size:12.5px}
 input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2' stroke-linecap='round'><circle cx='11' cy='11' r='7'/><path d='M21 21l-4.3-4.3'/></svg>");background-repeat:no-repeat;background-position:9px center;background-size:14px}
 

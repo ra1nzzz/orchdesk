@@ -85,6 +85,25 @@ async function run() {
       // PRD FR-8：沙箱策略（网络域名白名单）
       getSandbox: () => Promise.resolve({ mode: 'workspace-write', networkAllow: ['*'] }),
       setNetworkAllow: (list) => Promise.resolve({ ok: true, networkAllow: list || ['*'] }),
+      // PRD FR-4.2：桌面集成 6 开关（此前设置页是 data-action="todo" 空壳）
+      getDesktop: () => Promise.resolve({
+        config: { tray: true, shortcut: true, autostart: false, autoupdate: true, floating: false, notify: true },
+        shortcutLabel: 'Ctrl+Shift+Space',
+        labels: { tray: '系统托盘', shortcut: '全局快捷键', autostart: '登录自启动', autoupdate: '自动更新', floating: '悬浮窗', notify: '开机提醒' },
+        autostartEffective: false,
+      }),
+      setDesktop: (key, value) => {
+        const valid = ['tray', 'shortcut', 'autostart', 'autoupdate', 'floating', 'notify'].includes(key);
+        const base = { tray: true, shortcut: true, autostart: false, autoupdate: true, floating: false, notify: true };
+        return Promise.resolve({
+          ok: valid,
+          reason: valid ? undefined : `未知的桌面集成配置项：${String(key)}`,
+          config: valid ? Object.assign({}, base, { [key]: !!value }) : base,
+          changed: valid,
+          autostartEffective: key === 'autostart' ? !!value : false,
+        });
+      },
+      setFloatingContext: () => Promise.resolve({ ok: true }),
       withhold: (text) => Promise.resolve(/删除|发给|发送|curl|http/i.test(String(text || ''))
         ? { needsConfirm: true, category: 'external-message', reason: 'E2E mock', warning: '⚠' }
         : { needsConfirm: false, category: 'other', reason: '', warning: '' }),
@@ -318,6 +337,42 @@ async function run() {
   const compatMsgs = page.locator('[data-test="compat"] .msg');
   const compatCount = await compatMsgs.count();
   await assert(compatCount === 2, '消息渲染兼容 m.r/m.role 和 m.x/m.text（count=' + compatCount + '）');
+
+  // ================================================================
+  // 测试组 6：设置页桌面集成（PRD FR-4.2）
+  // 此前 6 个开关是 data-action="todo" 空壳：UI 可点、不落盘、更无系统副作用。
+  // ================================================================
+  console.log('📋 测试组 6：设置页桌面集成开关');
+
+  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await page.waitForTimeout(500);
+
+  await assert(await page.locator('#settings-section-desktop').count() > 0, '设置页「桌面集成」分组存在');
+
+  const todoSwitches = await page.locator('#settings-section-desktop [data-action="todo"]').count();
+  await assert(todoSwitches === 0, '桌面集成不再有 data-action="todo" 空壳开关（count=' + todoSwitches + ')');
+
+  const dkSwitches = page.locator('[data-action="desktop-toggle"]');
+  const dkCount = await dkSwitches.count();
+  await assert(dkCount === 6, '桌面集成 6 个开关全部真实绑定（count=' + dkCount + ')');
+
+  const dkKeys = await dkSwitches.evaluateAll((els) => els.map((e) => e.dataset.dk).sort().join(','));
+  await assert(dkKeys === 'autostart,autoupdate,floating,notify,shortcut,tray',
+    '6 个开关 key 齐全且与 PRD 一致（' + dkKeys + '）');
+
+  const disabledCount = await page.locator('.switch.disabled').count();
+  await assert(disabledCount === 0, '桥接入时开关不应为 disabled（count=' + disabledCount + '）');
+
+  // 点击「登录自启动」（默认关）→ 乐观更新翻为 on，再点回 off
+  const autostartSw = page.locator('[data-action="desktop-toggle"][data-dk="autostart"]');
+  await assert(!(await autostartSw.getAttribute('class') || '').includes('on'), '登录自启动默认关');
+  await autostartSw.click();
+  await page.waitForTimeout(400);
+  await assert((await autostartSw.getAttribute('class') || '').includes('on'), '点击后登录自启动翻为开（乐观更新）');
+  await assert(await autostartSw.getAttribute('aria-checked') === 'true', 'aria-checked 同步为 true');
+  await autostartSw.click();
+  await page.waitForTimeout(400);
+  await assert(!(await autostartSw.getAttribute('class') || '').includes('on'), '再点回关');
 
   // ================================================================
   // 总结
