@@ -99,9 +99,128 @@ export const Config: z<AuthzConfig> = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// 永久授权白名单（PRD FR-9「授权粒度：单次 / 会话 / 永久」的最后一块拼图）
+// ----------------------------------------------------------------------------
+// 三模式 + L0–L4 只解决了「什么级别要问」，没解决「问过一次之后怎么办」——
+// 用户每次写同一个文件都要点确认。这里补上「会话 / 永久」两种记住粒度的规则：
+//   规则 = 操作类型（tool）+ 路径白名单（pattern），可查看、可撤销。
+// 匹配是 glob-lite：只支持 '*' 通配且整串锚定（不做部分匹配），避免
+// '/tmp/a' 悄悄命中 '/tmp/ab/secret' 这类前缀逃逸。
+// ---------------------------------------------------------------------------
+export type GrantScope = 'session' | 'permanent';
+
+export interface GrantRule {
+  id: string;
+  /** 工具名（file_write / shell_command / web_fetch …）；'*' = 任意工具。 */
+  tool: string;
+  /** 目标模式（路径 / 命令 / URL）；'*' = 任意目标。仅 '*' 通配，整串锚定。 */
+  pattern: string;
+  scope: GrantScope;
+  /** scope='session' 时限定会话；'permanent' 恒为 undefined（跨会话生效）。 */
+  sessionId?: string;
+  createdAt: number;
+  /** 命中次数（审计可见：判断某条白名单是否还在被用到）。 */
+  hits: number;
+  note?: string;
+}
+
+/** 可登记白名单的工具（'*' 兜底；未列出的工具仍可传，UI 只是不预置）。 */
+export const GRANT_TOOLS: readonly string[] = ['*', 'file_write', 'shell_command', 'web_fetch'];
+
+export function isGrantScope(v: unknown): v is GrantScope {
+  return v === 'session' || v === 'permanent';
+}
+
+/**
+ * glob-lite → 正则。'*' 单独出现等价于「任意」；其余 '*' 转 `[\s\S]*`，
+ * 其余正则元字符全部转义，整串用 ^…$ 锚定。
+ * @returns 非法模式返回 null（调用方按「不匹配」处理，fail-closed）。
+ */
+export function grantPatternToRegExp(pattern: string): RegExp | null {
+  const p = String(pattern ?? '').trim();
+  if (!p) return null;
+  if (p === '*') return /^[\s\S]*$/;
+  const escaped = p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[\\s\\S]*');
+  try {
+    return new RegExp('^' + escaped + '$');
+  } catch {
+    return null;
+  }
+}
+
+export interface GrantInput {
+  tool: string;
+  pattern: string;
+  scope: GrantScope;
+  sessionId?: string;
+  note?: string;
+}
+
+/**
+ * 归一化并校验一条白名单规则。
+ * 非法入参一律拒绝并给 reason —— 白名单是安全边界，静默丢弃会让用户
+ * 以为「已经记住了」但实际没生效。
+ */
+export function normalizeGrant(input: unknown): { ok: boolean; rule?: GrantInput; reason?: string } {
+  if (!input || typeof input !== 'object') return { ok: false, reason: '白名单规则缺失' };
+  const raw = input as Record<string, unknown>;
+  const tool = String(raw.tool ?? '').trim();
+  if (!tool) return { ok: false, reason: '缺少操作类型（tool）' };
+  const pattern = String(raw.pattern ?? '').trim();
+  if (!pattern) return { ok: false, reason: '缺少目标模式（pattern）；不限目标请填 *' };
+  if (grantPatternToRegExp(pattern) === null) return { ok: false, reason: `目标模式非法：${pattern}` };
+  if (!isGrantScope(raw.scope)) return { ok: false, reason: `授权粒度非法：${String(raw.scope)}（应为 session 或 permanent）` };
+  const sessionId = String(raw.sessionId ?? '').trim();
+  if (raw.scope === 'session' && !sessionId) return { ok: false, reason: '会话级白名单必须指定 sessionId' };
+  const note = String(raw.note ?? '').trim().slice(0, 120);
+  return {
+    ok: true,
+    rule: {
+      tool,
+      pattern,
+      scope: raw.scope,
+      ...(raw.scope === 'session' ? { sessionId } : {}),
+      ...(note ? { note } : {}),
+    },
+  };
+}
+
+/**
+ * 在规则集中找第一条命中的白名单。
+ * 判定顺序：工具名（精确或 '*'）→ 粒度（session 需会话 ID 相等）→ 目标模式（整串锚定）。
+ * 目标缺失时只有 '*' 模式能命中 —— 无目标的请求不该被真实路径规则放行。
+ */
+export function matchGrantRule(
+  rules: readonly GrantRule[],
+  q: { toolName?: string; target?: string; sessionId?: string },
+): GrantRule | null {
+  const tool = String(q?.toolName ?? '').trim();
+  if (!tool) return null;
+  const target = String(q?.target ?? '').trim();
+  const sessionId = String(q?.sessionId ?? '').trim();
+  for (const r of rules) {
+    if (r.tool !== '*' && r.tool !== tool) continue;
+    if (r.scope === 'session') {
+      if (!r.sessionId || !sessionId || r.sessionId !== sessionId) continue;
+    }
+    const re = grantPatternToRegExp(r.pattern);
+    if (!re) continue;
+    if (!re.test(target)) continue;
+    return r;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // 审计日志条目
 // ---------------------------------------------------------------------------
-export type AuditKind = 'approval-asked' | 'approval-decided' | 'sandbox-mode';
+export type AuditKind =
+  | 'approval-asked'
+  | 'approval-decided'
+  | 'sandbox-mode'
+  | 'grant-added'
+  | 'grant-revoked'
+  | 'grant-matched';
 
 export interface AuditEntry {
   kind: AuditKind;
@@ -114,6 +233,10 @@ export interface AuditEntry {
   reason?: string;
   note?: string;
   sessionId?: string;
+  /** 命中的白名单规则 ID（grant-matched / grant-revoked）。 */
+  grantId?: string;
+  /** 白名单粒度（session / permanent）。 */
+  scope?: GrantScope;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +264,24 @@ export interface AuthzService {
   subscribe(cb: (e: AuditEntry) => void): () => void;
   /** 取审计日志快照（环形缓冲，最多 200 条）。 */
   getAuditLog(): AuditEntry[];
+
+  // ---- PRD FR-9：会话 / 永久授权白名单（可查看、可撤销）----
+  /** 列出全部白名单规则（含命中次数）。 */
+  listGrants(): GrantRule[];
+  /** 新增一条规则；非法入参拒绝并给 reason（不静默丢弃）。 */
+  grant(input: unknown): { ok: boolean; rule?: GrantRule; reason?: string };
+  /** 撤销单条；返回是否命中。 */
+  revoke(id: string): boolean;
+  /** 撤销全部（设置页「全部撤销」）；返回撤销条数。 */
+  revokeAll(): number;
+  /**
+   * 判定是否被白名单放行。命中即 hits++ 并入审计（source=grant）。
+   * 调用方仍应先判 paranoid —— 白名单不覆盖偏执模式（见 approvalGate）。
+   */
+  matchGrant(q: { toolName?: string; target?: string; sessionId?: string }): GrantRule | null;
+  /** 宿主持久化接缝（dsh-runtime 落盘 authz-grants.json）。 */
+  serializeGrants(): GrantRule[];
+  hydrateGrants(list: unknown): void;
 }
 
 const SESSION_EVENT_CAP = 200;
@@ -213,6 +354,103 @@ export function apply(ctx: Context, config: AuthzConfig): void {
     uiAnswerer = fn;
   }
 
+  // ---- PRD FR-9：会话 / 永久授权白名单 ----
+  /** 规则集（持久化由宿主 dsh-runtime 经 serializeGrants/hydrateGrants 接管）。 */
+  let grants: GrantRule[] = [];
+  let grantSeq = 0;
+
+  function grant(input: unknown): { ok: boolean; rule?: GrantRule; reason?: string } {
+    const norm = normalizeGrant(input);
+    if (!norm.ok || !norm.rule) return { ok: false, reason: norm.reason };
+    // 同 tool+pattern+scope+session 视为重复：不新增，返回既有规则（幂等）。
+    const dup = grants.find(
+      (g) =>
+        g.tool === norm.rule!.tool &&
+        g.pattern === norm.rule!.pattern &&
+        g.scope === norm.rule!.scope &&
+        (g.sessionId || '') === (norm.rule!.sessionId || ''),
+    );
+    if (dup) return { ok: true, rule: dup };
+    const rule: GrantRule = {
+      ...norm.rule,
+      id: `gr-${Date.now().toString(36)}-${++grantSeq}`,
+      createdAt: Date.now(),
+      hits: 0,
+    };
+    grants.push(rule);
+    pushAudit({
+      kind: 'grant-added',
+      ts: rule.createdAt,
+      toolName: rule.tool === '*' ? '（任意工具）' : rule.tool,
+      note: `目标 ${rule.pattern}`,
+      grantId: rule.id,
+      scope: rule.scope,
+      sessionId: rule.sessionId,
+    });
+    return { ok: true, rule };
+  }
+
+  function revoke(id: string): boolean {
+    const before = grants.length;
+    const target = grants.find((g) => g.id === id);
+    grants = grants.filter((g) => g.id !== id);
+    if (grants.length === before) return false;
+    pushAudit({
+      kind: 'grant-revoked',
+      ts: Date.now(),
+      toolName: target?.tool === '*' ? '（任意工具）' : target?.tool,
+      note: `目标 ${target?.pattern ?? ''}`,
+      grantId: id,
+      scope: target?.scope,
+      sessionId: target?.sessionId,
+    });
+    return true;
+  }
+
+  function revokeAll(): number {
+    const n = grants.length;
+    for (const g of grants) {
+      pushAudit({ kind: 'grant-revoked', ts: Date.now(), toolName: g.tool, note: `目标 ${g.pattern}`, grantId: g.id, scope: g.scope, sessionId: g.sessionId });
+    }
+    grants = [];
+    return n;
+  }
+
+  function matchGrant(q: { toolName?: string; target?: string; sessionId?: string }): GrantRule | null {
+    const hit = matchGrantRule(grants, q);
+    if (!hit) return null;
+    hit.hits += 1;
+    pushAudit({
+      kind: 'grant-matched',
+      ts: Date.now(),
+      toolName: q.toolName,
+      note: `命中白名单（累计 ${hit.hits} 次）`,
+      grantId: hit.id,
+      scope: hit.scope,
+      sessionId: q.sessionId,
+    });
+    return hit;
+  }
+
+  function hydrateGrants(list: unknown): void {
+    if (!Array.isArray(list)) return;
+    const restored: GrantRule[] = [];
+    for (const raw of list) {
+      const norm = normalizeGrant(raw);
+      if (!norm.ok || !norm.rule) continue; // 坏条目静默跳过（白名单宁缺勿滥）
+      const id = String((raw as Record<string, unknown>).id ?? '').trim();
+      const createdAt = Number((raw as Record<string, unknown>).createdAt);
+      const hits = Number((raw as Record<string, unknown>).hits);
+      restored.push({
+        ...norm.rule,
+        id: id || `gr-r-${Date.now().toString(36)}-${++grantSeq}`,
+        createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
+        hits: Number.isFinite(hits) && hits >= 0 ? Math.trunc(hits) : 0,
+      });
+    }
+    grants = restored;
+  }
+
   // 审批应答方：注册 approval/request listener（dsh 工具管道 L3/L4 ask 经此 seam）。
   // fail-closed：无 UI 应答 / 超时 / 异常 → 'unavailable'（dsh 据 unavailable 不开门）。
   // 注：approval/request 与 sandbox/mode 是 dsh 自定义事件，不在 Cordis 基础 Events 类型中，
@@ -234,6 +472,14 @@ export function apply(ctx: Context, config: AuthzConfig): void {
         reason: req.reason,
         sessionId,
       });
+      // PRD FR-9：白名单命中即放行（hits++ 并入审计），不再惊动用户。
+      // 偏执模式的拦截发生在主进程 approvalGate（白名单不覆盖 paranoid）。
+      const hit = matchGrant({
+        toolName: req.toolName,
+        target: (req as { target?: string }).target,
+        sessionId,
+      });
+      if (hit) return 'allowed-once';
       if (!uiAnswerer) {
         // 无 GUI 应答方（headless / 未接 Electron）：交还 dsh 默认链路；
         // dsh 无应答方时解析 unavailable → fail-closed（不开门），符合硬约束。
@@ -282,6 +528,14 @@ export function apply(ctx: Context, config: AuthzConfig): void {
         return () => subscribers.delete(cb);
       },
       getAuditLog: () => [...audit],
+      // FR-9 白名单
+      listGrants: () => grants.map((g) => ({ ...g })),
+      grant,
+      revoke,
+      revokeAll,
+      matchGrant,
+      serializeGrants: () => grants.map((g) => ({ ...g })),
+      hydrateGrants,
     };
     const anyCtx = ctx as unknown as { provide?: (n: string, v: unknown, b?: boolean) => void };
     anyCtx.provide?.('authz', api);

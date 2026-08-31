@@ -92,9 +92,25 @@ const orchdesk = {
   getAuthAudit: (): Promise<Array<{ kind: string; ts: number; mode?: string; outcome?: string; toolName?: string; reason?: string }>> =>
     ipcRenderer.invoke('orchdesk:authz-get-audit'),
 
+  // ---- PRD FR-9：授权白名单（操作类型 + 路径，会话 / 永久，可查看可撤销） ----
+  listGrants: (): Promise<Array<{ id: string; tool: string; pattern: string; scope: 'session' | 'permanent'; sessionId?: string; createdAt: number; hits: number; note?: string }>> =>
+    ipcRenderer.invoke('orchdesk:authz-list-grants'),
+
+  /** 新增一条白名单规则（返回拒绝原因，不静默丢弃）。 */
+  addGrant: (
+    input: { tool: string; pattern: string; scope: 'session' | 'permanent'; sessionId?: string; note?: string },
+  ): Promise<{ ok: boolean; reason?: string; rule?: Record<string, unknown>; grants?: Array<Record<string, unknown>> }> =>
+    ipcRenderer.invoke('orchdesk:authz-grant', input),
+
+  revokeGrant: (id: string): Promise<{ ok: boolean; grants?: Array<Record<string, unknown>> }> =>
+    ipcRenderer.invoke('orchdesk:authz-revoke-grant', id),
+
+  revokeAllGrants: (): Promise<{ ok: boolean; revoked?: number; grants?: Array<Record<string, unknown>> }> =>
+    ipcRenderer.invoke('orchdesk:authz-revoke-all-grants'),
+
   /** 审批弹窗（T-P3-2 fail-closed）：渲染层订阅主进程转发的 approval/request。 */
-  onAuthRequest: (cb: (req: { id: string; toolName: string; reason?: string }) => void): (() => void) => {
-    const listener = (_e: unknown, req: { id: string; toolName: string; reason?: string }): void => cb(req);
+  onAuthRequest: (cb: (req: { id: string; toolName: string; reason?: string; target?: string; sessionId?: string }) => void): (() => void) => {
+    const listener = (_e: unknown, req: { id: string; toolName: string; reason?: string; target?: string; sessionId?: string }): void => cb(req);
     ipcRenderer.on('orchdesk:authz-approval-request', listener);
     return () => ipcRenderer.removeListener('orchdesk:authz-approval-request', listener);
   },

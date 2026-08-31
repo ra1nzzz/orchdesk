@@ -305,6 +305,37 @@ const { check, summary } = createChecker();
   // -------------------------------------------------------------------------
   const desktopMod = require('./dist/desktop-integration.js');
 
+  await check('授权白名单（PRD FR-9）：IPC 新增 / 撤销 / 全部撤销，且落盘可回灌', async () => {
+    const before = await ipcHandlers.get('orchdesk:authz-list-grants')();
+    assert(Array.isArray(before), 'list-grants 应返回数组');
+    await ipcHandlers.get('orchdesk:authz-revoke-all-grants')();
+    const r = await ipcHandlers.get('orchdesk:authz-grant')({}, { tool: 'file_write', pattern: 'D:/work/*', scope: 'permanent' });
+    assert.strictEqual(r.ok, true, '新增应成功: ' + (r.reason || ''));
+    assert.strictEqual(r.grants.length, 1, '应回传最新规则列表');
+    // 落盘：authz-grants.json 真实存在且内容可用
+    const file = path.join(ddMod.getDataDir(), 'authz-grants.json');
+    assert.ok(fs.existsSync(file), `authz-grants.json 应落盘：${file}`);
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    assert.strictEqual(onDisk.length, 1, '盘上应有 1 条');
+    assert.strictEqual(onDisk[0].pattern, 'D:/work/*', '盘上内容应正确');
+    // 回灌：模拟重启（另起一份 api 从盘上恢复）
+    const probe = { list: [] };
+    const fakeApi = { serializeGrants: () => probe.list, hydrateGrants: (l) => { probe.list = l; } };
+    assert.strictEqual(rtMod.hydrateGrants(fakeApi), 1, '应从盘上回灌 1 条');
+    assert.strictEqual(probe.list[0].pattern, 'D:/work/*', '回灌内容应正确');
+    // 撤销单条
+    const rev = await ipcHandlers.get('orchdesk:authz-revoke-grant')({}, r.grants[0].id);
+    assert.strictEqual(rev.ok, true, '撤销应成功');
+    assert.strictEqual(rev.grants.length, 0, '撤销后应为空');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf-8')), [], '撤销应立即写穿落盘');
+  });
+
+  await check('授权白名单：非法规则被 IPC 拒绝（不静默丢弃）', async () => {
+    const r = await ipcHandlers.get('orchdesk:authz-grant')({}, { tool: 'file_write', pattern: '', scope: 'permanent' });
+    assert.strictEqual(r.ok, false, '空 pattern 应被拒绝');
+    assert.ok(!!r.reason, '应给出 reason');
+  });
+
   await check('桌面集成纯逻辑：归一化拒绝未知键、字符串 "false" 不恒真、缺失回落默认', () => {
     const d = desktopMod.normalizeDesktopConfig({ tray: 'false', shortcut: 0, nope: true });
     assert.strictEqual(d.tray, false, '字符串 "false" 应归一为 false（否则手改 JSON 会让开关恒开）');

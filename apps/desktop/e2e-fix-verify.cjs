@@ -104,6 +104,25 @@ async function run() {
         });
       },
       setFloatingContext: () => Promise.resolve({ ok: true }),
+      // PRD FR-9：授权白名单（会话 / 永久，可查看可撤销）
+      listGrants: () => Promise.resolve(window.__grants || []),
+      addGrant: (input) => {
+        const ok = !!(input && input.tool && input.pattern && (input.scope === 'session' || input.scope === 'permanent')
+          && (input.scope !== 'session' || !!input.sessionId));
+        if (ok) {
+          window.__grants = (window.__grants || []).concat([Object.assign({}, input, { id: 'gr-' + Date.now(), createdAt: Date.now(), hits: 0 })]);
+        }
+        return Promise.resolve({ ok, reason: ok ? undefined : '规则非法', grants: window.__grants || [] });
+      },
+      revokeGrant: (id) => {
+        window.__grants = (window.__grants || []).filter((g) => g.id !== id);
+        return Promise.resolve({ ok: true, grants: window.__grants });
+      },
+      revokeAllGrants: () => {
+        const n = (window.__grants || []).length;
+        window.__grants = [];
+        return Promise.resolve({ ok: true, revoked: n, grants: [] });
+      },
       withhold: (text) => Promise.resolve(/删除|发给|发送|curl|http/i.test(String(text || ''))
         ? { needsConfirm: true, category: 'external-message', reason: 'E2E mock', warning: '⚠' }
         : { needsConfirm: false, category: 'other', reason: '', warning: '' }),
@@ -373,6 +392,42 @@ async function run() {
   await autostartSw.click();
   await page.waitForTimeout(400);
   await assert(!(await autostartSw.getAttribute('class') || '').includes('on'), '再点回关');
+
+  // ================================================================
+  // 测试组 7：授权白名单（PRD FR-9）
+  // 此前授权粒度只有「单次」，设置页无白名单可看可撤销。
+  // ================================================================
+  console.log('📋 测试组 7：授权白名单');
+
+  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await page.waitForTimeout(400);
+
+  await assert(await page.locator('#grant-tool').count() > 0, '白名单「添加」表单存在（操作类型 / 目标 / 粒度）');
+
+  // 空目标应被拦下（不静默写入 '*' 全放行）
+  await page.locator('[data-action="grant-add"]').click();
+  await page.waitForTimeout(300);
+  await assert(await page.locator('.grant-list .gr-item').count() === 0, '目标为空时不写入白名单');
+
+  // 正常添加一条永久规则
+  await page.locator('#grant-tool').selectOption('file_write');
+  await page.locator('#grant-pattern').fill('D:/work/*');
+  await page.locator('#grant-scope').selectOption('permanent');
+  await page.locator('[data-action="grant-add"]').click();
+  await page.waitForTimeout(500);
+
+  const grantItems = page.locator('.grant-list .gr-item');
+  await assert(await grantItems.count() === 1, '添加后白名单列表有 1 条（count=' + await grantItems.count() + ')');
+
+  const grantText = await grantItems.first().innerText();
+  await assert(grantText.includes('永久'), '规则粒度显示为「永久」');
+  await assert(grantText.includes('file_write'), '规则显示操作类型 file_write');
+  await assert(grantText.includes('D:/work/*'), '规则显示目标模式');
+
+  // 撤销
+  await page.locator('[data-action="grant-revoke"]').first().click();
+  await page.waitForTimeout(500);
+  await assert(await page.locator('.grant-list .gr-item').count() === 0, '撤销后白名单清空');
 
   // ================================================================
   // 总结

@@ -18,7 +18,7 @@ import {
 } from './desktop-integration';
 import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
-import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep } from './dsh-runtime';
+import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow } from './dsh-runtime';
 import { getHostServices } from './host-services';
 import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
 import { initLogger, mirrorConsole, log, logModel, logFilePath } from './logger';
@@ -643,13 +643,23 @@ function sessionCwd(sessionId?: string): string {
  * 走此门的操作兜底不足：命令白名单含万能 shell、file_write 可覆盖白名单内任意文件）。
  * @returns null = 放行；字符串 = 拒绝原因。
  */
-async function approvalGate(toolName: string, reason: string, sessionId?: string): Promise<string | null> {
+async function approvalGate(toolName: string, reason: string, sessionId?: string, target?: string): Promise<string | null> {
   let mode = 'default';
   try { mode = (await authzService?.getMode()) || 'default'; } catch { /* 缺省 default */ }
+  // 偏执模式压倒白名单：用户切到 paranoid 的意图就是「全锁」，
+  // 此前点过的「永久允许」不该悄悄再把门打开（可在设置页撤销白名单）。
   if (mode === 'paranoid') return 'paranoid（只读）模式下禁止该操作';
+
+  // PRD FR-9：会话 / 永久白名单命中 → 直接放行（插件侧已 hits++ 并入审计）。
+  const grant = authzService?.matchGrant?.({ toolName, target, sessionId });
+  if (grant) {
+    log('INFO', 'authz', `白名单放行：${toolName} · ${grant.pattern}（${grant.scope}，累计 ${grant.hits} 次）`);
+    return null;
+  }
+
   const approval = getHostServices()?.approval;
   if (!approval) return '授权审批服务不可用，操作被拒绝（fail-closed）';
-  const outcome = await approval.request({ toolName, reason: reason.slice(0, 200), sessionId });
+  const outcome = await approval.request({ toolName, reason: reason.slice(0, 200), sessionId, target });
   return outcome === 'allowed-once' ? null : `操作未获批准（${outcome}）`;
 }
 
@@ -692,7 +702,7 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
         const content = String(args.content || '');
         if (!isPathAllowed(filePath)) return { name, result: '', error: '路径不在允许范围内' };
         // 写文件可覆盖白名单内任意内容 → 同样过授权门（与 shell 同一 helper）
-        const denied = await approvalGate('file_write', `写入 ${filePath}`, sessionCtx?.sessionId);
+        const denied = await approvalGate('file_write', `写入 ${filePath}`, sessionCtx?.sessionId, filePath);
         if (denied) return { name, result: '', error: denied };
         const dir = path.dirname(filePath);
         fs.mkdirSync(dir, { recursive: true });
@@ -715,7 +725,7 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
         }
         // ---- 授权门（PRD L3/L4 / T-P3-2）：命令执行必须过审批 ----
         // 此前审批 UI 已建但工具链路从不触发（与 intent/trace 同款死挂点，BUG-021 修复）。
-        const denied = await approvalGate('shell_command', cmd, sessionCtx?.sessionId);
+        const denied = await approvalGate('shell_command', cmd, sessionCtx?.sessionId, cmd);
         if (denied) return { name, result: '', error: denied };
         // PRD FR-12：删除 / 对外发送 / 不可逆命令在授权门之上再加一道补偿层二次确认
         // （L4 双确认）。普通命令（git/npm/ls…）判定为 other，不额外打扰。
@@ -1285,7 +1295,24 @@ type AuthzServiceLike = {
   setUiAnswerer(fn: ((req: { toolName: string; reason?: string; sessionId?: string }) => Promise<string>) | null): void;
   getModes?(): Array<{ id: string; label: string; sandboxMode: string; approvalPolicy: string }>;
   subscribe?(cb: (evt: unknown) => void): () => void;
+  // ---- PRD FR-9：会话 / 永久授权白名单 ----
+  listGrants?(): GrantRuleLike[];
+  grant?(input: unknown): { ok: boolean; rule?: GrantRuleLike; reason?: string };
+  revoke?(id: string): boolean;
+  revokeAll?(): number;
+  matchGrant?(q: { toolName?: string; target?: string; sessionId?: string }): GrantRuleLike | null;
 };
+
+export interface GrantRuleLike {
+  id: string;
+  tool: string;
+  pattern: string;
+  scope: 'session' | 'permanent';
+  sessionId?: string;
+  createdAt: number;
+  hits: number;
+  note?: string;
+}
 
 let authzService: AuthzServiceLike | null = null;
 const pendingApprovals = new Map<string, { resolve: (o: string) => void; timer: NodeJS.Timeout }>();
@@ -1308,7 +1335,7 @@ async function bootRuntime(): Promise<void> {
       // - authz 插件 setUiAnswerer：接口对称保留
       // 此前只注册了 authz 侧 → approval.request 的 uiAnswerer 恒 null → 一律
       // 立即 unavailable（悬空接线，审批 UI 从未收到过真实请求）。
-      const uiAnswererFn = async (req: { toolName?: string; reason?: string; sessionId?: string }) => {
+      const uiAnswererFn = async (req: { toolName?: string; reason?: string; sessionId?: string; target?: string }) => {
         // 渲染层未就绪 → 零等待 fail-closed：没有渲染层就没有用户输入源，
         // 审批弹窗不可能被应答，与其等满超时不如立即拒绝（与 host-services
         // 「无应答方」同语义的快路径）。
@@ -1324,6 +1351,9 @@ async function bootRuntime(): Promise<void> {
             id,
             toolName: req.toolName,
             reason: req.reason,
+            // PRD FR-9：带上具体目标，弹窗才能给「会话内 / 永久允许」两个记住选项。
+            target: req.target,
+            sessionId: req.sessionId,
           });
         });
       };
@@ -1365,6 +1395,48 @@ ipcMain.handle('orchdesk:authz-get-audit', async () => {
   if (!authzService) return [];
   try { return authzService.getAuditLog(); } catch { return []; }
 });
+
+// ---------------------------------------------------------------------------
+// PRD FR-9：授权白名单（操作类型 + 路径白名单，可查看可撤销）
+// ---------------------------------------------------------------------------
+// 粒度三选一此前只实现了「单次」——每次写同一个文件都要重新点确认。
+// 这里补 session / permanent 两种记住粒度；持久化走 dsh-runtime 写穿落盘
+// （authz-grants.json），撤销立即生效并全部入审计。
+ipcMain.handle('orchdesk:authz-list-grants', async () => {
+  if (!authzService?.listGrants) return [];
+  try { return authzService.listGrants(); } catch { return []; }
+});
+
+ipcMain.handle('orchdesk:authz-grant', async (_e, input: unknown) => {
+  if (!authzService?.grant) return { ok: false, reason: '授权服务未加载' };
+  const res = authzService.grant(input);
+  if (res.ok) persistGrants();
+  else log('WARN', 'authz', `白名单规则被拒：${res.reason}`);
+  return { ...res, grants: authzService.listGrants?.() ?? [] };
+});
+
+ipcMain.handle('orchdesk:authz-revoke-grant', async (_e, id: string) => {
+  if (!authzService?.revoke) return { ok: false, reason: '授权服务未加载' };
+  const ok = authzService.revoke(String(id || ''));
+  if (ok) persistGrants();
+  return { ok, grants: authzService.listGrants?.() ?? [] };
+});
+
+ipcMain.handle('orchdesk:authz-revoke-all-grants', async () => {
+  if (!authzService?.revokeAll) return { ok: false, reason: '授权服务未加载' };
+  const revoked = authzService.revokeAll();
+  persistGrants();
+  return { ok: true, revoked, grants: authzService.listGrants?.() ?? [] };
+});
+
+/** 写穿落盘（白名单数量少、变更罕见，不走记忆那套 20s 轮询）。 */
+function persistGrants(): void {
+  try {
+    if (!persistGrantsNow()) log('WARN', 'authz', '授权白名单落盘失败（本次会话仍生效，重启后丢失）');
+  } catch (err) {
+    log('WARN', 'authz', `授权白名单落盘异常：${(err as Error).message}`);
+  }
+}
 
 // ---- TRACE 上报开关（TOKEN 加密内置于包内；用户仅可开关，默认开）----
 // enabled=false → dsh-runtime 装载 trace 时 repoUrl 置空 → 只缓冲不上传（观测照旧）。

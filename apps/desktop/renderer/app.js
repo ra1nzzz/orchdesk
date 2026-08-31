@@ -190,6 +190,11 @@
       getAuthAudit: () => Promise.resolve([]),
       onAuthRequest: () => () => {},
       submitDecision: () => {},
+      // 授权白名单（PRD FR-9）
+      listGrants: () => Promise.resolve([]),
+      addGrant: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      revokeGrant: () => Promise.resolve({ ok: false }),
+      revokeAllGrants: () => Promise.resolve({ ok: false, revoked: 0 }),
       // 提示词库
       listPrompts: () => Promise.resolve([]),
       mergePrompts: () => Promise.resolve({ sections: [], conflicts: [] }),
@@ -237,6 +242,8 @@
     newConvMode: true,
     feedback: new Set(), authMode: 'default',
     authLevels: [], authAudit: [],
+    // 授权白名单（PRD FR-9）：会话 / 永久规则，来自 authz 插件真实服务
+    grants: [],
     promptDocs: [], promptConflicts: [],
     compAudit: [], tempPlugins: [],
     guanjiSkills: [], guanjiTokenSet: false, installedSkills: [], askInputCb: null,
@@ -1069,6 +1076,29 @@
           <div class="levels">
             ${state.authLevels.length ? state.authLevels.map((l) => `<div class="lv"><span class="lv-n">L${l.level}</span><span class="lv-l">${l.label}</span><span class="faint">${l.scope}</span>${l.requiresApproval ? '<span class="badge warn">需授权</span>' : ''}</div>`).join('') : '<div class="faint">分级定义加载中…</div>'}
           </div>
+          <div class="sec-title" style="margin:16px 0 8px">授权白名单（PRD FR-9 · 可查看可撤销）</div>
+          <div class="faint" style="margin-bottom:6px">粒度分「会话 / 永久」，规则 = 操作类型 + 目标模式（仅 <span class="mono">*</span> 通配，整串匹配）。命中即放行并计入审计；<b>偏执模式下白名单不生效</b>（切到偏执 = 全锁）。</div>
+          <div class="grant-add">
+            <select id="grant-tool" class="inp" style="width:150px">
+              ${['*', 'file_write', 'shell_command', 'web_fetch'].map((t) => `<option value="${t}">${t === '*' ? '任意操作' : t}</option>`).join('')}
+            </select>
+            <input type="text" id="grant-pattern" class="inp mono" placeholder="目标模式，如 D:/Code/OrchDesk/* 或 *" style="flex:1;font-size:11.5px">
+            <select id="grant-scope" class="inp" style="width:110px"><option value="permanent">永久</option><option value="session">本会话</option></select>
+            <button class="btn sm primary" data-action="grant-add">+ 添加</button>
+          </div>
+          <div class="grant-list">
+            ${state.grants.length ? state.grants.map((g) => `<div class="gr-item">
+              <span class="badge ${g.scope === 'permanent' ? 'warn' : 'info'}">${g.scope === 'permanent' ? '永久' : '会话'}</span>
+              <span class="mono">${esc(g.tool === '*' ? '任意操作' : g.tool)}</span>
+              <span class="mono faint" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(g.pattern)}">${esc(g.pattern)}</span>
+              <span class="faint">${g.hits} 次</span>
+              <button class="opbtn" data-action="grant-revoke" data-id="${esc(g.id)}" title="撤销">${ic('trash', 13)}</button>
+            </div>`).join('') : '<div class="faint">暂无白名单（审批弹窗点「会话内允许 / 永久允许」即写入，也可上方手动添加）</div>'}
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn sm" data-action="grant-revoke-all" ${state.grants.length ? '' : 'disabled'}>全部撤销</button>
+            <span class="faint">撤销立即生效，全部动作入审计日志</span>
+          </div>
           <div class="sec-title" style="margin:16px 0 8px">审计日志（近期）</div>
           <div class="audit-log">
             ${state.authAudit.length ? state.authAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge ${e.kind === 'approval-decided' ? (e.outcome === 'allowed-once' ? 'ok' : 'danger') : 'info'}">${e.kind}</span>${e.toolName ? `<span class="mono faint">${e.toolName}</span>` : ''}${e.outcome ? `<span class="faint">${e.outcome}</span>` : ''}${e.mode ? `<span class="faint">mode=${e.mode}</span>` : ''}</div>`).join('') : '<div class="faint">暂无审计事件（L3/L4 操作与模式切换会记录于此）</div>'}
@@ -1546,13 +1576,26 @@
   /* ---------- 审批弹窗（T-P3-2 fail-closed） ---------- */
   // 主进程经 authz 插件转发 dsh approval/request → 渲染层弹窗 → 用户决定 → submitDecision。
   function showApprovalModal(req) {
+    // PRD FR-9 授权粒度：单次 / 会话 / 永久。后两者需要「具体目标」才能建白名单规则
+    // （拿不到目标就只能建 '*' 规则，等于对该工具全放行 —— 不提供这个选项）。
+    const target = String(req.target || '').trim();
+    const canRemember = !!target && !!req.toolName;
+    const remember = canRemember
+      ? `<div class="row" style="margin-top:10px">
+           <button class="btn sm" data-action="approval-grant" data-id="${req.id}" data-scope="session" data-tool="${esc(req.toolName)}" data-target="${esc(target)}">会话内允许</button>
+           <button class="btn sm" data-action="approval-grant" data-id="${req.id}" data-scope="permanent" data-tool="${esc(req.toolName)}" data-target="${esc(target)}">永久允许</button>
+           <span class="faint">目标 <span class="mono">${esc(target.length > 48 ? target.slice(0, 48) + '…' : target)}</span></span>
+         </div>`
+      : `<div class="faint" style="margin-top:8px;font-size:11.5px">该请求未携带具体目标，只能单次允许（白名单需「操作类型 + 目标」两项齐全）。</div>`;
     openModal(`<div class="mh danger">${ic('warn', 18)}<b>授权确认（L3/L4 操作）</b></div>
       <div class="mb">
-        <div>Agent 请求执行 <b>${req.toolName || '受限操作'}</b>${req.reason ? `：<span class="faint">${req.reason}</span>` : ''}。</div>
+        <div>Agent 请求执行 <b>${esc(req.toolName || '受限操作')}</b>${req.reason ? `：<span class="faint">${esc(req.reason)}</span>` : ''}。</div>
         <div class="warn-list" style="margin-top:10px">
           <div>· 该操作属于 L3/L4 级别，需你显式授权</div>
           <div>· 超时或关闭将视为 <b>拒绝（fail-closed）</b>，操作不会执行</div>
+          <div>· 「会话 / 永久允许」写入授权白名单，可在设置页查看与撤销</div>
         </div>
+        ${remember}
       </div>
       <div class="mf">
         <button class="btn ghost" data-action="approval-deny" data-id="${req.id}">拒绝</button>
@@ -1893,6 +1936,34 @@
       case 'sim-highrisk': { const z = $('#confirmZone'); z.innerHTML = `<div class="confirm-banner"><span class="badge warn">意图 · 待确认</span> 该请求含「删除文件」高风险动作，本地模型判定需人工确认。
         <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="confirm-yes">确认执行</button><button class="btn sm" data-action="confirm-no">拒绝</button></div></div>`; z.scrollIntoView(); break; }
       case 'approval-allow': { const id = el.dataset.id; closeModal(); bridge.submitDecision(id, 'allowed-once'); toast('已允许本次操作（allowed-once）', 'ok'); break; }
+      /* 授权白名单（PRD FR-9）：会话 / 永久粒度 —— 先建规则再放行，规则失败则拒绝 */
+      case 'approval-grant': {
+        const id = el.dataset.id;
+        const scope = el.dataset.scope === 'permanent' ? 'permanent' : 'session';
+        const tool = el.dataset.tool || '';
+        const target = el.dataset.target || '';
+        closeModal();
+        bridge.addGrant({
+          tool,
+          pattern: target,
+          scope,
+          ...(scope === 'session' ? { sessionId: state.sel || '' } : {}),
+          note: '审批弹窗授权',
+        }).then((r) => {
+          if (!r || !r.ok) {
+            bridge.submitDecision(id, 'rejected');
+            toast(`白名单写入失败，已拒绝：${(r && r.reason) || '未知原因'}`, 'err');
+            return;
+          }
+          state.grants = Array.isArray(r.grants) ? r.grants : state.grants;
+          bridge.submitDecision(id, 'allowed-once');
+          toast(scope === 'permanent' ? '已永久允许（可在设置页撤销）' : '本会话内不再询问', 'ok');
+        }).catch((e) => {
+          bridge.submitDecision(id, 'rejected');
+          toast('白名单写入失败，已拒绝: ' + ((e && e.message) || e), 'err');
+        });
+        break;
+      }
       case 'approval-deny': { const id = el.dataset.id; closeModal(); bridge.submitDecision(id, 'rejected'); toast('已拒绝该操作', 'danger'); break; }
       case 'confirm-yes': case 'confirm-no': { const z = $('#confirmZone'); z.innerHTML = ''; toast(a === 'confirm-yes' ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', a === 'confirm-yes' ? 'ok' : 'danger'); break; }
 
@@ -2330,6 +2401,40 @@
         }).catch((e) => toast('切换失败: ' + ((e && e.message) || e), 'err'));
         break;
       }
+      /* 授权白名单（PRD FR-9）：添加 / 撤销 / 全部撤销 */
+      case 'grant-add': {
+        const tool = ($('#grant-tool') && $('#grant-tool').value) || '*';
+        const pattern = (($('#grant-pattern') && $('#grant-pattern').value) || '').trim();
+        const scope = ($('#grant-scope') && $('#grant-scope').value) === 'session' ? 'session' : 'permanent';
+        if (!pattern) { toast('请填写目标模式（不限目标填 *）', 'warn'); break; }
+        bridge.addGrant({
+          tool, pattern, scope,
+          ...(scope === 'session' ? { sessionId: state.sel || '' } : {}),
+          note: '设置页手动添加',
+        }).then((r) => {
+          if (!r || !r.ok) { toast((r && r.reason) || '添加失败', 'err'); return; }
+          state.grants = Array.isArray(r.grants) ? r.grants : state.grants;
+          const p = $('#grant-pattern'); if (p) p.value = '';
+          render(); toast('已加入白名单', 'ok');
+        }).catch((e) => toast('添加失败: ' + ((e && e.message) || e), 'err'));
+        break;
+      }
+      case 'grant-revoke': {
+        bridge.revokeGrant(el.dataset.id).then((r) => {
+          if (!r || !r.ok) { toast('撤销失败', 'err'); return; }
+          state.grants = Array.isArray(r.grants) ? r.grants : state.grants;
+          render(); toast('已撤销该白名单规则', 'ok');
+        }).catch((e) => toast('撤销失败: ' + ((e && e.message) || e), 'err'));
+        break;
+      }
+      case 'grant-revoke-all': {
+        bridge.revokeAllGrants().then((r) => {
+          if (!r || !r.ok) { toast('撤销失败', 'err'); return; }
+          state.grants = Array.isArray(r.grants) ? r.grants : [];
+          render(); toast(`已撤销全部 ${r.revoked || 0} 条白名单`, 'ok');
+        }).catch((e) => toast('撤销失败: ' + ((e && e.message) || e), 'err'));
+        break;
+      }
       /* 桌面集成开关（PRD FR-4.2）：此前 6 项全是 data-action="todo" 空壳 */
       case 'desktop-toggle': {
         const key = el.dataset.dk;
@@ -2501,6 +2606,10 @@
       bridge.getAuthMode().then(r => { if (r?.mode) state.authMode = r.mode; }).catch(() => {}),
       bridge.getAuthLevels().then(r => { if (Array.isArray(r) && r.length) state.authLevels = r; }).catch(() => {}),
       bridge.getAuthAudit().then(r => { if (r) state.authAudit = r; }).catch(() => {}),
+      // 授权白名单（PRD FR-9）：真实规则列表（此前只有「单次」粒度，UI 无白名单可看）
+      (typeof bridge.listGrants === 'function'
+        ? bridge.listGrants().then(r => { if (Array.isArray(r)) state.grants = r; })
+        : Promise.resolve()).catch(() => {}),
       // 提示词库
       bridge.listPrompts().then(r => { if (Array.isArray(r)) state.promptDocs = r; }).catch(() => {}),
       bridge.mergePrompts('main').then(r => { if (r?.conflicts) state.promptConflicts = r.conflicts; }).catch(() => {}),

@@ -112,6 +112,11 @@ export interface ApprovalRequestLike {
   toolName?: string;
   reason?: string;
   sessionId?: string;
+  /**
+   * PRD FR-9：被授权操作的具体目标（文件路径 / shell 命令 / URL）。
+   * 白名单按「操作类型 + 目标」匹配，没有目标就只能被 '*' 规则命中。
+   */
+  target?: string;
   signal?: AbortSignal;
 }
 
@@ -249,6 +254,7 @@ export const hostServices = {
             toolName: req?.toolName,
             reason: req?.reason,
             sessionId: req?.sessionId,
+            target: req?.target,
           })).then(
             (v) => {
               const allowed: ApprovalOutcome[] = ['allowed-once', 'rejected', 'cancelled', 'unavailable'];

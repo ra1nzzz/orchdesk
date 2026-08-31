@@ -212,6 +212,92 @@ function tick(n = 3) {
     assert(approvalCalls.length === before + 1, '审批请求应被记录');
   });
 
+  // ---------------- authz · 授权白名单（PRD FR-9，第十一个死挂点）----------------
+  await check('白名单：新增规则成功并入审计（含 scope 与目标）', () => {
+    authz.revokeAll();
+    const r = authz.grant({ tool: 'file_write', pattern: 'D:/work/*', scope: 'permanent' });
+    assert(r.ok === true, '应成功: ' + (r.reason || ''));
+    assert(r.rule && r.rule.id, '应返回带 id 的规则');
+    assert(r.rule.hits === 0, '初始命中数应为 0');
+    const added = authz.getAuditLog().filter((a) => a.kind === 'grant-added');
+    assert(added.length === 1, '应落 1 条 grant-added 审计');
+    assert(added[0].scope === 'permanent', '审计应记录粒度');
+  });
+
+  await check('白名单：非法入参被拒绝且给 reason（不静默丢弃）', () => {
+    const cases = [
+      [{ tool: '', pattern: '*', scope: 'permanent' }, '缺少 tool'],
+      [{ tool: 'file_write', pattern: '', scope: 'permanent' }, '缺少 pattern'],
+      [{ tool: 'file_write', pattern: '*', scope: 'forever' }, '非法 scope'],
+      [{ tool: 'file_write', pattern: '*', scope: 'session' }, '会话级缺 sessionId'],
+    ];
+    for (const [input, why] of cases) {
+      const r = authz.grant(input);
+      assert(r.ok === false, `${why}：应被拒绝`);
+      assert(!!r.reason, `${why}：应给出 reason`);
+    }
+    assert(authz.listGrants().length === 1, '被拒的规则不应写入白名单');
+  });
+
+  await check('白名单：命中放行 + hits 累加 + 目标整串锚定（不做前缀逃逸）', () => {
+    authz.revokeAll();
+    authz.grant({ tool: 'file_write', pattern: 'D:/work/*', scope: 'permanent' });
+    assert(authz.matchGrant({ toolName: 'file_write', target: 'D:/work/a.txt' }) !== null, '同目录应命中');
+    assert(authz.matchGrant({ toolName: 'file_write', target: 'D:/work/sub/a.txt' }) !== null, '子目录应命中（* 跨分隔符）');
+    assert(authz.matchGrant({ toolName: 'file_write', target: 'D:/workplace/secret' }) === null, 'D:/work* 不应逃逸到 D:/workplace');
+    assert(authz.matchGrant({ toolName: 'shell_command', target: 'D:/work/a.txt' }) === null, '工具名不匹配不应放行');
+    assert(authz.matchGrant({ toolName: 'file_write' }) === null, '无目标时真实路径规则不应放行（防误开）');
+    assert(authz.listGrants()[0].hits === 2, '命中次数应为 2，实际 ' + authz.listGrants()[0].hits);
+    assert(authz.getAuditLog().some((a) => a.kind === 'grant-matched'), '命中应入审计');
+  });
+
+  await check('白名单：正则元字符被转义（. 不代表任意字符）', () => {
+    authz.revokeAll();
+    authz.grant({ tool: 'file_write', pattern: 'D:/work/a.txt', scope: 'permanent' });
+    assert(authz.matchGrant({ toolName: 'file_write', target: 'D:/work/a.txt' }) !== null, '精确路径应命中');
+    assert(authz.matchGrant({ toolName: 'file_write', target: 'D:/work/axtxt' }) === null, '模式中的 . 不应等价于任意字符');
+  });
+
+  await check('白名单：会话级规则只在本会话生效；永久级跨会话', () => {
+    authz.revokeAll();
+    authz.grant({ tool: 'shell_command', pattern: '*', scope: 'session', sessionId: 'sess-A' });
+    authz.grant({ tool: 'web_fetch', pattern: '*', scope: 'permanent' });
+    assert(authz.matchGrant({ toolName: 'shell_command', target: 'ls', sessionId: 'sess-A' }) !== null, '本会话应命中');
+    assert(authz.matchGrant({ toolName: 'shell_command', target: 'ls', sessionId: 'sess-B' }) === null, '别的会话不应命中');
+    assert(authz.matchGrant({ toolName: 'web_fetch', target: 'https://x.dev', sessionId: 'sess-B' }) !== null, '永久级应跨会话命中');
+  });
+
+  await check('白名单：撤销单条 / 全部撤销，且入审计', () => {
+    authz.revokeAll();
+    const a = authz.grant({ tool: 'file_write', pattern: '*', scope: 'permanent' });
+    const b = authz.grant({ tool: 'shell_command', pattern: '*', scope: 'permanent' });
+    assert(authz.listGrants().length === 2, '应有 2 条');
+    assert(authz.revoke(a.rule.id) === true, '撤销应命中');
+    assert(authz.revoke(a.rule.id) === false, '重复撤销应返回 false');
+    assert(authz.listGrants().length === 1, '应剩 1 条');
+    assert(authz.getAuditLog().some((x) => x.kind === 'grant-revoked' && x.grantId === a.rule.id), '撤销应入审计');
+    const n = authz.revokeAll();
+    assert(n === 1, '全部撤销应返回 1，实际 ' + n);
+    assert(authz.listGrants().length === 0, '应清空');
+  });
+
+  await check('白名单：序列化 / 回灌往返，坏条目静默跳过', () => {
+    authz.revokeAll();
+    authz.grant({ tool: 'file_write', pattern: 'D:/work/*', scope: 'permanent' });
+    const snap = authz.serializeGrants();
+    assert(snap.length === 1 && snap[0].pattern === 'D:/work/*', '序列化应保留规则');
+    authz.hydrateGrants([
+      { id: 'gr-keep', tool: 'web_fetch', pattern: 'https://a.dev/*', scope: 'permanent', createdAt: 1, hits: 7 },
+      { id: 'gr-bad', tool: '', pattern: '*', scope: 'permanent' },
+      { id: 'gr-bad2', tool: 'x', pattern: '*', scope: 'nope' },
+      'not-an-object',
+    ]);
+    const after = authz.listGrants();
+    assert(after.length === 1, '只应保留 1 条合法规则，实际 ' + after.length);
+    assert(after[0].id === 'gr-keep' && after[0].hits === 7, '应保留 id 与命中数');
+    authz.revokeAll();
+  });
+
   // ---------------- brain ----------------
   current = 'brain';
   console.log('== brain（脑手解耦）==');

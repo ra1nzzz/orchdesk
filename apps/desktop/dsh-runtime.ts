@@ -220,6 +220,15 @@ export async function startRuntime(): Promise<OrchDeskRuntime> {
     scheduleMemoryPersist(memApi);
   }
 
+  // 授权白名单持久化（PRD FR-9，第十一个死挂点）：装载后回灌。
+  // 与记忆不同，白名单不走轮询 —— 数量少、变更罕见，由主进程变更后写穿落盘，
+  // 避免「刚点了永久允许、20 秒内崩溃就没了」的窗口。
+  const grantApi = grantApiOf(ctx);
+  if (grantApi) {
+    const n = hydrateGrants(grantApi);
+    if (n > 0) console.log(`[orchdesk] 授权白名单已回灌：${n} 条（${grantsFile()}）`);
+  }
+
   runtime = { ctx, host: getHostServices(), plugins, activeCount };
   return runtime;
 }
@@ -292,6 +301,52 @@ export function hydrateMemory(api: MemoryPersistApi): boolean {
   } catch (err) {
     console.warn('[orchdesk] 记忆回灌失败:', (err as Error).message);
     return false;
+  }
+}
+
+// ---- 授权白名单持久化（PRD FR-9「永久（操作类型+路径白名单，可查看可撤销）」）----
+
+/** authz 插件 provide 的服务面（宿主持久化只依赖这两个方法）。 */
+export interface GrantPersistApi {
+  serializeGrants(): unknown[];
+  hydrateGrants(list: unknown): void;
+}
+
+function grantsFile(): string {
+  return path.join(getDataDir(), 'authz-grants.json');
+}
+
+function grantApiOf(ctx: Context): GrantPersistApi | null {
+  const v = (ctx as unknown as Record<string, unknown>)['authz'];
+  if (!v || typeof v !== 'object') return null;
+  const api = v as GrantPersistApi;
+  return typeof api.serializeGrants === 'function' && typeof api.hydrateGrants === 'function' ? api : null;
+}
+
+/** 写穿落盘（主进程在 grant / revoke / revokeAll 之后调用）。 */
+export function persistGrantsNow(api?: GrantPersistApi): boolean {
+  try {
+    const target = api ?? (runtime ? grantApiOf(runtime.ctx) : null);
+    if (!target) return false;
+    const file = grantsFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(target.serializeGrants(), null, 2), 'utf-8');
+    return true;
+  } catch (err) {
+    console.warn('[orchdesk] 授权白名单落盘失败:', (err as Error).message);
+    return false;
+  }
+}
+
+/** 启动回灌：坏文件 / 缺文件 → 空白名单（宁缺勿滥，不猜用户意图）。 */
+export function hydrateGrants(api: GrantPersistApi): number {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(grantsFile(), 'utf-8'));
+    const list = Array.isArray(parsed) ? parsed : [];
+    api.hydrateGrants(list);
+    return api.serializeGrants().length;
+  } catch {
+    return 0;
   }
 }
 
