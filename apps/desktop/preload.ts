@@ -182,6 +182,18 @@ const orchdesk = {
   openExternal: (url: string): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:open-external', url),
 
+  /** 本地插件市场（PRD FR-3）：扫描 dataDir()/plugins（不执行插件代码）。 */
+  getMarketPlugins: (): Promise<{ items: Array<Record<string, unknown>>; dir: string; count: number }> =>
+    ipcRenderer.invoke('orchdesk:market-plugins'),
+
+  /** 启用 / 停用本地市场插件（与内置插件同形的真热插拔）。 */
+  setMarketPluginEnabled: (dir: string, enabled: boolean): Promise<{ ok: boolean; state?: Record<string, unknown>; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:market-toggle', dir, enabled),
+
+  /** 打开本地插件目录（不存在则创建）。 */
+  openMarketDir: (): Promise<{ ok: boolean; dir?: string; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:market-open-dir'),
+
   /** 当前记忆摘要方式（llm = 模型摘要；extractive = 抽取式兜底）。 */
   getMemorySummarizeStatus: (): Promise<{ seam: boolean; provider: string; model: string; mode: 'llm' | 'extractive' }> =>
     ipcRenderer.invoke('orchdesk:memory-summarize-status'),

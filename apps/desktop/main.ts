@@ -38,7 +38,8 @@ import {
   type ConnectorFile,
 } from './connector-registry';
 import { hubClient } from './hub';
-import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow } from './dsh-runtime';
+import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, listMarketPlugins, setMarketPluginEnabled, startupMarketPlugins, marketDir } from './dsh-runtime';
+import { normalizeEnabledMap } from './plugin-market';
 import { getHostServices } from './host-services';
 import {
   normalizeSandboxLog,
@@ -1610,6 +1611,19 @@ async function bootRuntime(): Promise<void> {
   } catch (err) {
     console.error('[orchdesk] dsh 运行时启动失败，插件能力不可用:', (err as Error).message);
   }
+
+  // 4) PRD FR-3 本地插件市场：回灌持久化里 enabled=true 的第三方插件。
+  //    enabled 是用户显式的装载授权；单个插件装载失败不阻断其余（结果打日志）。
+  //    注意直接读文件：bootRuntime 早于启动序列里的状态装载，用模块变量会拿到空表。
+  try {
+    const results = await startupMarketPlugins(loadMarketEnabled());
+    for (const r of results) {
+      if (r.ok) log('INFO', 'market', `市场插件 ${r.dir} 已随启动装载`);
+      else log('WARN', 'market', `市场插件 ${r.dir} 启动装载失败：${r.error || '未知原因'}`);
+    }
+  } catch (err) {
+    console.warn('[orchdesk] 市场插件回灌失败:', (err as Error).message);
+  }
 }
 
 ipcMain.handle('orchdesk:authz-get-mode', async () => {
@@ -1903,13 +1917,38 @@ function persistConnectors(): boolean {
   }
 }
 
+// ---- 本地插件市场（PRD FR-3）：启用意愿持久化（插件代码在 dataDir()/plugins/）----
+let marketEnabledMap: Record<string, boolean> = {};
+
+function marketStateFile(): string {
+  return path.join(dataDir(), DATA_FILE_NAMES.market);
+}
+
+function loadMarketEnabled(): Record<string, boolean> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(marketStateFile(), 'utf-8'));
+    return normalizeEnabledMap(raw && typeof raw === 'object' ? (raw as Record<string, unknown>).enabled : null);
+  } catch {
+    return {};
+  }
+}
+
+/** 写穿：启停是用户的授权决定，「重启后丢了」比落盘失败严重得多。 */
+function persistMarketEnabled(): void {
+  try {
+    fs.mkdirSync(path.dirname(marketStateFile()), { recursive: true });
+    fs.writeFileSync(marketStateFile(), JSON.stringify({ enabled: marketEnabledMap }, null, 2), 'utf-8');
+  } catch (err) {
+    log('WARN', 'market', `插件市场状态落盘失败: ${(err as Error).message}`);
+  }
+}
+
 function recordConnectorAudit(id: string, action: ConnectorAuditAction, message: string): void {
   const entry: ConnectorAuditEntry = {
     id,
     ts: Date.now(),
     action,
-    message: String(message || '').slice(0, 240),
-  };
+    message: String(message || '').slice(0, 240),  };
   connectorFile.audit = appendConnectorAudit(connectorFile.audit, entry);
   persistConnectors();
 }
@@ -2242,6 +2281,41 @@ ipcMain.handle('orchdesk:connector-audit-clear', async () => {
   connectorFile.audit = [];
   persistConnectors();
   return { ok: true, cleared };
+});
+
+// ---- 本地插件市场（PRD FR-3）----
+ipcMain.handle('orchdesk:market-plugins', async () => {
+  return {
+    items: listMarketPlugins(marketEnabledMap),
+    dir: marketDir(),
+    count: Object.values(marketEnabledMap).filter(Boolean).length,
+  };
+});
+
+ipcMain.handle('orchdesk:market-toggle', async (_e, dir: unknown, enabled: unknown) => {
+  if (typeof dir !== 'string' || typeof enabled !== 'boolean') {
+    return { ok: false, reason: '参数非法' };
+  }
+  try {
+    const state = await setMarketPluginEnabled(dir, enabled);
+    marketEnabledMap[dir] = enabled;
+    persistMarketEnabled();
+    // 未激活也要如实回传：装载完成 ≠ 激活（依赖未满足时 fiber.state != 2）。
+    return { ok: true, state };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+});
+
+ipcMain.handle('orchdesk:market-open-dir', async () => {
+  const dir = marketDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const err = await shell.openPath(dir);
+    return err ? { ok: false, reason: err } : { ok: true, dir };
+  } catch (e) {
+    return { ok: false, reason: (e as Error).message };
+  }
 });
 
 // ---- 系统提示词库（prompt 插件）----
@@ -2726,6 +2800,13 @@ app.whenReady().then(async () => {
     if (n > 0) log('INFO', 'connector', `连接器注册表已装载：${n} 个已配置（${connectorsFilePath()}）`);
   } catch (err) {
     console.warn('[orchdesk] 连接器注册表装载失败:', (err as Error).message);
+  }
+
+  // PRD FR-3：本地插件市场启用状态装载（插件代码在 dataDir()/plugins/，这里只存意愿）。
+  try {
+    marketEnabledMap = loadMarketEnabled();
+  } catch (err) {
+    console.warn('[orchdesk] 插件市场状态装载失败:', (err as Error).message);
   }
 
   // PRD FR-4.2：桌面集成开关全量重放（此前 6 项全是设置页空壳，见第十个死挂点）。

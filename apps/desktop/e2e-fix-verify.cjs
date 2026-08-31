@@ -110,6 +110,17 @@ async function run() {
       ],
       audit: [],
     };
+    // 本地插件市场种子（PRD FR-3）：合法（启/停两态）+ manifest 非法。
+    window.__market = {
+      items: [
+        { dir: 'e2e-echo', manifestOk: true, hasEntry: true, enabled: false, active: false, error: '',
+          manifest: { name: 'E2E 回声插件', version: '1.0.0', description: '验证装载链路', caps: ['test.echo'], inject: [] } },
+        { dir: 'word-count', manifestOk: true, hasEntry: true, enabled: true, active: true, error: '',
+          manifest: { name: '字数统计', version: '0.2.0', description: '统计会话字数', caps: ['session.read'], inject: [] } },
+        { dir: 'bad-manifest', manifestOk: false, hasEntry: true, enabled: false, active: false,
+          error: 'bad-manifest: manifest.name 缺失或非字符串', manifest: null },
+      ],
+    };
     window.orchdesk = {
       loadSessions: () => Promise.resolve(JSON.parse(JSON.stringify(seedSessions))),
       persistSessions: (arr) => Promise.resolve({ ok: true }),
@@ -316,6 +327,22 @@ async function run() {
         return Promise.resolve({ ok: true, cleared: n });
       },
       openExternal: (url) => Promise.resolve(/^https?:\/\//.test(String(url)) ? { ok: true } : { ok: false, reason: '仅允许 http/https' }),
+
+      // PRD FR-3：本地插件市场。种子：合法已启用 / 合法未启用 / manifest 非法。
+      getMarketPlugins: () => Promise.resolve({
+        items: window.__market.items,
+        dir: 'C:\\mock\\plugins', count: window.__market.items.filter((m) => m.enabled).length,
+      }),
+      setMarketPluginEnabled: (dir, enabled) => {
+        const m = window.__market.items.find((x) => x.dir === dir);
+        if (!m || !m.manifestOk || !m.hasEntry) {
+          return Promise.resolve({ ok: false, reason: m ? (m.error || '不可启用') : '插件目录不存在: ' + dir });
+        }
+        m.enabled = enabled;
+        m.active = enabled;
+        return Promise.resolve({ ok: true, state: JSON.parse(JSON.stringify(m)) });
+      },
+      openMarketDir: () => Promise.resolve({ ok: true, dir: 'C:\\mock\\plugins' }),
       // PRD FR-9：授权白名单（会话 / 永久，可查看可撤销）
       listGrants: () => Promise.resolve(window.__grants || []),
       addGrant: (input) => {
@@ -1044,13 +1071,51 @@ async function run() {
   await assert(/未配置/.test(await page.locator('.plug[data-cid="tencent-docs"]').innerText()), '清除后回到「未配置」');
 
   // 桥不可用 → 侧栏显「未接入」，不拿空数组冒充
-  await page.evaluate(() => { delete window.orchdesk.getConnectors; });
+  await page.evaluate(() => { window.__origGetConnectors = window.orchdesk.getConnectors; delete window.orchdesk.getConnectors; });
   await page.locator('[data-action="nav"][data-id="session"]').first().click();
   await page.waitForTimeout(400);
   await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
   await page.waitForTimeout(900);
   await assert(/连接器注册表未接入/.test(await page.locator('.main-inner').innerText()),
     '桥不可用时显「未接入」');
+
+  // ================================================================
+  // 测试组 13：本地插件市场（PRD FR-3）
+  // 此前整栏标「规划中」；本地目录接入后必须区分「本地可装」与「远程未接入」。
+  // ================================================================
+  console.log('📋 测试组 13：本地插件市场（FR-3）');
+
+  // 恢复连接器桥（上一组末尾删掉了 getConnectors）
+  await page.evaluate(() => { window.orchdesk.getConnectors = (window.__origGetConnectors || (() => Promise.resolve({ items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 } }))); });
+  await page.waitForTimeout(600);
+
+  await assert(/本地插件市场/.test(await page.locator('.main-inner').innerText()), '主区有本地插件市场卡片');
+  await assert(/E2E 回声插件/.test(await page.locator('.main-inner').innerText()), '合法插件显示 manifest.name（非目录名）');
+  // 三种状态徽标
+  await assert(/已启用/.test(await page.locator('.plug[data-mid="word-count"]').innerText()), '已启用插件显「已启用」');
+  await assert(/未启用/.test(await page.locator('.plug[data-mid="e2e-echo"]').innerText()), '未启用插件显「未启用」');
+  await assert(/manifest 非法/.test(await page.locator('.plug[data-mid="bad-manifest"]').innerText())
+    && /manifest.name 缺失/.test(await page.locator('.plug[data-mid="bad-manifest"]').innerText()),
+    'manifest 非法显徽标 + 具体原因（用户可自查）');
+  // 远程市场仍诚实标注
+  await assert(/远程未接入/.test(await page.locator('.main-inner').innerText()) || (await page.locator('.ss-l').count() > 0),
+    '远程市场保持「远程未接入」标注');
+
+  // 启用开关：点击 e2e-echo 的 switch → mock 里 enabled/active 翻转
+  await page.locator('[data-action="market-local-toggle"][data-id="e2e-echo"]').click();
+  await page.waitForTimeout(800);
+  const echoState = await page.evaluate(() => window.__market.items.find((x) => x.dir === 'e2e-echo'));
+  await assert(echoState.enabled === true && echoState.active === true, '启用真的改了状态（走了桥）');
+  await assert(/已启用/.test(await page.locator('.plug[data-mid="e2e-echo"]').innerText()), '徽标更新为「已启用」');
+
+  // 非法目录的开关点不动（mock 拒绝 → toast + 状态不变）
+  await page.locator('[data-action="market-local-toggle"][data-id="bad-manifest"]').click();
+  await page.waitForTimeout(800);
+  const badState = await page.evaluate(() => window.__market.items.find((x) => x.dir === 'bad-manifest'));
+  await assert(badState.enabled === false, 'manifest 非法不可启用（fail-closed）');
+
+  // 打开插件目录按钮存在
+  await assert(await page.locator('[data-action="market-open-dir"]').count() === 1, '有「打开插件目录」入口');
 
   // ================================================================
   // 总结

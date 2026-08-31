@@ -40,6 +40,8 @@ export const DATA_FILE_NAMES = {
   promotions: 'memory-promotions.json',
   /** PRD FR-3 连接器注册表（加密凭证 + 探测状态 + 审计；随数据目录迁移）。 */
   connectors: 'connectors.json',
+  /** PRD FR-3 本地插件市场启用状态（目录内容本身在 dataDir()/plugins/）。 */
+  market: 'plugin-market.json',
 } as const;
 
 /** 随数据目录迁移的目录名（与 DATA_FILE_NAMES 同理，集中登记）。 */

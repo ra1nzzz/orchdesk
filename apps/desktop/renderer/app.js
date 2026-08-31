@@ -308,6 +308,8 @@
     // loaded=false 时侧栏显示「未接入」，不能拿空数组冒充「都没配置」。
     connectors: { items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 }, loaded: false, expanded: null },
     connAudit: { entries: [], stats: { total: 0, saves: 0, clears: 0, tests: 0, fails: 0 }, total: 0, max: 200, loaded: false },
+    // 本地插件市场（PRD FR-3）：dataDir()/plugins 下的第三方插件。
+    market: { items: [], dir: '', count: 0, loaded: false, busy: null },
   };
 
   const $ = (s) => document.querySelector(s);
@@ -567,6 +569,32 @@
     if (st.lastTestOk === true) return '<span class="ib badge ok">已连接</span>';
     if (st.lastTestOk === false) return '<span class="ib badge warn">连通失败</span>';
     return '<span class="ib badge warn">已配置 · 未验证</span>';
+  }
+
+  /* ---------- 本地插件市场（PRD FR-3） ---------- */
+  function refreshMarket() {
+    if (typeof bridge.getMarketPlugins !== 'function') {
+      state.market = { ...state.market, loaded: false };
+      if (state.page === 'plugins') render();
+      return;
+    }
+    bridge.getMarketPlugins().then((r) => {
+      if (!r || typeof r !== 'object' || !Array.isArray(r.items)) return;
+      state.market = { items: r.items, dir: String(r.dir || ''), count: Number(r.count) || 0, loaded: true, busy: state.market.busy };
+      if (state.page === 'plugins') render();
+    }).catch(() => {
+      state.market = { ...state.market, loaded: false };
+      if (state.page === 'plugins') render();
+    });
+  }
+
+  /** 市场插件状态徽标：装载完成 ≠ 激活（依赖未满足时必须可区分）。 */
+  function marketBadge(m) {
+    if (!m.manifestOk) return '<span class="ib badge warn">manifest 非法</span>';
+    if (!m.hasEntry) return '<span class="ib badge warn">缺 index.js</span>';
+    if (m.active) return '<span class="ib badge ok">已启用</span>';
+    if (m.enabled) return '<span class="ib badge warn">已启用 · 未激活</span>';
+    return '<span class="ib badge">未启用</span>';
   }
 
   /* ---------- PRD FR-4.2 数据目录内容清单 ---------- */
@@ -1175,9 +1203,12 @@
       const builtIn = PLUGINS.map((p) => `<div class="ss-i ${p.on ? 'on' : ''}" data-action="plug-nav" data-id="${p.id}">
         <span class="id"></span><span class="in">${p.n}</span>
         ${p.on ? '<span class="ib badge ok">启</span>' : p.deferred ? '<span class="ib badge">延后</span>' : '<span class="ib badge">关</span>'}</div>`).join('');
-      // 插件市场 / 连接器：目前无后端注册表，属「规划中」清单。
-      // 明确标注，避免把规划项当成可安装的真实能力（此前显示为「可装」是误导）。
-      const market = PLUGIN_MARKET.map((p) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(p.n)}</span><span class="ib badge">规划中</span></div>`).join('');
+      // 插件市场：本地目录已接真实注册表（FR-3）；远程源（观雅集/Hub）未接入，诚实标注。
+      // 此前整栏标「规划中」，本地目录接入后必须区分两种状态。
+      const market = (state.market.loaded
+        ? state.market.items.map((m) => `<div class="ss-i ${m.active ? 'on' : ''}" data-action="market-local-nav" data-id="${esc(m.dir)}"><span class="id"></span><span class="in">${esc(m.manifest && m.manifest.name || m.dir)}</span>${marketBadge(m)}</div>`).join('')
+        : '') +
+        PLUGIN_MARKET.map((p) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(p.n)}</span><span class="ib badge">远程未接入</span></div>`).join('');
       const skills = SKILLS_MARKET.map((s) => `<div class="ss-i"><span class="id"></span><span class="in mono" style="font-size:11.5px">${esc(s.n)}</span>${s.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>'}</div>`).join('');
       const experts = [...expertList().map((e) => `<div class="ss-i"><span class="id"></span><span class="in">${e}</span><span class="ib badge info">专家</span></div>`),
         ...teamList().map((t) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(t.n)}</span><button class="btn sm ghost" data-action="team-compose" data-tid="${esc(t.id || '')}" data-tn="${esc(t.n)}">派发任务</button><span class="ib badge ceo">团</span></div>`)].join('');
@@ -1191,7 +1222,7 @@
         : '<div class="ss-i"><span class="id"></span><span class="in">连接器注册表</span><span class="ib badge">未接入</span></div>';
       const connCount = state.connectors.loaded ? state.connectors.stats.total : 0;
       return sec('builtin', '内置插件', PLUGINS.length, builtIn) +
-        sec('market', '插件市场', PLUGIN_MARKET.length, market) +
+        sec('market', '插件市场', (state.market.loaded ? state.market.items.length : 0) + PLUGIN_MARKET.length, market) +
         sec('skills', '技能市场', SKILLS_MARKET.length, skills) +
         sec('experts', '专家·专家团', expertList().length + teamList().length, expertsHtml) +
         sec('connectors', '连接器', connCount, connItems);
@@ -1264,6 +1295,42 @@
             ${state.connAudit.entries.map((e) => `<div class="row" style="padding:3px 0;border-top:1px solid var(--border)"><span class="mono" style="font-size:11px;width:86px">${esc(e.id)}</span><span class="badge ${e.action === 'test' ? 'ok' : e.action === 'test-fail' ? 'warn' : ''}" style="margin:0 6px">${esc(e.action)}</span><span style="flex:1;font-size:11.5px">${esc(e.message)}</span><span class="faint mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString()}</span></div>`).join('')}
           </div>
           <div class="row" style="margin-top:6px"><button class="btn sm ghost" data-action="conn-audit-clear">清空审计</button></div>` : ''}
+        </div>
+        <div class="sec-title" style="margin-top:18px">本地插件市场（PRD FR-3）</div>
+        <div class="card" style="padding:12px">
+          <div class="faint" style="margin-bottom:8px">第三方插件放 <b>插件目录</b>（manifest.json + index.js）后出现在这里。扫描不执行代码；<b>启用 = 显式授权装载</b>，与内置插件同一套真热插拔（停用 = 逆回滚无残留）。远程市场需签名与来源校验，未接入。</div>
+          <div class="row" style="margin-bottom:10px">
+            <button class="btn sm" data-action="market-open-dir">打开插件目录</button>
+            <button class="btn sm ghost" data-action="market-refresh">重新扫描</button>
+            ${state.market.loaded ? `<span class="faint" style="font-size:11px;margin-left:auto">${state.market.items.length} 个目录 · ${state.market.count} 个已启用</span>` : ''}
+          </div>
+          ${!state.market.loaded
+    ? '<div class="faint">本地插件市场未接入（主进程桥不可用）</div>'
+    : state.market.items.length === 0
+      ? `<div class="faint">插件目录为空：把含 manifest.json + index.js 的插件目录放进 ${esc(state.market.dir)} 后点「重新扫描」</div>`
+      : state.market.items.map((m) => {
+        const name = m.manifest && m.manifest.name ? m.manifest.name : m.dir;
+        const desc = m.manifest && m.manifest.description ? m.manifest.description : '';
+        const ver = m.manifest && m.manifest.version ? m.manifest.version : '';
+        const caps = m.manifest && Array.isArray(m.manifest.caps) ? m.manifest.caps : [];
+        const inj = m.manifest && Array.isArray(m.manifest.inject) ? m.manifest.inject : [];
+        return `<div class="plug" data-mid="${esc(m.dir)}">
+              <div class="ph">
+                <div style="min-width:0;flex:1">
+                  <div class="ptitle">${esc(name)} ${marketBadge(m)} ${ver ? `<span class="badge info mono">v${esc(ver)}</span>` : ''}</div>
+                  ${desc ? `<div class="pdesc">${esc(desc)}</div>` : ''}
+                  <div class="pmeta">
+                    ${caps.map((cap) => `<span class="badge cap">${esc(cap)}</span>`).join('')}
+                    ${inj.length ? `<span class="faint" style="font-size:11px;margin-left:6px">注入：${inj.map((s) => esc(s)).join('、')}</span>` : ''}
+                    ${m.error ? `<div class="faint" style="font-size:11px;color:var(--warn, #b7791f)">${esc(m.error)}</div>` : ''}
+                  </div>
+                </div>
+                <div class="pactions">
+                  <div class="switch ${m.enabled ? 'on' : ''}" data-action="market-local-toggle" data-id="${esc(m.dir)}" title="${m.manifestOk && m.hasEntry ? (m.enabled ? '点击停用' : '点击启用（显式授权装载）') : 'manifest 非法或缺 index.js，不可启用'}"></div>
+                </div>
+              </div>
+            </div>`;
+      }).join('')}
         </div>
         <div class="sec-title muted" style="margin-top:18px">临时插件（自进化 · 仅驻内存 · 重启即失）</div>
         <div class="card temp-plug-card">
@@ -2219,7 +2286,7 @@
         // 进入设置页时重拉记忆域与沙箱日志：SubAgent 执行完会随时往 worker 域落结论，
         // 只靠启动时拉一次，用户看到的就是「空的」，会误判成功能没生效。
         if (id === 'settings') { refreshMemoryDomain(); refreshMemorySummarize(); refreshSandboxLog(); }
-        if (id === 'plugins') refreshConnectors();
+        if (id === 'plugins') { refreshConnectors(); refreshMarket(); }
         render();
         break;
       }
@@ -2761,6 +2828,36 @@
           }).catch(() => {});
         } else toast('外部链接打开未接入', 'warn');
         break;
+
+      /* 本地插件市场（PRD FR-3） */
+      case 'market-refresh': refreshMarket(); break;
+      case 'market-open-dir':
+        if (typeof bridge.openMarketDir !== 'function') { toast('未接入', 'warn'); break; }
+        bridge.openMarketDir().then((r) => {
+          if (!r || !r.ok) toast(String(r && r.reason || '无法打开插件目录'), 'err');
+          else toast('已在系统文件管理器打开插件目录', 'ok');
+        }).catch((err) => toast(`打开失败：${err && err.message || err}`, 'err'));
+        break;
+      case 'market-local-toggle': {
+        const item = state.market.items.find((x) => x.dir === id);
+        const next = !(item && item.enabled);
+        if (item) state.market.busy = id;
+        if (typeof bridge.setMarketPluginEnabled !== 'function') { toast('未接入', 'warn'); break; }
+        bridge.setMarketPluginEnabled(id, next).then((r) => {
+          if (!r || r.ok === false) {
+            toast(String(r && r.reason || '操作失败'), 'err');
+          } else if (r.state && r.state.active) {
+            toast(`已启用并装载：${r.state.manifest && r.state.manifest.name || id}`, 'ok');
+          } else if (r.state && r.state.enabled) {
+            toast('装载完成但未激活（注入的依赖未满足）', 'warn');
+          } else {
+            toast('已停用（逆回滚完成，无残留）', 'ok');
+          }
+          refreshMarket();
+        }).catch((err) => toast(`操作失败：${err && err.message || err}`, 'err'));
+        break;
+      }
+      case 'market-local-nav': break;
 
       /* T-P6-1 观雅集技能市场 */
       case 'guanji-token': {

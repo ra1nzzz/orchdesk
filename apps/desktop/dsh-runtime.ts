@@ -441,6 +441,139 @@ export function getService<T>(name: string): T | null {
 }
 
 // ---------------------------------------------------------------------------
+// 插件市场 · 本地目录（PRD FR-3）：扫描 + 与内置插件同形的热插拔
+// ---------------------------------------------------------------------------
+
+import { validateMarketManifest, isMarketDirName, MARKET_DIR_NAME, type MarketManifest } from './plugin-market';
+
+export interface MarketPluginInfo {
+  /** 目录名 = 稳定 id（manifest.name 只是展示名，可重名）。 */
+  dir: string;
+  manifest: MarketManifest | null;
+  manifestOk: boolean;
+  hasEntry: boolean;
+  error: string;
+  /** 用户意愿（持久化）。 */
+  enabled: boolean;
+  /** 实际运行态（fiber.state === 2）。 */
+  active: boolean;
+}
+
+export function marketDir(): string {
+  return path.join(getDataDir(), MARKET_DIR_NAME);
+}
+
+/**
+ * 扫描本地插件目录。只读文件系统与 manifest，**不执行任何插件代码** ——
+ * 装载必须由用户显式启用触发（fail-closed）。
+ */
+export function listMarketPlugins(enabledMap: Record<string, boolean>): MarketPluginInfo[] {
+  const root = marketDir();
+  if (!fs.existsSync(root)) return [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch (err) {
+    console.warn('[orchdesk] 插件目录扫描失败:', (err as Error).message);
+    return [];
+  }
+  const out: MarketPluginInfo[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || !isMarketDirName(e.name)) continue;
+    const dir = e.name;
+    const base = path.join(root, dir);
+    const info: MarketPluginInfo = {
+      dir, manifest: null, manifestOk: false, hasEntry: false, error: '',
+      enabled: enabledMap[dir] === true, active: fibers.has(`market:${dir}`) && fibers.get(`market:${dir}`)?.state === 2,
+    };
+    const entryPath = path.join(base, 'index.js');
+    info.hasEntry = fs.existsSync(entryPath);
+    const manifestPath = path.join(base, 'manifest.json');
+    try {
+      const check = validateMarketManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf-8')), dir);
+      if (check.ok) { info.manifest = check.manifest; info.manifestOk = true; }
+      else info.error = check.error;
+    } catch (err) {
+      info.error = `${dir}: manifest.json 读取失败（${(err as Error).message}）`;
+    }
+    if (info.manifestOk && !info.hasEntry) info.error = `${dir}: 缺少 index.js（manifest 有但产物没有）`;
+    out.push(info);
+  }
+  return out;
+}
+
+/**
+ * 启用 / 停用一个本地市场插件。与 setPluginEnabled 同一套机制：
+ * 启用 = dynamicImport + normalizeInject + ctx.plugin（fiber 句柄入 fibers 表）；
+ * 停用 = fiber.dispose（逆回滚，无残留）。CJS / ESM 产物都吃（dynamic import
+ * 加载 CJS 时模块在 default 上）。
+ */
+export async function setMarketPluginEnabled(dir: string, enabled: boolean): Promise<MarketPluginInfo> {
+  if (!runtime) throw new Error('运行时未启动');
+  if (!isMarketDirName(dir)) throw new Error(`非法插件目录名: ${String(dir)}`);
+  const infos = listMarketPlugins({});
+  const info = infos.find((i) => i.dir === dir);
+  if (!info) throw new Error(`插件目录不存在: ${dir}`);
+  if (!info.manifestOk || !info.hasEntry) throw new Error(info.error || `插件 ${dir} 不可启用`);
+
+  const key = `market:${dir}`;
+  const fiber = fibers.get(key);
+
+  if (enabled && info.active) {
+    // 已激活：幂等返回，不要重复 ctx.plugin（会注册第二份 effect）。
+    return { ...info, enabled: true, active: true };
+  }
+  if (enabled && !info.active) {
+    if (fiber) { // 停用残留（dispose 未完成）：先清
+      try { await Promise.resolve(fiber.dispose?.()); } catch { /* 停用失败的残留由 dispose 兜 */ }
+      fibers.delete(key);
+    }
+    const entryPath = path.join(marketDir(), dir, 'index.js');
+    const mod = (await dynamicImport(pathToFileUrl(entryPath))) as Record<string, unknown>;
+    const raw = (mod.default && typeof mod.default === 'object' ? mod.default : mod) as Record<string, unknown>;
+    const plugin = normalizeInject(raw);
+    const config = typeof plugin.Config === 'function'
+      ? (plugin.Config as (c: unknown) => unknown)({})
+      : undefined;
+    type CordisPlugin = Parameters<Context['plugin']>[0];
+    const f = runtime.ctx.plugin(plugin as unknown as CordisPlugin, config as never) as unknown as FiberLike;
+    fibers.set(key, f);
+    await settle();
+    const st = f.state;
+    if (st !== 2) {
+      fibers.delete(key);
+      console.warn(`[orchdesk] 市场插件 ${dir} 未激活：fiber.state=${st}`);
+      return { ...info, enabled: true, active: false, error: `装载完成但未激活（fiber.state=${st}，注入的依赖未满足）` };
+    }
+    console.log(`[orchdesk] 市场插件 ${dir} 已启用`);
+    return { ...info, enabled: true, active: true, error: '' };
+  }
+  // 停用
+  if (fiber) {
+    if (typeof fiber.dispose === 'function') await Promise.resolve(fiber.dispose());
+    fibers.delete(key);
+  }
+  console.log(`[orchdesk] 市场插件 ${dir} 已停用`);
+  return { ...info, enabled: false, active: false };
+}
+
+/** 启动时回灌：把持久化里 enabled=true 的市场插件逐一装载（单插件失败不阻断其余）。 */
+export async function startupMarketPlugins(enabledMap: Record<string, boolean>): Promise<{ dir: string; ok: boolean; error?: string }[]> {
+  const results: { dir: string; ok: boolean; error?: string }[] = [];
+  if (!runtime) return results;
+  for (const [dir, on] of Object.entries(enabledMap)) {
+    if (!on) continue;
+    try {
+      const st = await setMarketPluginEnabled(dir, true);
+      results.push({ dir, ok: st.active, error: st.error || undefined });
+    } catch (err) {
+      results.push({ dir, ok: false, error: (err as Error).message });
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // 挂点桥接（ADR-0008）
 // ---------------------------------------------------------------------------
 // PLAN T-P1-5 原设想主会话完整走 dsh AgentLoop（ctx.agents.followup 事件驱动）。
