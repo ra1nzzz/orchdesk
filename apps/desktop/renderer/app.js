@@ -107,11 +107,8 @@
     { n: '邮件助手', d: 'SMTP/IMAP 收发', caps: ['mail.send', 'mail.read'], auth: 1 },
     { n: '数据可视化', d: 'Chart.js 图表生成', caps: ['chart.render'], auth: 0 }
   ];
-  const CONNECTORS = [
-    { n: 'GitHub', d: '代码托管', on: 1 }, { n: '飞书', d: '协作平台', on: 0 },
-    { n: '企业微信', d: '企业通讯', on: 0 }, { n: '腾讯文档', d: '在线文档', on: 0 },
-    { n: 'Notion', d: '知识管理', on: 0 }, { n: 'Linear', d: '项目管理', on: 0 }, { n: '钉钉', d: '企业通讯', on: 0 }
-  ];
+  // 连接器目录已移至后端注册表（PRD FR-3，apps/desktop/connector-registry.ts）。
+  // 此前的静态数组带 on:1 —— GitHub 被硬编码成「已连」，是纯假状态，已删。
 
   // 模型池：仅来自真实配置（设置页添加的提供商）；无配置 = 空池，UI 显示"选择模型"
   let MODELS = [];
@@ -307,6 +304,10 @@
     // 记忆摘要方式（FR-10）：llm = 模型摘要，extractive = 抽取式兜底。
     // 必须显式展示 —— 否则「自动转储其实一直在兜底」这种降级无从发现。
     memorySummarize: { mode: 'extractive', provider: '', model: '', seam: false, loaded: false },
+    // 连接器（PRD FR-3）：真实后端注册表（凭证加密存储 + 保存即探测）。
+    // loaded=false 时侧栏显示「未接入」，不能拿空数组冒充「都没配置」。
+    connectors: { items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 }, loaded: false, expanded: null },
+    connAudit: { entries: [], stats: { total: 0, saves: 0, clears: 0, tests: 0, fails: 0 }, total: 0, max: 200, loaded: false },
   };
 
   const $ = (s) => document.querySelector(s);
@@ -517,6 +518,55 @@
       };
       if (state.page === 'settings') render();
     }).catch(() => {});
+  }
+
+  /* ---------- 连接器（PRD FR-3） ---------- */
+  /** 重拉连接器目录 + 状态。桥不可用时保持 loaded=false，UI 显「未接入」。 */
+  function refreshConnectors() {
+    if (typeof bridge.getConnectors !== 'function') {
+      state.connectors = { ...state.connectors, loaded: false };
+      if (state.page === 'plugins') render();
+      return;
+    }
+    bridge.getConnectors().then((r) => {
+      if (!r || typeof r !== 'object' || !Array.isArray(r.items)) return;
+      state.connectors = {
+        items: r.items,
+        stats: r.stats || { total: 0, configured: 0, tested: 0, ok: 0 },
+        loaded: true,
+        expanded: state.connectors.expanded,
+      };
+      if (state.page === 'plugins') render();
+    }).catch(() => {
+      state.connectors = { ...state.connectors, loaded: false };
+      if (state.page === 'plugins') render();
+    });
+    refreshConnectorAudit();
+  }
+
+  function refreshConnectorAudit() {
+    if (typeof bridge.getConnectorAudit !== 'function') return;
+    bridge.getConnectorAudit({ limit: 30 }).then((r) => {
+      if (!r || typeof r !== 'object' || !Array.isArray(r.entries)) return;
+      state.connAudit = {
+        entries: r.entries,
+        stats: r.stats || { total: 0, saves: 0, clears: 0, tests: 0, fails: 0 },
+        total: Number(r.total) || r.entries.length,
+        max: Number(r.max) || state.connAudit.max,
+        loaded: true,
+      };
+      if (state.page === 'plugins') render();
+    }).catch(() => {});
+  }
+
+  /** 连接器状态徽标。manual（无自动探测）与 http 的「未验证」语义不同，不能共用一个词。 */
+  function connBadge(c) {
+    const st = c.state || {};
+    if (!st.configured) return '<span class="ib badge">未配置</span>';
+    if (c.manual) return st.lastTestOk === true ? '<span class="ib badge ok">已验证</span>' : '<span class="ib badge warn">已保存 · 不可自动验证</span>';
+    if (st.lastTestOk === true) return '<span class="ib badge ok">已连接</span>';
+    if (st.lastTestOk === false) return '<span class="ib badge warn">连通失败</span>';
+    return '<span class="ib badge warn">已配置 · 未验证</span>';
   }
 
   /* ---------- PRD FR-4.2 数据目录内容清单 ---------- */
@@ -1134,13 +1184,17 @@
       // 委派树结果（composeTeam 返回后渲染；CEO→Director→Worker 三层）
       const deleg = (state.delegationLast?.nodes || []).map((n) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(String(n.label || n.id))}</span><span class="ib badge ${String(n.layer) === 'ceo' ? 'ceo' : 'info'}">${esc(String(n.layer || ''))}</span><span class="ib badge ${String(n.status) === 'done' ? 'ok' : 'warn'}">${esc(String(n.status || ''))}</span></div>`).join('');
       const expertsHtml = experts + (deleg ? sec('delegation', '最近一次委派树', (state.delegationLast?.nodes || []).length, deleg) : '');
-      // 连接器：尚无后端，全部标「未接入」（此前 GitHub 硬编码 on:1 显示为「已连」，是假状态）
-      const connectors = CONNECTORS.map((c) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(c.n)}</span><span class="ib badge">未接入</span></div>`).join('');
+      // 连接器侧栏：真实后端状态。桥不可用（loaded=false）显「未接入」，
+      // 与「已接入但都没配置」必须区分 —— 把 null 当空数组是本项目踩过三次的坑。
+      const connItems = state.connectors.loaded
+        ? state.connectors.items.map((c) => `<div class="ss-i ${c.state && c.state.lastTestOk === true ? 'on' : ''}" data-action="conn-cfg" data-id="${esc(c.id)}"><span class="id"></span><span class="in">${esc(c.name)}</span>${connBadge(c)}</div>`).join('')
+        : '<div class="ss-i"><span class="id"></span><span class="in">连接器注册表</span><span class="ib badge">未接入</span></div>';
+      const connCount = state.connectors.loaded ? state.connectors.stats.total : 0;
       return sec('builtin', '内置插件', PLUGINS.length, builtIn) +
         sec('market', '插件市场', PLUGIN_MARKET.length, market) +
         sec('skills', '技能市场', SKILLS_MARKET.length, skills) +
         sec('experts', '专家·专家团', expertList().length + teamList().length, expertsHtml) +
-        sec('connectors', '连接器', CONNECTORS.length, connectors);
+        sec('connectors', '连接器', connCount, connItems);
     },
     main() {
       return `<div class="main-inner"><h1 class="pg">插件</h1><div class="pg-sub">一切皆插件——能力以插件形式挂载；启用 = 注册 effect，停用 = 注册回滚（无残留）。</div>
@@ -1166,6 +1220,51 @@
             <div class="row" style="margin-top:6px"><button class="btn sm">查看审计日志</button><button class="btn sm ghost" data-action="plug-unload">卸载并回滚</button></div>
           </div>
         </div>`).join('')}
+        <div class="sec-title" style="margin-top:18px">连接器（PRD FR-3）</div>
+        <div class="card" style="padding:12px">
+          <div class="faint" style="margin-bottom:8px">第三方服务接入：凭证仅本地<b>加密</b>保存（密钥存系统安全存储），保存即自动探测一次连通性。${state.connectors.loaded ? `共 ${state.connectors.stats.total} 个 · 已配置 ${state.connectors.stats.configured} · 连通 ${state.connectors.stats.ok}` : ''}</div>
+          ${!state.connectors.loaded
+    ? '<div class="faint">连接器注册表未接入（主进程桥不可用）</div>'
+    : state.connectors.items.map((c) => {
+      const st = c.state || {};
+      const open = state.connectors.expanded === c.id;
+      const lastMsg = st.lastTestAt
+        ? `<span class="faint" style="font-size:11px">最近探测：${st.lastTestOk === true ? '<span style="color:var(--ok)">✓</span>' : st.lastTestOk === false ? '✗' : '·'} ${esc(st.lastTestMessage || '')}</span>`
+        : (c.manual && st.configured ? `<span class="faint" style="font-size:11px">${esc(c.manualHint || '已保存凭证（无自动探测）')}</span>` : '');
+      const formRows = c.fields.map((f) => {
+        const val = (c.values && c.values[f.key]) || '';
+        const inputType = f.type === 'secret' ? 'password' : 'text';
+        return `<div class="mb-row"><label>${esc(f.label)}${f.required ? '' : ' <span class="faint">（选填）</span>'}</label><input class="inp" type="${inputType}" id="connf-${esc(c.id)}-${esc(f.key)}" placeholder="${esc(f.placeholder || '')}" value="${esc(val)}">${f.hint ? `<div class="faint" style="font-size:10.5px;margin-top:2px">${esc(f.hint)}</div>` : ''}</div>`;
+      }).join('');
+      return `<div class="plug" data-cid="${esc(c.id)}" ${open ? '' : ''}>
+            <div class="ph">
+              <div style="min-width:0;flex:1">
+                <div class="ptitle">${esc(c.name)} ${connBadge(c)} ${c.caps.map((cap) => `<span class="badge cap">${esc(cap)}</span>`).join('')}</div>
+                <div class="pdesc">${esc(c.desc)}</div>
+                <div class="pmeta">${lastMsg}</div>
+              </div>
+              <div class="pactions">
+                ${c.manual ? '' : `<button class="btn sm" data-action="conn-test" data-id="${esc(c.id)}" ${st.configured ? '' : 'disabled'}>测试</button>`}
+                <button class="btn sm" data-action="conn-cfg" data-id="${esc(c.id)}">${open ? '收起' : '配置'}</button>
+              </div>
+            </div>
+            ${open ? `<div class="pbody" style="display:block">
+              ${formRows}
+              <div class="row" style="margin-top:8px;align-items:center">
+                <button class="btn sm primary" data-action="conn-save" data-id="${esc(c.id)}">保存${c.manual ? '' : '并测试'}</button>
+                <button class="btn sm ghost" data-action="conn-clear" data-id="${esc(c.id)}" ${st.configured ? '' : 'disabled'}>清除凭证</button>
+                <span class="faint" style="font-size:11px;margin-left:auto;cursor:pointer" data-action="open-external" data-url="${esc(c.docsUrl)}">凭证获取文档 ↗</span>
+              </div>
+              ${c.manual ? `<div class="faint" style="font-size:11px;margin-top:6px">${esc(c.manualReason || '')}</div>` : ''}
+            </div>` : ''}
+          </div>`;
+    }).join('')}
+          ${state.connAudit.entries.length ? `<div class="sec-title" style="margin-top:12px;font-size:12px">审计（保存/清除/探测，${state.connAudit.total} 条 · 上限 ${state.connAudit.max}）</div>
+          <div style="max-height:180px;overflow:auto">
+            ${state.connAudit.entries.map((e) => `<div class="row" style="padding:3px 0;border-top:1px solid var(--border)"><span class="mono" style="font-size:11px;width:86px">${esc(e.id)}</span><span class="badge ${e.action === 'test' ? 'ok' : e.action === 'test-fail' ? 'warn' : ''}" style="margin:0 6px">${esc(e.action)}</span><span style="flex:1;font-size:11.5px">${esc(e.message)}</span><span class="faint mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString()}</span></div>`).join('')}
+          </div>
+          <div class="row" style="margin-top:6px"><button class="btn sm ghost" data-action="conn-audit-clear">清空审计</button></div>` : ''}
+        </div>
         <div class="sec-title muted" style="margin-top:18px">临时插件（自进化 · 仅驻内存 · 重启即失）</div>
         <div class="card temp-plug-card">
           <div class="faint" style="margin-bottom:8px">Agent 运行时自建的临时插件；信任级 = Shell，须沙箱内运行，不持久化。加载前经静态分析 + CONFIRM（fail-closed）。</div>
@@ -2120,6 +2219,7 @@
         // 进入设置页时重拉记忆域与沙箱日志：SubAgent 执行完会随时往 worker 域落结论，
         // 只靠启动时拉一次，用户看到的就是「空的」，会误判成功能没生效。
         if (id === 'settings') { refreshMemoryDomain(); refreshMemorySummarize(); refreshSandboxLog(); }
+        if (id === 'plugins') refreshConnectors();
         render();
         break;
       }
@@ -2612,6 +2712,55 @@
       case 'plug-unload': toast('已卸载并回滚注册（无残留）', 'warn'); break;
       case 'market': toast(`「${el.dataset.n}」请到 设置-技能市场（观雅集）完成安装与能力审查`, 'warn'); break;
       case 'market-auth': toast(`「${el.dataset.n}」需授权：请在 设置-技能市场 安装时于确认弹窗中授权高危能力`, 'warn'); break;
+
+      /* 连接器（PRD FR-3） */
+      case 'conn-cfg':
+        state.connectors.expanded = state.connectors.expanded === id ? null : id;
+        if (state.page === 'plugins') render();
+        break;
+      case 'conn-test': {
+        el.textContent = '测试中…'; el.disabled = true;
+        bridge.connectorTest(id).then((r) => {
+          if (!r || r.ok === false && r.reason) { toast(String(r && r.reason || '探测失败'), 'err'); }
+          else toast(r.message || (r.ok ? '连通性正常' : '探测失败'), r.ok ? 'ok' : 'warn');
+          refreshConnectors();
+        }).catch((err) => { toast(`探测失败：${err && err.message || err}`, 'err'); refreshConnectors(); });
+        break;
+      }
+      case 'conn-save': {
+        const inputs = document.querySelectorAll(`[id^="connf-${id}-"]`);
+        const creds = {};
+        inputs.forEach((inp) => { creds[inp.id.replace(`connf-${id}-`, '')] = inp.value; });
+        el.textContent = '保存中…'; el.disabled = true;
+        bridge.connectorSave(id, creds).then((r) => {
+          if (!r || r.ok === false) { toast(String(r && r.reason || '保存失败'), 'err'); }
+          else if (r.configured === false) toast('凭证已保存（必填字段不完整）', 'warn');
+          else if (r.probe) toast(r.probe.manual ? String(r.probe.message || '已保存') : (r.probe.ok ? `已保存 · ${r.probe.message}` : `已保存 · ${r.probe.message}`), r.probe.manual || r.probe.ok ? 'ok' : 'warn');
+          else toast('凭证已保存', 'ok');
+          refreshConnectors();
+        }).catch((err) => { toast(`保存失败：${err && err.message || err}`, 'err'); refreshConnectors(); });
+        break;
+      }
+      case 'conn-clear': {
+        bridge.connectorClear(id).then((r) => {
+          toast(r && r.ok ? '凭证已清除' : String(r && r.reason || '清除失败'), r && r.ok ? 'ok' : 'err');
+          refreshConnectors();
+        }).catch((err) => toast(`清除失败：${err && err.message || err}`, 'err'));
+        break;
+      }
+      case 'conn-audit-clear':
+        bridge.clearConnectorAudit().then((r) => {
+          toast(r && r.ok ? `已清空 ${r.cleared} 条审计` : '清空失败', r && r.ok ? 'ok' : 'err');
+          refreshConnectorAudit();
+        }).catch(() => {});
+        break;
+      case 'open-external':
+        if (typeof bridge.openExternal === 'function') {
+          bridge.openExternal(el.dataset.url || '').then((r) => {
+            if (!r || !r.ok) toast(String(r && r.reason || '无法打开链接'), 'err');
+          }).catch(() => {});
+        } else toast('外部链接打开未接入', 'warn');
+        break;
 
       /* T-P6-1 观雅集技能市场 */
       case 'guanji-token': {

@@ -74,6 +74,42 @@ async function run() {
       { id: 'sl-2', ts: Date.now() - 2000, tool: 'file_write', kind: 'approval', target: 'D:/work/report.md', decision: 'allowed', reason: '已写入 report.md (12 字节)', mode: 'default', sessionId: 's1' },
       { id: 'sl-3', ts: Date.now() - 1000, tool: 'web_fetch', kind: 'network', target: 'https://example.com/api', decision: 'error', reason: 'fetch failed', mode: 'trusted' },
     ];
+    // 连接器种子（PRD FR-3）：三种状态齐全 —— 已连通 / 已配置未验证 / 未配置。
+    // manual 连接器（腾讯文档）用于验证「不可自动验证」不伪装成「连通失败」。
+    window.__conn = {
+      items: [
+        {
+          id: 'github', name: 'GitHub', kind: 'code', desc: '代码托管 · Issue / PR / 仓库读写',
+          docsUrl: 'https://docs.github.com', manual: false, manualReason: '', manualHint: '',
+          fields: [{ key: 'token', label: '个人访问令牌 (PAT)', type: 'secret', placeholder: 'ghp_…', hint: '', required: true }],
+          values: { token: 'good-token-1234' },
+          state: { id: 'github', configured: true, savedAt: Date.now() - 8000, lastTestAt: Date.now() - 5000, lastTestOk: true, lastTestMessage: '已连接：octocat' },
+          caps: ['git.read'],
+        },
+        {
+          id: 'feishu', name: '飞书', kind: 'im', desc: '协作平台 · 消息 / 多维表格',
+          docsUrl: 'https://open.feishu.cn', manual: false, manualReason: '', manualHint: '',
+          fields: [
+            { key: 'appId', label: 'App ID', type: 'text', placeholder: 'cli_…', hint: '', required: true },
+            { key: 'appSecret', label: 'App Secret', type: 'secret', placeholder: '…', hint: '', required: true },
+          ],
+          values: { appId: 'cli_e2e', appSecret: '' },
+          state: { id: 'feishu', configured: false, savedAt: null, lastTestAt: null, lastTestOk: null, lastTestMessage: '' },
+          caps: ['im.send'],
+        },
+        {
+          id: 'tencent-docs', name: '腾讯文档', kind: 'doc', desc: '在线文档 · 目前无公开探测端点',
+          docsUrl: 'https://docs.qq.com/openapi', manual: true,
+          manualReason: '腾讯文档开放 API 仅面向企业版授权，且未提供无副作用的只读探测端点。',
+          manualHint: '已保存凭证（无自动探测，状态不可验证）',
+          fields: [{ key: 'token', label: '访问令牌', type: 'secret', placeholder: '…', hint: '', required: true }],
+          values: { token: '' },
+          state: { id: 'tencent-docs', configured: false, savedAt: null, lastTestAt: null, lastTestOk: null, lastTestMessage: '' },
+          caps: ['doc.read'],
+        },
+      ],
+      audit: [],
+    };
     window.orchdesk = {
       loadSessions: () => Promise.resolve(JSON.parse(JSON.stringify(seedSessions))),
       persistSessions: (arr) => Promise.resolve({ ok: true }),
@@ -199,6 +235,87 @@ async function run() {
         { seam: true, provider: '', model: '', mode: 'extractive' },
         window.__summarize || {},
       )),
+      // PRD FR-3：连接器注册表。种子覆盖三种状态：已连通 / 已配置未验证 / 未配置。
+      // 保存 / 测试 / 清除都会真改 window.__conn 里的状态（UI 断言「点完之后状态变了」）。
+      // 回显需与主进程同款脱敏：secret 只留末 4 位（否则输入框里是明文，测试不了脱敏链路）
+      getConnectors: () => Promise.resolve({
+        items: window.__conn.items.map((c) => Object.assign({}, c, {
+          values: Object.assign({}, c.values, Object.fromEntries(c.fields
+            .filter((f) => f.type === 'secret' && c.values[f.key])
+            .map((f) => [f.key, '••••' + String(c.values[f.key]).slice(-4)]))),
+        })),
+        stats: {
+          total: window.__conn.items.length,
+          configured: window.__conn.items.filter((c) => c.state.configured).length,
+          tested: window.__conn.items.filter((c) => c.state.lastTestOk !== null).length,
+          ok: window.__conn.items.filter((c) => c.state.lastTestOk === true).length,
+        },
+      }),
+      connectorSave: (id, creds) => {
+        const c = window.__conn.items.find((x) => x.id === id);
+        if (!c) return Promise.resolve({ ok: false, reason: 'unknown-connector' });
+        // 与主进程同款保护：脱敏回显值按「未改动」处理
+        for (const k of Object.keys(creds || {})) {
+          if (!/^••••/.test(String(creds[k]))) c.values[k] = String(creds[k] || '');
+        }
+        c.state.configured = c.fields.filter((f) => f.required !== false).every((f) => String(c.values[f.key] || ''));
+        c.state.savedAt = Date.now();
+        c.state.lastTestAt = null; c.state.lastTestOk = null; c.state.lastTestMessage = '';
+        const manual = c.id === 'tencent-docs';
+        if (!manual && c.state.configured) {
+          // mock 探测：任一字段值含 'good' 即成功（不同连接器字段名不同，不能写死 token）
+          const ok = Object.values(c.values).some((v) => /good/.test(String(v || '')));
+          c.state.lastTestAt = Date.now(); c.state.lastTestOk = ok;
+          c.state.lastTestMessage = ok ? '已连接：e2e-user' : 'HTTP 401 · Bad credentials';
+          window.__conn.audit.push({ id: c.id, ts: Date.now(), action: ok ? 'test' : 'test-fail', message: c.state.lastTestMessage });
+        }
+        window.__conn.audit.push({ id: c.id, ts: Date.now(), action: 'save', message: '凭证已保存' });
+        return Promise.resolve({
+          ok: true, configured: c.state.configured, state: Object.assign({}, c.state),
+          probe: manual ? { ok: false, message: '腾讯文档开放 API 仅面向企业版授权…', manual: true }
+            : { ok: c.state.lastTestOk === true, message: c.state.lastTestMessage },
+        });
+      },
+      connectorClear: (id) => {
+        const c = window.__conn.items.find((x) => x.id === id);
+        if (!c) return Promise.resolve({ ok: false, reason: 'unknown-connector' });
+        c.state = { id, configured: false, savedAt: null, lastTestAt: null, lastTestOk: null, lastTestMessage: '' };
+        for (const k of Object.keys(c.values)) c.values[k] = '';
+        window.__conn.audit.push({ id: c.id, ts: Date.now(), action: 'clear', message: '凭证已清除' });
+        return Promise.resolve({ ok: true, state: Object.assign({}, c.state) });
+      },
+      connectorTest: (id) => {
+        const c = window.__conn.items.find((x) => x.id === id);
+        if (!c) return Promise.resolve({ ok: false, reason: 'unknown-connector' });
+        if (c.id === 'tencent-docs') {
+          return Promise.resolve({ ok: false, manual: true, message: '腾讯文档开放 API 仅面向企业版授权…', state: Object.assign({}, c.state) });
+        }
+        if (!c.state.configured) {
+          const msg = '缺少必填凭证字段：token';
+          window.__conn.audit.push({ id: c.id, ts: Date.now(), action: 'test-fail', message: msg });
+          return Promise.resolve({ ok: false, message: msg, state: Object.assign({}, c.state) });
+        }
+        const ok = Object.values(c.values).some((v) => /good/.test(String(v || '')));
+        c.state.lastTestAt = Date.now(); c.state.lastTestOk = ok;
+        c.state.lastTestMessage = ok ? '已连接：e2e-user' : 'HTTP 401 · Bad credentials';
+        window.__conn.audit.push({ id: c.id, ts: Date.now(), action: ok ? 'test' : 'test-fail', message: c.state.lastTestMessage });
+        return Promise.resolve({ ok, message: c.state.lastTestMessage, state: Object.assign({}, c.state) });
+      },
+      getConnectorAudit: () => {
+        const all = window.__conn.audit || [];
+        const entries = all.slice().reverse().slice(0, 30);
+        return Promise.resolve({
+          entries,
+          stats: { total: all.length, saves: all.filter((e) => e.action === 'save').length, clears: all.filter((e) => e.action === 'clear').length, tests: all.filter((e) => e.action === 'test').length, fails: all.filter((e) => e.action === 'test-fail').length },
+          total: all.length, max: 200,
+        });
+      },
+      clearConnectorAudit: () => {
+        const n = (window.__conn.audit || []).length;
+        window.__conn.audit = [];
+        return Promise.resolve({ ok: true, cleared: n });
+      },
+      openExternal: (url) => Promise.resolve(/^https?:\/\//.test(String(url)) ? { ok: true } : { ok: false, reason: '仅允许 http/https' }),
       // PRD FR-9：授权白名单（会话 / 永久，可查看可撤销）
       listGrants: () => Promise.resolve(window.__grants || []),
       addGrant: (input) => {
@@ -839,6 +956,101 @@ async function run() {
   await page.locator('[data-action="nav"][data-id="settings"]').first().click();
   await page.waitForTimeout(800);
   await assert(/摘要状态未接入/.test(await memCard.innerText()), '桥不可用时显示「摘要状态未接入」');
+
+  // ================================================================
+  // 测试组 12：连接器（PRD FR-3）
+  // 此前连接器是硬编码的静态数组 —— GitHub 写死 on:1 显示「已连」，纯假状态。
+  // 这组验证：真实状态渲染 / 展开配置 / 保存即探测 / manual 诚实标注 / 审计。
+  // ================================================================
+  console.log('📋 测试组 12：连接器（FR-3）');
+
+  await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+  await page.waitForTimeout(900);
+
+  await assert(await page.locator('[data-action="conn-cfg"]').count() >= 3,
+    `连接器行已渲染（count=${await page.locator('[data-action="conn-cfg"]').count()}）`);
+  // 已连通的 GitHub：ok 徽标 + 最近探测结论
+  const ghRow = page.locator('.plug[data-cid="github"]');
+  await assert(/已连接/.test(await ghRow.innerText()), 'GitHub 显示「已连接」徽标');
+  await assert(/已连接：octocat/.test(await ghRow.innerText()), 'GitHub 显示最近探测结论（身份）');
+  // 未配置的飞书：不是「未接入」也不是假「已连」
+  const fsRow = page.locator('.plug[data-cid="feishu"]');
+  await assert(/未配置/.test(await fsRow.innerText()), '飞书未配置如实显示');
+  // 统计行
+  await assert(/已配置 1/.test(await page.locator('.card:has(.plug[data-cid="github"])').innerText()) ||
+    /已配置 1/.test((await page.locator('.main-inner').innerText())), '统计行显示已配置数');
+
+  // 展开飞书配置：字段渲染（secret 用 password、text 用 text）
+  await page.locator('[data-action="conn-cfg"][data-id="feishu"]').first().click();
+  await page.waitForTimeout(500);
+  const appIdInput = page.locator('#connf-feishu-appId');
+  const secretInput = page.locator('#connf-feishu-appSecret');
+  await assert(await appIdInput.count() === 1 && await secretInput.count() === 1, '展开后字段输入框渲染');
+  await assert(await appIdInput.getAttribute('type') === 'text', 'text 字段用 text 输入');
+  await assert(await secretInput.getAttribute('type') === 'password', 'secret 字段用 password 输入');
+
+  // 保存（appSecret 填 bad）：mock 判 401 → 状态变「连通失败」且审计记 test-fail
+  await appIdInput.fill('cli_e2e');
+  await secretInput.fill('bad-secret');
+  await page.locator('[data-action="conn-save"][data-id="feishu"]').click();
+  await page.waitForTimeout(900);
+  await assert(/连通失败/.test(await page.locator('.plug[data-cid="feishu"]').innerText()),
+    '探测失败后徽标变「连通失败」（保存即探测，不显示假「已配置」）');
+  await assert(/Bad credentials/.test(await page.locator('.plug[data-cid="feishu"]').innerText()),
+    '失败原因可见（排查凭证问题的依据）');
+
+  // 修好凭证再存：变「已连接」
+  await page.locator('#connf-feishu-appSecret').fill('good-secret');
+  await page.locator('[data-action="conn-save"][data-id="feishu"]').click();
+  await page.waitForTimeout(900);
+  await assert(/已连接/.test(await page.locator('.plug[data-cid="feishu"]').innerText()), '修好凭证后徽标变「已连接」');
+
+  // 脱敏回显写回保护：只改一个字段提交，secret 回显值（••••）不被当真凭证。
+  // 注意：保存后表单仍处于展开态（expanded 状态保留），再点 conn-cfg 会把它收起。
+  await page.waitForTimeout(400);
+  const secretVal = await page.locator('#connf-feishu-appSecret').inputValue();
+  await assert(/^••••/.test(secretVal), `secret 回显为脱敏串（实际 ${secretVal}）`);
+  await page.locator('#connf-feishu-appId').fill('cli_e2e_v2');
+  await page.locator('[data-action="conn-save"][data-id="feishu"]').click();
+  await page.waitForTimeout(900);
+  const savedValues = await page.evaluate(() => {
+    const c = window.__conn.items.find((x) => x.id === 'feishu');
+    return { appId: c.values.appId, secretLen: c.values.appSecret.length };
+  });
+  await assert(savedValues.appId === 'cli_e2e_v2', '改动的 text 字段已更新');
+  await assert(savedValues.secretLen > 4, '未改动的 secret 保留原值（不是被圆点覆盖）');
+
+  // manual 连接器：保存后显「不可自动验证」而非「连通失败」
+  await page.locator('[data-action="conn-cfg"][data-id="tencent-docs"]').first().click();
+  await page.waitForTimeout(400);
+  await page.locator('#connf-tencent-docs-token').fill('td-e2e-token');
+  await page.locator('[data-action="conn-save"][data-id="tencent-docs"]').click();
+  await page.waitForTimeout(900);
+  const tdText = await page.locator('.plug[data-cid="tencent-docs"]').innerText();
+  await assert(/不可自动验证/.test(tdText) && !/连通失败/.test(tdText),
+    'manual 连接器显「不可自动验证」，不伪装成「连通失败」');
+
+  // 审计：save/test-fail/test 都已记录；清空
+  await assert(await page.locator('[data-action="conn-audit-clear"]').count() === 1, '审计区有清空按钮');
+  const auditCount0 = await page.evaluate(() => window.__conn.audit.length);
+  await assert(auditCount0 >= 5, `审计已有记录（count=${auditCount0}）`);
+  await page.locator('[data-action="conn-audit-clear"]').click();
+  await page.waitForTimeout(700);
+  await assert((await page.evaluate(() => window.__conn.audit.length)) === 0, '审计已清空');
+
+  // 清除凭证 → 状态归零
+  await page.locator('[data-action="conn-clear"][data-id="tencent-docs"]').click();
+  await page.waitForTimeout(700);
+  await assert(/未配置/.test(await page.locator('.plug[data-cid="tencent-docs"]').innerText()), '清除后回到「未配置」');
+
+  // 桥不可用 → 侧栏显「未接入」，不拿空数组冒充
+  await page.evaluate(() => { delete window.orchdesk.getConnectors; });
+  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await page.waitForTimeout(400);
+  await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+  await page.waitForTimeout(900);
+  await assert(/连接器注册表未接入/.test(await page.locator('.main-inner').innerText()),
+    '桥不可用时显「未接入」');
 
   // ================================================================
   // 总结

@@ -148,6 +148,40 @@ const orchdesk = {
   clearMemoryPromotions: (): Promise<{ ok: boolean; cleared: number }> =>
     ipcRenderer.invoke('orchdesk:memory-promotions-clear'),
 
+  /** 连接器列表（PRD FR-3）：目录 + 脱敏凭证回显 + 探测状态。 */
+  getConnectors: (): Promise<{
+    items: Array<Record<string, unknown>>;
+    stats: { total: number; configured: number; tested: number; ok: number };
+  }> => ipcRenderer.invoke('orchdesk:connectors'),
+
+  /** 保存连接器凭证（保存即探测一次；脱敏回显值按「未改动」处理）。 */
+  connectorSave: (id: string, creds: Record<string, string>): Promise<{
+    ok: boolean; configured?: boolean; state?: Record<string, unknown> | null;
+    probe?: { ok: boolean; message: string; manual?: boolean } | null; reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:connector-save', id, creds),
+
+  /** 清除连接器凭证。 */
+  connectorClear: (id: string): Promise<{ ok: boolean; state?: Record<string, unknown> | null; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:connector-clear', id),
+
+  /** 用已存凭证重新探测连通性。 */
+  connectorTest: (id: string): Promise<{
+    ok: boolean; message?: string; manual?: boolean; state?: Record<string, unknown> | null; reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:connector-test', id),
+
+  /** 连接器审计。 */
+  getConnectorAudit: (query?: Record<string, unknown>): Promise<{
+    entries: Array<Record<string, unknown>>; stats: Record<string, unknown>; total: number; max: number;
+  }> => ipcRenderer.invoke('orchdesk:connector-audit', query || {}),
+
+  /** 清空连接器审计。 */
+  clearConnectorAudit: (): Promise<{ ok: boolean; cleared: number }> =>
+    ipcRenderer.invoke('orchdesk:connector-audit-clear'),
+
+  /** 打开外部链接（http/https 白名单；渲染层 <a href> 会导航窗口，不能用）。 */
+  openExternal: (url: string): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:open-external', url),
+
   /** 当前记忆摘要方式（llm = 模型摘要；extractive = 抽取式兜底）。 */
   getMemorySummarizeStatus: (): Promise<{ seam: boolean; provider: string; model: string; mode: 'llm' | 'extractive' }> =>
     ipcRenderer.invoke('orchdesk:memory-summarize-status'),

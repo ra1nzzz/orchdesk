@@ -38,6 +38,8 @@ export const DATA_FILE_NAMES = {
   sandboxLog: 'sandbox-log.json',
   /** PRD FR-10 分层记忆晋升审计（随数据目录迁移：谁把什么从哪个域升到了哪个域）。 */
   promotions: 'memory-promotions.json',
+  /** PRD FR-3 连接器注册表（加密凭证 + 探测状态 + 审计；随数据目录迁移）。 */
+  connectors: 'connectors.json',
 } as const;
 
 /** 随数据目录迁移的目录名（与 DATA_FILE_NAMES 同理，集中登记）。 */
