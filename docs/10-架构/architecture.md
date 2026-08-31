@@ -69,7 +69,7 @@ updated: 2026-08-17
 | `model-registry` | FR-3 | models 模块 | 多提供商、凭据 AES-256-GCM |
 | `skill-hub` | FR-4 | skills 模块 | 本地/Git/观雅集安装，热插拔 |
 | `prompt-lib` | FR-5 | prompts 模块 | 分类、`{skill:}` 引用、绑定矩阵 |
-| `conversation-ui` | FR-6 | conversations 模块 | 消息流、分叉、回放（接 ctx.sessions） |
+| `conversation-ui` | FR-6 | conversations 模块 | 消息流、分叉、回放——回放权威源为 OrchDesk 侧 append-only NDJSON 事件流（[ADR-0009](../70-决策/ADR-0009-session-event-log.md)）；dsh `ctx.sessions` 接管留 P7（切换前须新 ADR） |
 | `memory-layers` | FR-7 | context 模块 | 四域分层记忆 + 转储召回（TF-IDF 起步） |
 | `orchestrator` | FR-11 | 脑-手路线图 | CEO/Director/Worker 层级、调度、反馈 |
 | `intent-gateway` | FR-10 | —（新） | 挂 `agent/pre-step`，DREAM F1-F4/M1-M3/4-gate |
