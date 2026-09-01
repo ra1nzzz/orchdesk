@@ -42,7 +42,7 @@ function rendererFiles() {
 
 /** 纯逻辑模块白名单：零 electron 依赖、可 node 直测（ADR-0008 / 渲染层双环境方案）。 */
 const PURE_MODULES = [
-  'agent-runtime.ts', 'connector-registry.ts', 'credentials.ts', 'data-dir.ts',
+  'agent-runtime.ts', 'browser-tools.ts', 'connector-registry.ts', 'credentials.ts', 'data-dir.ts',
   'memory-promotion.ts', 'memory-summarize.ts', 'plugin-market.ts',
   'sandbox-log.ts', 'session-events.ts', 'usage-registry.ts',
 ];

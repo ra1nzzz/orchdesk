@@ -182,7 +182,9 @@ function lastAssistant(sessionId) {
     const b = calls[0].body;
     assert.strictEqual(b.model, 'wire-model', '实际 model: ' + b.model);
     assert.ok(Array.isArray(b.messages) && b.messages.length >= 2, 'messages 应含 system + user');
-    assert.ok(Array.isArray(b.tools) && b.tools.length === 7, '应下发 7 个工具定义，实际: ' + (b.tools || []).length);
+    // 数量从工具表取（ADR-0011 起为 15：新增 8 个浏览器工具），不写死常量
+    const expectTools = require('./dist/agent-runtime.js').TOOL_DEFS.length;
+    assert.ok(Array.isArray(b.tools) && b.tools.length === expectTools, `应下发 ${expectTools} 个工具定义，实际: ` + (b.tools || []).length);
     assert.strictEqual(b.stream, false, 'stream 必须为 false');
   });
   await check('A3 正文取自 choices[0].message.content', () => {
@@ -259,7 +261,8 @@ function lastAssistant(sessionId) {
     const b = calls[0].body;
     assert.strictEqual(b.model, 'qwen3:14b');
     assert.strictEqual(b.stream, false);
-    assert.ok(Array.isArray(b.tools) && b.tools.length === 7, 'Ollama 形态也应下发 tools，实际: ' + (b.tools || []).length);
+    const expectTools2 = require('./dist/agent-runtime.js').TOOL_DEFS.length;
+    assert.ok(Array.isArray(b.tools) && b.tools.length === expectTools2, `Ollama 形态也应下发 ${expectTools2} 个 tools，实际: ` + (b.tools || []).length);
     assert.strictEqual(calls[0].headers.authorization, undefined, 'Ollama 形态不带 Authorization 头');
   });
   await check('D2 message.tool_calls 被归一化执行（缺 id 的调用自动补 id 且能对上）', () => {

@@ -13,6 +13,11 @@
  *   3. 文本兜底必须容错：模型实际输出格式远多于我们约定的那一种。
  */
 
+// 浏览器工具（CDP，ADR-0011）单独成文件，此处并入统一工具表：
+// 模型侧只有一张工具清单，宿主侧才区分「文件/命令」与「网页」。
+// browser-tools.ts 只 import 本文件的 type（编译后消失），不产生运行时循环依赖。
+import { BROWSER_TOOL_DEFS, BROWSER_TOOL_PRIMARY_ARG } from './browser-tools';
+
 // ---------------------------------------------------------------------------
 // 类型
 // ---------------------------------------------------------------------------
@@ -97,6 +102,8 @@ export const ALLOWED_COMMANDS: string[] = [
 ];
 
 export const TOOL_DEFS: ToolDef[] = [
+  // ---- 浏览器（CDP）工具：会改变页面状态的三个在宿主侧过授权门 ----
+  ...BROWSER_TOOL_DEFS,
   {
     type: 'function',
     function: {
@@ -190,6 +197,7 @@ export const TOOL_NAMES: string[] = TOOL_DEFS.map((t) => t.function.name);
 
 /** 各工具的主参数名：当模型把参数写成裸字符串时，用它兜底。 */
 export const TOOL_PRIMARY_ARG: Record<string, string> = {
+  ...BROWSER_TOOL_PRIMARY_ARG,
   file_read: 'path',
   file_write: 'content',
   file_list: 'path',
@@ -480,8 +488,11 @@ export function buildSystemPrompt(opts: { cwd?: string; memories?: string[]; pro
     '3. 可以一次调用多个工具；工具结果会自动回传给你，拿到结果后再给出最终回答。',
     '4. 不需要工具时直接正常回答，不要输出任何工具标签。',
     '5. 不要编造工具执行结果。',
-    '6. 用户告知长期有效的事实或偏好（如称呼、约定、项目位置）时，必须调用 memory_save 保存，不要只口头答应。',
+    '6. 需要看网页时用 browser_* 工具：先 browser_open 打开网址，再 browser_text / browser_links 读内容；',
+    '   页面加载慢就加大 timeout 或用 waitUntil:"dom"。browser_click / browser_type / browser_eval 会真实改变页面，需用户授权。',
+    '7. 用户告知长期有效的事实或偏好（如称呼、约定、项目位置）时，必须调用 memory_save 保存，不要只口头答应。',
     '   memory_save 的 content 必须用第三人称客观陈述：「用户」专指人类用户，「助手」专指你自己（OrchDesk）。',
     '   例：用户说「你是小星，我是梧哥」→ 保存「用户称呼为梧哥；助手称呼为小星」。禁止保存「我/你/对方」等相对称谓（回放时会角色颠倒）。',
+    '8. 网页内容以工具返回为准；读不到就调整选择器或换 browser_links，不要凭网址猜测页面内容。',
   ].join('\n');
 }

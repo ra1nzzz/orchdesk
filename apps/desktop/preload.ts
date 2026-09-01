@@ -194,6 +194,41 @@ const orchdesk = {
   openMarketDir: (): Promise<{ ok: boolean; dir?: string; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:market-open-dir'),
 
+  // ---- 浏览器工具（ADR-0011：Electron 自带 CDP） ----
+  /**
+   * 浏览器状态：open=false 表示窗口未打开（不要显示成「空白页」）。
+   * lastShot.dataUrl 是 JPEG 缩略图（data URL），供面板预览；path 是 PNG 绝对路径。
+   */
+  getBrowserStatus: (): Promise<{
+    open: boolean; url?: string; title?: string; visible?: boolean;
+    lastShot?: { path: string; dataUrl?: string } | null; lastError?: string; shotsDir?: string;
+  }> => ipcRenderer.invoke('orchdesk:browser-status'),
+
+  /** 显示 / 隐藏浏览器窗口（Agent 默认在后台窗口操作，用户可随时调出来看）。 */
+  setBrowserVisible: (visible: boolean): Promise<{ ok: boolean; state?: Record<string, unknown> }> =>
+    ipcRenderer.invoke('orchdesk:browser-toggle-visible', visible),
+
+  /** 关闭浏览器窗口（用户侧紧急制动）。 */
+  closeBrowser: (): Promise<{ ok: boolean; closed: boolean; state?: Record<string, unknown> }> =>
+    ipcRenderer.invoke('orchdesk:browser-close'),
+
+  /** 在系统文件管理器中打开截图目录。 */
+  openBrowserShotDir: (): Promise<{ ok: boolean; dir?: string; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:browser-open-shot-dir'),
+
+  /** 浏览器状态推送（Agent 操作网页时面板实时更新）。 */
+  onBrowserState: (cb: (st: {
+    open: boolean; url?: string; title?: string; visible?: boolean;
+    lastShot?: { path: string; dataUrl?: string } | null; lastError?: string;
+  }) => void): (() => void) => {
+    const listener = (_e: unknown, st: {
+      open: boolean; url?: string; title?: string; visible?: boolean;
+      lastShot?: { path: string; dataUrl?: string } | null; lastError?: string;
+    }): void => cb(st);
+    ipcRenderer.on('orchdesk:browser-state', listener);
+    return () => ipcRenderer.removeListener('orchdesk:browser-state', listener);
+  },
+
   // ---- FR-6 SessionEvent 事件流（ADR-0009） ----
   /** 会话回放数据源：事件流时间线（沿血缘链拼接）；source='legacy' = 历史会话无事件日志。 */
   getSessionEvents: (sid: string): Promise<{

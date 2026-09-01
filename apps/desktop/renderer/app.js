@@ -43,6 +43,8 @@
     circle: '<circle cx="12" cy="12" r="9"/>',
     refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
     code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+    // 浏览器（ADR-0011）面板入口
+    globe: '<circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18z"/>',
   };
   const ic = (n, s = 20) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
   // 专家 / 专家团：**回落到多 Agent 编排插件（multi）提供的真实目录**。
@@ -246,12 +248,20 @@
       exportData: () => Promise.resolve({ ok: false, reason: '未接入' }),
       importData: () => Promise.resolve({ ok: false, reason: '未接入' }),
       openLogDir: () => Promise.resolve({ ok: false, reason: '未接入' }),
+      // 浏览器（ADR-0011）：无桥时返回 open:false —— 面板据此显示「未接入」，
+      // 不能用「空白页 / 0 张截图」冒充「浏览器已就绪只是没开」。
+      getBrowserStatus: () => Promise.resolve({ open: false }),
+      setBrowserVisible: () => Promise.resolve({ ok: false }),
+      closeBrowser: () => Promise.resolve({ ok: false, closed: false }),
+      openBrowserShotDir: () => Promise.resolve({ ok: false, reason: '未接入' }),
+      onBrowserState: () => () => {},
     };
   })();
 
   /* ---------- PRD FR-8 沙箱日志：判定结果与类型的中文名 ---------- */
   const SL_DECISION_LABELS = { all: '全部结果', allowed: '放行', denied: '拒绝', error: '出错' };
-  const SL_KIND_LABELS = { all: '全部类型', path: '路径', command: '命令', network: '网络', approval: '授权', outbound: '外发', config: '配置' };
+  // browser（ADR-0011）：内置浏览器的导航与页面内操作
+  const SL_KIND_LABELS = { all: '全部类型', path: '路径', command: '命令', network: '网络', approval: '授权', outbound: '外发', browser: '浏览器', config: '配置' };
 
   /* ---------- 状态 ---------- */
   const state = {
@@ -318,6 +328,12 @@
     },
     // FR-6 回放数据源（ADR-0009）：事件流时间线。sid 不匹配当前回放会话 = 未加载。
     sessionEvents: { sid: null, data: null, loaded: false },
+    // 浏览器（ADR-0011）：内置 CDP 浏览器窗口。loaded=false = 桥未接入；
+    // open=false = 窗口没开（面板显示「未打开」，不显示空白页或假地址）。
+    // Agent 默认在后台隐藏窗口操作网页，这个面板是用户唯一的观察与制动入口。
+    browser: { loaded: false, open: false, url: '', title: '', visible: false, lastShot: null, lastError: '', shotsDir: '' },
+    // 浏览器面板是否打开（状态推送时据此决定是否重绘）
+    browserPanelOpen: false,
     // 连接器（PRD FR-3）：真实后端注册表（凭证加密存储 + 保存即探测）。
     // loaded=false 时侧栏显示「未接入」，不能拿空数组冒充「都没配置」。
     connectors: { items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 }, loaded: false, expanded: null },
@@ -2111,6 +2127,104 @@
       <div class="mf"><button class="btn ghost" data-action="modal-cancel">关闭</button></div>`);
   }
 
+  /* ---------- 浏览器面板（ADR-0011：内置 CDP 浏览器） ---------- */
+  // Agent 默认在**后台隐藏窗口**里操作网页（保留登录态、不打断用户），若没有面板
+  // 就成了黑箱：用户既不知道它打开了哪个页面，也没法叫停。面板承担三件事：
+  // 看现状（标题/地址/最近截图）、调出或收回窗口、一键关闭。
+  function applyBrowserState(st) {
+    if (!st || typeof st !== 'object') return;
+    const prev = state.browser;
+    state.browser = {
+      loaded: true,
+      open: !!st.open,
+      url: st.url || '',
+      title: st.title || '',
+      visible: !!st.visible,
+      lastShot: st.lastShot || null,
+      lastError: st.lastError || '',
+      shotsDir: st.shotsDir || prev.shotsDir || '',
+    };
+    renderBrowserBadge();
+  }
+
+  /** 标题栏入口的状态点：打开=实心，未打开=空心，未接入=不显示点。 */
+  function renderBrowserBadge() {
+    const btn = $('#browserBtn');
+    if (!btn) return;
+    const b = state.browser;
+    btn.innerHTML = `浏览器${b.loaded ? `<span class="bw-dot ${b.open ? 'on' : ''}"></span>` : ''}`;
+    btn.title = !b.loaded ? '内置浏览器（未接入主进程）'
+      : b.open ? `内置浏览器：${b.title || b.url || '已打开'}${b.visible ? '' : '（后台运行）'}`
+        : '内置浏览器（未打开）· 点击查看详情';
+  }
+
+  function loadBrowserStatus() {
+    if (typeof bridge.getBrowserStatus !== 'function') return Promise.resolve();
+    return bridge.getBrowserStatus()
+      .then((st) => { applyBrowserState(st); })
+      .catch((err) => { console.warn('[browser] 状态拉取失败:', err && err.message); });
+  }
+
+  function browserPanelHTML() {
+    const b = state.browser;
+    if (!b.loaded) {
+      return `<div class="mh">${ic('globe', 18)}<b>内置浏览器</b></div>
+        <div class="mb"><div class="faint">未接入主进程，浏览器状态不可用。</div></div>
+        <div class="mf"><button class="btn ghost" data-action="modal-cancel">关闭</button></div>`;
+    }
+    const shot = b.lastShot;
+    const stateText = b.open ? (b.visible ? '已显示' : '后台运行') : '未打开';
+    return `<div class="mh">${ic('globe', 18)}<b>内置浏览器</b><span class="bw-dot ${b.open ? 'on' : ''}"></span><span class="faint" style="font-size:11px">${stateText}</span></div>
+      <div class="mb">
+        ${b.open
+    ? `<div class="bw-row"><span class="bw-k">标题</span><span class="bw-v">${esc(b.title || '(无)')}</span></div>
+           <div class="bw-row"><span class="bw-k">地址</span><span class="bw-v bw-url">${esc(b.url || '(无)')}</span></div>`
+    : `<div class="faint" style="padding:6px 0">浏览器未打开。让 Agent 访问网页时它会自动打开（也可直接说「打开 xxx 网站」）。</div>`}
+        ${shot ? `<div class="bw-shot">
+          <div class="bw-k" style="margin-bottom:6px">最近截图</div>
+          ${shot.dataUrl ? `<img class="bw-img" src="${esc(shot.dataUrl)}" alt="页面截图">` : '<div class="faint">（本次截图无预览缩略图）</div>'}
+          ${shot.path ? `<div class="bw-path" title="${esc(shot.path)}">${esc(shot.path)}</div>` : ''}
+        </div>` : ''}
+        ${b.lastError ? `<div class="bw-err">最近错误：${esc(b.lastError)}</div>` : ''}
+        <div class="faint" style="font-size:11px;margin-top:10px">点击 / 输入 / 执行脚本会改变页面状态，需经授权确认；每次操作都记入沙箱日志。</div>
+      </div>
+      <div class="mf">
+        <button class="btn ghost" data-action="browser-shot-dir">截图目录</button>
+        <span class="row" style="margin-left:auto">
+          ${b.open ? (b.visible
+    ? '<button class="btn sm" data-action="browser-hide">收回后台</button>'
+    : '<button class="btn sm" data-action="browser-show">显示窗口</button>') : ''}
+          <button class="btn sm ghost" data-action="browser-close" ${b.open ? '' : 'disabled'}>关闭浏览器</button>
+          <button class="btn ghost" data-action="modal-cancel">关闭</button>
+        </span>
+      </div>`;
+  }
+
+  function openBrowserPanel() {
+    state.browserPanelOpen = true;
+    openModal(browserPanelHTML());
+  }
+
+  /** 面板打开时状态变化 → 重绘（用户在看面板，内容必须跟着实时变）。 */
+  function rerenderBrowserPanelIfOpen() {
+    if (state.browserPanelOpen && $('#modalRoot .bw-dot, #modalRoot .bw-shot, #modalRoot .mb')) {
+      openModal(browserPanelHTML());
+    }
+  }
+
+  async function browserAct(fn, okMsg) {
+    try {
+      const r = await fn();
+      if (r && r.ok === false) { toast(r.reason || '操作失败', 'err'); return; }
+      if (r && r.state) applyBrowserState(r.state);
+      else await loadBrowserStatus();
+      if (okMsg) toast(okMsg, 'ok');
+    } catch (err) {
+      toast(`浏览器操作失败：${(err && err.message) || err}`, 'err');
+    }
+    rerenderBrowserPanelIfOpen();
+  }
+
   /* ---------- 通用输入弹窗（Electron 不支持 window.prompt，统一走 modal） ---------- */
   function askInput(opts) {
     openModal(`<div class="mh">${ic('at', 18)}<b>${esc(opts.title)}</b></div>
@@ -3245,8 +3359,21 @@
       case 'prompt-delete': doDeletePrompt(id); break;
 
       /* modal */
-      case 'modal-bg': if (e.target === el) { state.askInputCb = null; closeModal(); } break;
-      case 'modal-cancel': state.askInputCb = null; closeModal(); break;
+      case 'modal-bg': if (e.target === el) { state.askInputCb = null; state.browserPanelOpen = false; closeModal(); } break;
+      case 'modal-cancel': state.askInputCb = null; state.browserPanelOpen = false; closeModal(); break;
+
+      /* 浏览器面板（ADR-0011） */
+      case 'browser-panel': openBrowserPanel(); break;
+      case 'browser-show': browserAct(() => bridge.setBrowserVisible(true)); break;
+      case 'browser-hide': browserAct(() => bridge.setBrowserVisible(false)); break;
+      case 'browser-close': browserAct(() => bridge.closeBrowser(), '浏览器已关闭'); break;
+      case 'browser-shot-dir': {
+        bridge.openBrowserShotDir().then((r) => {
+          if (!r || r.ok === false) toast(`打开截图目录失败：${(r && r.reason) || '未接入'}`, 'err');
+          else toast('已打开截图目录', 'ok');
+        }).catch((err) => toast(`打开截图目录失败：${(err && err.message) || err}`, 'err'));
+        break;
+      }
       case 'ask-input-ok': {
         const cb = state.askInputCb;
         state.askInputCb = null;
@@ -3487,6 +3614,17 @@
       console.log('[init] state.sel:', state.sel, 'total sessions:', Object.keys(state.sessions).length);
     } catch (err) { console.error('[init] error:', err); }
 
+    // 订阅浏览器状态（ADR-0011）：Agent 在后台操作网页时，面板与标题栏状态点实时跟随。
+    // 没有这个订阅，用户点开面板看到的永远是启动那一刻的快照。
+    try {
+      if (typeof bridge.onBrowserState === 'function') {
+        bridge.onBrowserState((st) => {
+          applyBrowserState(st);
+          rerenderBrowserPanelIfOpen();
+        });
+      }
+    } catch (err) { console.warn('[init] 浏览器状态订阅失败:', err); }
+
     // 订阅工具执行步骤（此前主进程发 orchdesk:tool-step 但无人订阅 → 步骤条永远为空）
     try {
       if (typeof bridge.onToolStep === 'function') {
@@ -3543,6 +3681,10 @@
         ? bridge.getDesktop().then(r => { if (r && r.config) state.desktop = r; })
         : Promise.resolve()).catch(() => {}),
       bridge.listTempPlugins().then(r => { if (Array.isArray(r)) state.tempPlugins = r; }).catch(() => {}),
+      // 浏览器（ADR-0011）：启动即同步一次状态，标题栏入口才能如实显示开/关
+      (typeof bridge.getBrowserStatus === 'function'
+        ? bridge.getBrowserStatus().then(r => { applyBrowserState(r); })
+        : Promise.resolve()).catch(() => {}),
       // 插件运行时真实状态（插件页开关据此显示，而非硬编码的 p.on）
       (typeof bridge.getPluginRuntime === 'function'
         ? bridge.getPluginRuntime().then(r => { if (r) state.pluginRuntime = r; })

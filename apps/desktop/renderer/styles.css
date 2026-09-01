@@ -558,3 +558,22 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 .temp-plug-card{opacity:.94}
 .sec-title.muted{opacity:.65}
 .tp-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;margin-bottom:6px;font-size:12.5px}
+
+/* 浏览器面板（ADR-0011：内置 CDP 浏览器）
+   设计意图：这是用户观察 Agent「在后台窗口里操作网页」的唯一入口，
+   状态必须一眼可辨（打开=实心点，未打开=空心点），并随时能叫停。 */
+.bw-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none;
+  border:1.5px solid var(--fg-faint);background:transparent;vertical-align:middle;margin-left:6px}
+.bw-dot.on{background:var(--ok);border-color:var(--ok);box-shadow:0 0 0 2px color-mix(in srgb,var(--ok) 22%,transparent)}
+.bw-row{display:flex;gap:10px;font-size:12.5px;padding:4px 0;border-bottom:1px solid var(--border)}
+.bw-row:last-of-type{border-bottom:none}
+.bw-k{width:38px;flex:none;color:var(--fg-dim);font-size:11.5px;padding-top:2px}
+.bw-v{flex:1;min-width:0;word-break:break-all}
+.bw-url{font-family:"JetBrains Mono",Consolas,monospace;font-size:11.5px;color:var(--accent-fg)}
+.bw-shot{margin-top:12px}
+.bw-img{width:100%;max-height:260px;object-fit:contain;background:var(--bg-inset);
+  border:1px solid var(--border);border-radius:8px;display:block}
+.bw-path{margin-top:6px;font-family:"JetBrains Mono",Consolas,monospace;font-size:10.5px;
+  color:var(--fg-faint);word-break:break-all}
+.bw-err{margin-top:10px;padding:7px 10px;border-radius:7px;font-size:12px;
+  color:var(--danger);background:var(--danger-soft);border:1px solid color-mix(in srgb,var(--danger) 35%,transparent)}

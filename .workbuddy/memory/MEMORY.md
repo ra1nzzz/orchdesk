@@ -11,6 +11,7 @@ OrchDesk = 本地优先的多 Agent 编排桌面工作台。前身 OrchStar（�
 
 ## 关键决策（ADR）
 dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Cordis Fiber+isolate / 沙箱按平台 backend（win 首发）。
+- ADR-0009 SessionEvent 事件流（不接管 dsh ctx.sessions，双写）｜ADR-0010 TS 直测 loader + 架构守护测试（Node ≥22.13 成硬要求）｜**ADR-0011 浏览器工具走 Electron 自带 CDP**。
 
 ## 铁律
 每个 Phase 退出必须端到端可用，禁止「后端先行、UI 后补」（OrchStar 荒废教训）。任务 SOP：审计子代理→开发→3 并行 review→对比审计→用户授权后提交。
@@ -24,13 +25,23 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 - **工具调用双模式**：优先模型原生 function calling（`role:'tool'` + `tool_call_id`）；不支持时走 `<tool:name>json</tool>` 文本兜底，结果用 `role:'user'` 回传（无 tool_calls 时发 `role:'tool'` 会被网关拒）。
 - **网关软拒绝处理**：StepFun 等网关在 chat 模式下带 tools 时返回 HTTP 200 空内容（软拒绝），`callOpenAICompatible` 会逐级降级到不带 tools；`runAgentTurn` 用 `Map<provider.id|model>` 记忆该状态，后续同 provider+model 直接走文本兜底。去 tools 后仍空时不误置 toolsRejected。
 
+## 浏览器工具（ADR-0011，8 个工具并入统一工具表，TOOL_DEFS 7→15）
+- 用 `webContents.debugger`（CDP 1.3）驱动一个 `show:false` BrowserWindow，**不引入 playwright/puppeteer**（已装的 playwright 留给外部 E2E）。选 CDP 而非 `executeJavaScript`：支持 awaitPromise/returnByValue/userGesture/超时，不受页面 CSP 影响，截图与导航等待同一套协议。
+- 分层：`browser-tools.ts`（纯逻辑零 electron：schema / 参数归一化 / **页面内 JS 表达式构造** / 脚本风险扫描 / 截图路径）+ `browser-cdp.ts`（宿主：窗口生命周期 / attach / `Page.navigate`+加载等待 / `Runtime.evaluate` / `Page.captureScreenshot` 落盘）+ `main.ts` 只接线。新纯逻辑模块记得加进 `arch-guard-verify.cjs` 的 `PURE_MODULES`。
+- 安全口径与既有工具一致：导航=边界外访问（域名白名单 + 补偿层外发二次确认）；`browser_click`/`browser_type`/`browser_eval` 走授权门；全部进沙箱日志 `kind:'browser'`；**拒绝时命令绝不下发**（有回归断言）。共享用户默认 session 保留登录态，代价由授权门覆盖而非隔离回避。
+- 唯一注入面是表达式构造：注入值一律 `JSON.stringify`，并在**假 DOM 里真跑一遍**；`buildTypeExpression` 用原型 setter + input/change 事件兼容 React/Vue 受控组件。
+- `waitForLoad` 双保险：`Page.loadEventFired` 为主 + 250ms 轮询 `document.readyState` 兜底（页面在 attach 前已加载完时事件不会再发）。debugger 的所有 CDP 事件都走同一个 `'message'`，method 在第二个参数里。
+- UI 是验收底线（写进 ADR）：标题栏「浏览器」面板 + `onBrowserState` 推送实时跟随；桥不可用时 `getBrowserStatus` 返 `{open:false}` 表示「未接入」，不冒充「已就绪只是没开」。
+
 ## 渲染层纯逻辑的双环境单文件方案（重要约束）
 - 主窗口 `webPreferences.sandbox:true` → preload 拿不到 `require`；`renderer/app.js` 是 IIFE 纯 JS，也不能 `require` TS 产物。
 - 结论：需要「Node 验证套件 + 浏览器渲染层共用同一份」的纯逻辑，写成 **UMD-lite 单文件**（`module.exports` + `window.OrchDeskXxx`），`<script src>` 挂在 app.js **之前**。范例：`renderer/session-fork.js`（+ `session-fork-verify.cjs`）。零构建步骤，杜绝源码/产物漂移。
 
 ## 验证入口（`cd apps/desktop`）
-- `npm run verify` = 14 套件 554 项：plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 34 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / e2e 110
-- electron 依赖套件用 `Module._load` 钩子 stub `electron` 后 require `dist/main.js` 驱动真实 handler；`model-loop-verify.cjs` / `memory-summarize-verify.cjs` 用真 `node:http` mock 做线级验证
+- `npm run verify` = **21 套件 741 项**：plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / **browser-tools 39** / arch-guard 15 / e2e 152
+- electron 依赖套件用 `Module._load` 钩子 stub `electron` 后 require `dist/main.js` 驱动真实 handler；stub 在 `scripts/verify-kit.cjs`（`makeElectronStub`/`createChecker`，含 CDP `DebuggerStub` 与共享 `cdpCommands`）；`model-loop-verify.cjs` / `memory-summarize-verify.cjs` 用真 `node:http` mock 做线级验证
+- **真机 Electron 在此环境跑不起来（两个成因，别再重复排查）**：① 宿主向下继承 `ELECTRON_RUN_AS_NODE=1` → electron.exe 退化纯 Node（`require('electron')` 返字符串、`app` undefined），所有调用加 `env -u ELECTRON_RUN_AS_NODE`；② 非交互会话里 GPU 进程起不来（`gpu_process_host.cc:956` 连崩 → `FATAL: GPU process isn't usable. Goodbye.` → 退出码 127，stdout 都来不及刷），`--disable-gpu`/`no-sandbox`/`in-process-gpu` **全无效**。故真机 CDP 另设 `pnpm run smoke:browser`（`apps/desktop/scripts/browser-smoke.cjs`，10 步），**刻意不进 verify 链**（需要真 GPU，硬塞只会假红并诱使人放宽断言）；脚本启动期自检 `process.type`，非主进程退 2 并打印指引
+- 冒烟/驱动脚本**必须放在 `apps/desktop` 下**（放 `%TEMP%` 会因解析不到 node_modules 而 `Cannot find module 'electron'`）
 - **改插件源码后必须 `npx tsc -p packages/plugin/<n>/tsconfig.json` 再 `cd apps/desktop && node scripts/vendor-dsh.cjs`**：probe 套件跑的是 `vendor/plugins/*` 里的产物，忘了 vendor 会用旧代码跑出假失败（2026-08-31 踩到：`rec.chunks` undefined）
 - probe 子进程脚本落在系统临时目录，`__dirname` 指向 temp —— 脚本内所有路径必须以注入的 `APP_DIR` 为基准
 - 打包：`npm run dist:win` 会因 BUG-W01 触发 pnpm install 失败 → 绕过方式 `npx tsc -p tsconfig.json && node scripts/vendor-dsh.cjs && node kill-running.cjs && npx electron-builder --win --publish never`

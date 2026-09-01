@@ -119,6 +119,28 @@ import {
   isKnownTool,
   normalizeNativeToolCalls,
 } from './agent-runtime';
+import {
+  buildClickExpression,
+  buildLinksExpression,
+  buildTextExpression,
+  buildTypeExpression,
+  buildWaitForSelectorExpression,
+  clipBrowserText,
+  describeBrowserState,
+  normalizeBrowserArgs,
+  scanScriptRisks,
+  type BrowserStateSnapshot,
+} from './browser-tools';
+import {
+  browserShotDir,
+  closeBrowser as cdpCloseBrowser,
+  evalInPage,
+  getBrowserState,
+  onBrowserStateChange,
+  openBrowser as cdpOpenBrowser,
+  screenshotBrowser,
+  setBrowserVisible,
+} from './browser-cdp';
 
 // ============================================================================
 // OrchDesk 桌面壳主进程（P1）
@@ -833,6 +855,158 @@ function recordSandbox(input: {
 /** 最近一次读到的授权模式（getMode 是异步的，日志只能留快照）。 */
 let lastAuthMode = 'default';
 
+// ---------------------------------------------------------------------------
+// 浏览器工具（ADR-0011：Electron 自带 CDP，零额外依赖）
+// ---------------------------------------------------------------------------
+// 安全口径沿用既有工具：
+//   - 导航 = 边界外网络访问 → 域名白名单，非白名单过补偿层外发二次确认（同 web_fetch）
+//   - 点击 / 输入 / 执行脚本 = 真实改变页面（下单、发帖、删数据都可能）→ 授权门（同 file_write）
+//   - 每一次判定都进沙箱日志：事后能回答「Agent 在哪个网页上点了什么」
+// 浏览器共享用户默认 session（保留登录态）——这是能力的一半，也是为什么写操作必须过门。
+
+/** 浏览器工具在沙箱日志里的判定对象（不记录输入文本，避免把密码写进日志）。 */
+function browserTargetOf(name: string, args: Record<string, unknown>): string {
+  const st = getBrowserState();
+  const where = st.open && st.url ? st.url : '(浏览器未打开)';
+  if (name === 'browser_type') return `${where} · 输入到 ${String(args.selector || '').slice(0, 80)}`;
+  if (name === 'browser_click') return `${where} · 点击 ${String(args.selector || '').slice(0, 80)}`;
+  if (name === 'browser_eval') return `${where} · 执行脚本 ${String(args.expression || '').length} 字符`;
+  if (name === 'browser_open') return String(args.url || '').slice(0, 300) || '(空 URL)';
+  return where;
+}
+
+async function executeBrowserTool(name: string, args: Record<string, unknown>, sessionId?: string): Promise<ToolResult> {
+  const parsed = normalizeBrowserArgs(name, args);
+  if (!parsed.ok) {
+    recordSandbox({ tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'error', reason: parsed.error, sessionId });
+    return { name, result: '', error: parsed.error };
+  }
+  const v = parsed.value;
+  const fail = (reason: string, decision: 'denied' | 'error' = 'error'): ToolResult => {
+    recordSandbox({ tool: name, kind: 'browser', target: browserTargetOf(name, args), decision, reason, sessionId });
+    return { name, result: '', error: reason };
+  };
+
+  switch (v.name) {
+    case 'browser_open': {
+      const policy = getHostServices()?.sandboxPolicy;
+      const allowed = policy?.isDomainAllowed ? policy.isDomainAllowed(v.url) : true;
+      if (!allowed) {
+        const denied = await outboundGate(`访问网页 ${v.url}`, sessionId);
+        if (denied) return fail(`域名不在白名单：${denied}`, 'denied');
+      }
+      try {
+        const st = await cdpOpenBrowser(v.url, { waitUntil: v.waitUntil, timeoutMs: v.timeoutMs });
+        recordSandbox({
+          tool: name, kind: 'browser', target: v.url, decision: 'allowed',
+          reason: st.title ? `已打开：${st.title}`.slice(0, 200) : '已打开', sessionId,
+        });
+        return { name, result: describeBrowserState(st) };
+      } catch (err) {
+        return fail((err as Error).message.slice(0, 500));
+      }
+    }
+
+    case 'browser_text': {
+      if (!getBrowserState().open) return fail('浏览器未打开（先用 browser_open 打开网址）');
+      const r = await evalInPage(buildTextExpression(v.selector, v.maxChars));
+      if (!r.ok) return fail(r.error || '读取页面文本失败');
+      recordSandbox({
+        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
+        reason: `读取 ${String(r.value || '').length} 字符`, sessionId,
+      });
+      return { name, result: clipBrowserText(r.value || '', v.maxChars) };
+    }
+
+    case 'browser_links': {
+      if (!getBrowserState().open) return fail('浏览器未打开（先用 browser_open 打开网址）');
+      const r = await evalInPage(buildLinksExpression(v.selector, v.limit));
+      if (!r.ok) return fail(r.error || '读取链接失败');
+      recordSandbox({
+        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
+        reason: '列出页面链接', sessionId,
+      });
+      return { name, result: r.value || '(页面内没有链接)' };
+    }
+
+    case 'browser_click': {
+      const st = getBrowserState();
+      if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
+      const denied = await approvalGate('browser_click', `在网页上点击 ${v.selector}`, sessionId, st.url || '');
+      if (denied) return fail(denied, 'denied');
+      const wait = await evalInPage(buildWaitForSelectorExpression(v.selector, v.timeoutMs));
+      if (!wait.ok) return fail(wait.error || `等待元素 ${v.selector} 超时`);
+      const r = await evalInPage(buildClickExpression(v.selector));
+      if (!r.ok) return fail(r.error || '点击失败');
+      recordSandbox({
+        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
+        reason: r.value, sessionId,
+      });
+      return { name, result: `${r.value}（${v.selector}）` };
+    }
+
+    case 'browser_type': {
+      const st = getBrowserState();
+      if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
+      const denied = await approvalGate('browser_type', `在网页输入框填入 ${v.text.length} 个字符`, sessionId, st.url || '');
+      if (denied) return fail(denied, 'denied');
+      const r = await evalInPage(buildTypeExpression(v.selector, v.text, { clear: v.clear, pressEnter: v.pressEnter }));
+      if (!r.ok) return fail(r.error || '填入失败');
+      recordSandbox({
+        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
+        reason: r.value, sessionId,
+      });
+      return { name, result: r.value || '已填入' };
+    }
+
+    case 'browser_screenshot': {
+      const st = getBrowserState();
+      if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
+      const shot = await screenshotBrowser({ fullPage: v.fullPage }, dataDir());
+      if (!shot.ok) return fail(shot.error || '截图失败');
+      recordSandbox({
+        tool: name, kind: 'browser', target: shot.path || '(截图)', decision: 'allowed',
+        reason: `已保存截图${v.fullPage ? '（整页）' : ''}`, sessionId,
+      });
+      return { name, result: `截图已保存：${shot.path}` };
+    }
+
+    case 'browser_eval': {
+      const st = getBrowserState();
+      if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
+      const risks = scanScriptRisks(v.expression);
+      const reason = `执行脚本${risks.length ? `（涉及：${risks.join('、')}）` : ''}：${v.expression.slice(0, 160)}`;
+      const denied = await approvalGate('browser_eval', reason, sessionId, st.url || '');
+      if (denied) return fail(denied, 'denied');
+      const r = await evalInPage(v.expression, v.timeoutMs);
+      if (!r.ok) {
+        recordSandbox({
+          tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'error',
+          reason: (r.error || '脚本执行失败').slice(0, 300), sessionId,
+        });
+        return { name, result: '', error: r.error || '脚本执行失败' };
+      }
+      recordSandbox({
+        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
+        reason: risks.length ? `风险项：${risks.join('、')}` : '页面内求值', sessionId,
+      });
+      return { name, result: r.value || '(脚本返回空值)' };
+    }
+
+    case 'browser_close': {
+      const closed = cdpCloseBrowser();
+      recordSandbox({
+        tool: name, kind: 'browser', target: '(关闭浏览器)', decision: 'allowed',
+        reason: closed ? '浏览器窗口已关闭' : '浏览器本来就没打开', sessionId,
+      });
+      return { name, result: closed ? '浏览器已关闭（登录态保留）' : '浏览器未打开，无需关闭' };
+    }
+
+    default:
+      return fail(`未接线的浏览器工具：${name}`);
+  }
+}
+
 async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }): Promise<ToolResult> {
   const { name, arguments: args } = tool;
   const cwd = sessionCwd(sessionCtx?.sessionId);
@@ -971,6 +1145,16 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
           return { name, result: '', error: (err as Error).message.slice(0, 2000) };
         }
       }
+      // ---- 浏览器（CDP）工具：导航 / 读页面 / 点击 / 输入 / 截图 / 求值 / 关闭 ----
+      case 'browser_open':
+      case 'browser_text':
+      case 'browser_links':
+      case 'browser_click':
+      case 'browser_type':
+      case 'browser_screenshot':
+      case 'browser_eval':
+      case 'browser_close':
+        return await executeBrowserTool(name, args, sessionCtx?.sessionId);
       case 'memory_save': {
         // dsh memory 服务（global 域）落地——「记住 X」从口头应答变成真实持久化
         const content = String(args.content || '').trim();
@@ -1017,6 +1201,7 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
 function sandboxKindOf(toolName: string): SandboxLogEntry['kind'] {
   if (toolName === 'shell_command') return 'command';
   if (toolName === 'web_fetch') return 'network';
+  if (toolName.startsWith('browser_')) return 'browser';
   return 'path';
 }
 
@@ -2348,6 +2533,57 @@ ipcMain.handle('orchdesk:open-external', async (_e, url: unknown) => {
   if (!/^https?:\/\//i.test(u)) return { ok: false, reason: '仅允许 http/https 链接' };
   try { await shell.openExternal(u); return { ok: true }; }
   catch (err) { return { ok: false, reason: (err as Error).message }; }
+});
+
+// ---------------------------------------------------------------------------
+// 浏览器（CDP）IPC：渲染层「浏览器」面板
+// ---------------------------------------------------------------------------
+// 面板不是装饰：Agent 默认在**后台隐藏窗口**里操作网页，用户若没有一个入口
+// 查看「现在在哪个页面 / 截了什么图 / 能随时关掉」，浏览器工具就是黑箱。
+// 这也是本 Phase 的「端到端可用」底线（禁止后端先行、UI 后补）。
+
+/** 状态推送：浏览器窗口由工具或用户改变时，面板实时跟着变。 */
+function pushBrowserState(st?: BrowserStateSnapshot): void {
+  const snapshot = st || getBrowserState();
+  try {
+    const w = (mainWindow && !mainWindow.isDestroyed())
+      ? mainWindow
+      : BrowserWindow.getAllWindows().find((x) => !x.isDestroyed());
+    if (w) w.webContents.send('orchdesk:browser-state', snapshot);
+  } catch { /* 窗口已关闭 */ }
+}
+
+onBrowserStateChange((st) => pushBrowserState(st));
+
+/** 浏览器状态（含最近截图缩略图与截图目录）。 */
+ipcMain.handle('orchdesk:browser-status', async () => {
+  const st = getBrowserState();
+  return { ...st, shotsDir: browserShotDir(dataDir()) };
+});
+
+/** 显示 / 隐藏浏览器窗口（false = 收回后台）。 */
+ipcMain.handle('orchdesk:browser-toggle-visible', async (_e, visible: unknown) => {
+  const st = setBrowserVisible(Boolean(visible));
+  return { ok: st.open, state: st };
+});
+
+/** 关闭浏览器窗口（面板的「关闭」按钮 = 用户侧的紧急制动）。 */
+ipcMain.handle('orchdesk:browser-close', async () => {
+  const closed = cdpCloseBrowser();
+  return { ok: true, closed, state: getBrowserState() };
+});
+
+/** 在系统文件管理器中打开截图目录。 */
+ipcMain.handle('orchdesk:browser-open-shot-dir', async () => {
+  const dir = browserShotDir(dataDir());
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const opened = await shell.openPath(dir);
+    // openPath 返回空串表示成功；非空是错误信息。
+    return { ok: opened === '', dir, reason: opened || undefined };
+  } catch (err) {
+    return { ok: false, dir, reason: (err as Error).message };
+  }
 });
 
 ipcMain.handle('orchdesk:memory-promotions-clear', async () => {  const cleared = promotionLog.length;

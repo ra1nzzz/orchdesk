@@ -14,6 +14,8 @@
   <span class="win-title" id="winTitle">会话 — 本地 Agent 工作台</span>
   <div class="tray-hint"><span class="tray-dot"></span><span id="trayText">本地运行 · 1 专家在线</span></div>
   <span style="margin-left:auto" class="row">
+    <!-- 浏览器（ADR-0011）：Agent 默认在后台窗口操作网页，这里是用户的观察与制动入口 -->
+    <button class="btn ghost sm" data-action="browser-panel" id="browserBtn" title="内置浏览器">浏览器</button>
     <span style="color:var(--fg-faint)" id="clock"></span>
     <button class="btn ghost sm" data-action="toggle-theme">深色</button>
   </span>

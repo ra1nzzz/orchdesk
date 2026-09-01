@@ -20,6 +20,41 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const EventEmitter = require('node:events');
+
+/**
+ * CDP debugger 桩（webContents.debugger，ADR-0011）。
+ * 记录所有 sendCommand 供断言「浏览器工具真的向页面发了命令」，并模拟
+ * 导航事件——否则 waitForLoad 永远等不到 Page.loadEventFired。
+ * evaluateResult 可由调用方覆盖，用来返回不同页面内容。
+ */
+class DebuggerStub extends EventEmitter {
+  constructor(commands) {
+    super();
+    /** 所有 CDP 命令（[{ method, params }]），与其它窗口共享同一个 sink 便于断言。 */
+    this.commands = commands || [];
+    this.attached = false;
+    /** Runtime.evaluate 的预设返回值（{ result: { value } } 或 { exceptionDetails }）。 */
+    this.evaluateResult = { result: { type: 'string', value: 'stub-value' } };
+    /** 导航后 webContents.getURL() 的返回值。 */
+    this.url = '';
+  }
+  attach(version) { this.attached = true; this.version = version; }
+  detach() { this.attached = false; }
+  isAttached() { return this.attached; }
+  async sendCommand(method, params) {
+    this.commands.push({ method, params });
+    if (method === 'Page.navigate') {
+      this.url = String((params && params.url) || '');
+      // 真实浏览器在导航完成后推 loadEventFired；不模拟它会让每次导航都超时。
+      setImmediate(() => this.emit('message', {}, 'Page.loadEventFired', {}));
+      return {};
+    }
+    if (method === 'Page.captureScreenshot') return { data: Buffer.from('stub-shot').toString('base64') };
+    if (method === 'Runtime.evaluate') return this.evaluateResult;
+    return {};
+  }
+}
 
 /**
  * electron 假实现。
@@ -41,6 +76,8 @@ function makeElectronStub(opts = {}) {
   const trayInstances = [];
   /** 所有构造过的 BrowserWindow（FR-4.2：断言悬浮窗真的被创建）。 */
   const windows = [];
+  /** 所有窗口发出的 CDP 命令（ADR-0011 浏览器工具断言用）。 */
+  const cdpCommands = [];
   const shortcut = makeGlobalShortcutStub();
   const notifications = [];
 
@@ -52,6 +89,8 @@ function makeElectronStub(opts = {}) {
     loginItems,
     trayInstances,
     windows,
+    /** CDP 命令流水（webContents.debugger.sendCommand 全记录）。 */
+    cdpCommands,
     /** 已注册的全局加速器（FR-4.2）。 */
     get shortcuts() { return shortcut.registered; },
     /** 已发出的系统通知（FR-4.2）。 */
@@ -71,18 +110,40 @@ function makeElectronStub(opts = {}) {
       on: (ch, fn) => { ipcListeners.set(ch, fn); },
     },
     BrowserWindow: class {
-      constructor(opts) { this.opts = opts || {}; this.webContents = { send: (ch, payload) => { webSent.push({ ch, payload }); } }; this.destroyed = false; this.loaded = null; windows.push(this); }
+      constructor(opts) {
+        this.opts = opts || {};
+        const dbg = new DebuggerStub(cdpCommands);
+        this.debugger = dbg;
+        this.title = '';
+        this.visible = false;
+        this.webContents = {
+          send: (ch, payload) => { webSent.push({ ch, payload }); },
+          // 浏览器工具（ADR-0011）依赖的页面信息
+          getURL: () => dbg.url || this.loadedURL || '',
+          getTitle: () => this.title || '',
+          isLoading: () => false,
+          debugger: dbg,
+          on: () => {},
+          once: () => {},
+        };
+        this.destroyed = false;
+        this.loaded = null;
+        windows.push(this);
+      }
       isDestroyed() { return this.destroyed; }
+      setTitle(t) { this.title = t; }
       once() {}
       on() {}
       loadFile(p) { this.loaded = p; }
-      loadURL(u) { this.loaded = u; }
-      show() {}
-      hide() {}
+      loadURL(u) { this.loaded = u; this.loadedURL = u; }
+      // 浏览器窗口（ADR-0011）默认 show:false 创建 —— isVisible 必须如实反映，
+      // 否则「后台运行 / 已显示」的状态永远测不出来。
+      show() { this.visible = true; }
+      hide() { this.visible = false; }
       focus() {}
-      close() { this.destroyed = true; }
+      close() { this.destroyed = true; this.visible = false; }
       isMinimized() { return false; }
-      isVisible() { return true; }
+      isVisible() { return this.visible; }
       isFocused() { return false; }
       static getAllWindows() { return []; }
     },

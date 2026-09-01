@@ -145,8 +145,11 @@ const { check, summary } = createChecker();
     assert.ok(ids.includes(toolMsg.tool_call_id), `tool_call_id=${toolMsg.tool_call_id} 应匹配 ${JSON.stringify(ids)}`);
   });
   await check('请求携带了工具定义', () => {
-    assert.ok(Array.isArray(requests[0].body.tools) && requests[0].body.tools.length === 7,
-      '首轮应下发 7 个工具定义');
+    // 数量从工具表取，不写死：ADR-0011 加了 8 个浏览器工具后这里就是 15。
+    // 写死常量会让「新增工具没下发」伪装成「套件过时」。
+    const expected = require('./dist/agent-runtime.js').TOOL_DEFS.length;
+    assert.ok(Array.isArray(requests[0].body.tools) && requests[0].body.tools.length === expected,
+      `首轮应下发 ${expected} 个工具定义，实际 ${(requests[0].body.tools || []).length}`);
   });
   await check('会话已持久化（含工具步骤）', () => {
     const data = JSON.parse(fs.readFileSync(path.join(HOME, 'orchdesk-sessions.json'), 'utf-8'));
