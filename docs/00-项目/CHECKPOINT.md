@@ -9,11 +9,11 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.12.0`（tag `v0.12.0` 已推送；GitHub Release 待发） | SemVer，pre-1.0 阶段；`0.11.0` 为上一 Release |
+| **当前版本** | `0.12.0`（tag `v0.12.0` 已推送；Release 已发布） | SemVer，pre-1.0 阶段；`0.11.0` 为上一 Release |
 | **最新 Commit** | `a17d9cd` | feat(verify): TS 直测 loader + 架构守护测试（ADR-0010） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
-| **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
+| **最新 Release** | [v0.12.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.12.0) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正（`gh release edit v0.12.0 --notes-file … --draft=false`）——CI 不会自动发布 |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
 | **验证套件** | 702/702 PASS | `npm run verify`（plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / **ts-loader 13 / arch-guard 15** / e2e 152） |
