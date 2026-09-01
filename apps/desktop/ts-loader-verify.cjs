@@ -206,6 +206,7 @@ function importFixture(name) {
     }
   });
 
+  try { fs.rmSync(FIX_DIR, { recursive: true, force: true }); } catch { /* 临时目录清理失败不影响结论 */ }
   console.log(log.join('\n'));
   console.log(`结果: ${passed} 通过, ${failed} 失败`);
   process.exit(failed ? 1 : 0);
