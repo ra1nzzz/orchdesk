@@ -178,6 +178,19 @@ export const BROWSER_EVAL_TIMEOUT_MIN = 500;
 export const BROWSER_EVAL_TIMEOUT_MAX = 30_000;
 export const BROWSER_EVAL_TIMEOUT_DEFAULT = 10_000;
 
+/**
+ * 截图超时（CDP 走合成器取帧，取不到帧时会**永久挂起而不是报错**——
+ * 远程桌面 / 锁屏 / 无 GPU 会话下实测必挂）。超时后回退 Electron 原生
+ * capturePage：它不依赖合成器，实测 68ms 出图。没有这个兜底，
+ * browser_screenshot 会把整个回合卡住直到进程被杀。
+ */
+export const BROWSER_SHOT_TIMEOUT_MIN = 500;
+export const BROWSER_SHOT_TIMEOUT_MAX = 30_000;
+export const BROWSER_SHOT_TIMEOUT_DEFAULT = 8000;
+
+/** 缩略图最大宽度（UI 面板用，data URL 不落盘）。 */
+export const BROWSER_SHOT_THUMB_WIDTH = 480;
+
 /** 文本返回上限（默认 8000：约 4K token，留出模型回答空间）。 */
 export const BROWSER_TEXT_DEFAULT = 8000;
 export const BROWSER_TEXT_MAX = 30_000;
@@ -211,9 +224,10 @@ function clampInt(v: unknown, min: number, max: number, fallback: number): numbe
 }
 
 /** 超时钳制（导航 / 元素等待 / 求值各自上下限不同）。 */
-export function clampBrowserTimeout(v: unknown, kind: 'nav' | 'action' | 'eval'): number {
+export function clampBrowserTimeout(v: unknown, kind: 'nav' | 'action' | 'eval' | 'shot'): number {
   if (kind === 'nav') return clampInt(v, BROWSER_NAV_TIMEOUT_MIN, BROWSER_NAV_TIMEOUT_MAX, BROWSER_NAV_TIMEOUT_DEFAULT);
   if (kind === 'action') return clampInt(v, BROWSER_ACTION_TIMEOUT_MIN, BROWSER_ACTION_TIMEOUT_MAX, BROWSER_ACTION_TIMEOUT_DEFAULT);
+  if (kind === 'shot') return clampInt(v, BROWSER_SHOT_TIMEOUT_MIN, BROWSER_SHOT_TIMEOUT_MAX, BROWSER_SHOT_TIMEOUT_DEFAULT);
   return clampInt(v, BROWSER_EVAL_TIMEOUT_MIN, BROWSER_EVAL_TIMEOUT_MAX, BROWSER_EVAL_TIMEOUT_DEFAULT);
 }
 
@@ -274,6 +288,8 @@ export interface BrowserTypeArgs {
 }
 export interface BrowserScreenshotArgs {
   fullPage: boolean;
+  /** CDP 取不到帧时会永久挂起，超时后回退 capturePage（详见 capturePng 注释）。 */
+  timeoutMs: number;
 }
 export interface BrowserEvalArgs {
   expression: string;
@@ -342,7 +358,7 @@ export function normalizeBrowserArgs(
       };
     }
     case 'browser_screenshot': {
-      return { ok: true, value: { name, fullPage: Boolean(a.fullPage) } };
+      return { ok: true, value: { name, fullPage: Boolean(a.fullPage), timeoutMs: clampBrowserTimeout(a.timeout, 'shot') } };
     }
     case 'browser_eval': {
       const expr = String(a.expression ?? '').trim();

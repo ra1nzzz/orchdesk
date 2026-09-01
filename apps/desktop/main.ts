@@ -962,13 +962,15 @@ async function executeBrowserTool(name: string, args: Record<string, unknown>, s
     case 'browser_screenshot': {
       const st = getBrowserState();
       if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const shot = await screenshotBrowser({ fullPage: v.fullPage }, dataDir());
+      const shot = await screenshotBrowser({ fullPage: v.fullPage, timeoutMs: v.timeoutMs }, dataDir());
       if (!shot.ok) return fail(shot.error || '截图失败');
       recordSandbox({
         tool: name, kind: 'browser', target: shot.path || '(截图)', decision: 'allowed',
-        reason: `已保存截图${v.fullPage ? '（整页）' : ''}`, sessionId,
+        reason: `已保存截图${v.fullPage ? '（整页）' : ''}${shot.via === 'capturePage' ? '（CDP 截图不可用，已回退 capturePage）' : ''}`, sessionId,
       });
-      return { name, result: `截图已保存：${shot.path}` };
+      // 回退路径只在视口大小，如实告诉模型，别让它以为拿到了整页
+      const tail = shot.via === 'capturePage' ? '（视口截图：CDP 整页/合成截图在本环境不可用）' : '';
+      return { name, result: `截图已保存：${shot.path}${tail}` };
     }
 
     case 'browser_eval': {

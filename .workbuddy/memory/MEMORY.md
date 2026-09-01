@@ -10,7 +10,12 @@ OrchDesk = 本地优先的多 Agent 编排桌面工作台。前身 OrchStar（�
 - 冲突显式裁决记录于 docs/70-决策/conflicts.md；架构决策落 ADR。
 
 ## 关键决策（ADR）
-dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Cordis Fiber+isolate / 沙箱按平台 backend（win 首发）。
+dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Cordis Fiber+isolate / 沙箱按平台 backend（win 首发）/ 浏览器工具走 Electron 自带 CDP（ADR-0011）。
+
+## 浏览器工具（ADR-0011）真机铁律
+- **CDP 出问题宁可降级也不要挂起**，且降级必须可见（结果带 `via`、日志写明已回退），不许用「跑通了」掩盖「其实是兜底跑通的」。
+- 三条已实测的挂起源：① `Emulation.setDeviceMetricsOverride` 会让**主进程直接消失**（127、stdout 空、try/catch 都来不及）→ 带超时+忽略、受限会话跳过；② `Page.captureScreenshot` 取不到合成帧时**永久挂起** → 超时后回退 `capturePage`（实测 68ms）；③ `Page.navigate` 挂起页面根本打不开 → 回退 `win.loadURL()`。`Page.enable`/`Runtime.enable` 是可降级的可选项，`Runtime.evaluate` 外层须再加超时（内层 `timeout` 只管页面内执行时长）+ `executeJavaScript` 兜底。
+- 缩略图拿已得 PNG 本地 `nativeImage.resize` 缩放，**别发第二次截图请求**（CDP 挂起时第二次同样挂，连主结果都拿不到）。
 - ADR-0009 SessionEvent 事件流（不接管 dsh ctx.sessions，双写）｜ADR-0010 TS 直测 loader + 架构守护测试（Node ≥22.13 成硬要求）｜**ADR-0011 浏览器工具走 Electron 自带 CDP**。
 
 ## 铁律
@@ -38,7 +43,8 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 - 结论：需要「Node 验证套件 + 浏览器渲染层共用同一份」的纯逻辑，写成 **UMD-lite 单文件**（`module.exports` + `window.OrchDeskXxx`），`<script src>` 挂在 app.js **之前**。范例：`renderer/session-fork.js`（+ `session-fork-verify.cjs`）。零构建步骤，杜绝源码/产物漂移。
 
 ## 验证入口（`cd apps/desktop`）
-- `npm run verify` = **21 套件 741 项**：plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / **browser-tools 39** / arch-guard 15 / e2e 152
+- `npm run verify` = **21 套件 745 项**：plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / **browser-tools 43** / arch-guard 15 / e2e 152
+- **真机冒烟另设** `pnpm run smoke:browser`（11 步，**刻意不进 verify 链**：需真 GPU/渲染进程，非交互会话必假红）。跑法：`env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS ORCHDESK_SMOKE_CI=1 <electron.exe> scripts/browser-smoke.cjs`；脚本自检 `process.type`，并按 explorer.exe（或 `ORCHDESK_SMOKE_CI=1`）判定是否降级：关 Chromium sandbox + 关硬件加速。参见「浏览器工具真机铁律」一节。
 - electron 依赖套件用 `Module._load` 钩子 stub `electron` 后 require `dist/main.js` 驱动真实 handler；stub 在 `scripts/verify-kit.cjs`（`makeElectronStub`/`createChecker`，含 CDP `DebuggerStub` 与共享 `cdpCommands`）；`model-loop-verify.cjs` / `memory-summarize-verify.cjs` 用真 `node:http` mock 做线级验证
 - **真机 Electron 在此环境跑不起来（两个成因，别再重复排查）**：① 宿主向下继承 `ELECTRON_RUN_AS_NODE=1` → electron.exe 退化纯 Node（`require('electron')` 返字符串、`app` undefined），所有调用加 `env -u ELECTRON_RUN_AS_NODE`；② 非交互会话里 GPU 进程起不来（`gpu_process_host.cc:956` 连崩 → `FATAL: GPU process isn't usable. Goodbye.` → 退出码 127，stdout 都来不及刷），`--disable-gpu`/`no-sandbox`/`in-process-gpu` **全无效**。故真机 CDP 另设 `pnpm run smoke:browser`（`apps/desktop/scripts/browser-smoke.cjs`，10 步），**刻意不进 verify 链**（需要真 GPU，硬塞只会假红并诱使人放宽断言）；脚本启动期自检 `process.type`，非主进程退 2 并打印指引
 - 冒烟/驱动脚本**必须放在 `apps/desktop` 下**（放 `%TEMP%` 会因解析不到 node_modules 而 `Cannot find module 'electron'`）

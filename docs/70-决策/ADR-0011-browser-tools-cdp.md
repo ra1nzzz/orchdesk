@@ -68,5 +68,31 @@ CI 与非交互会话里 GPU 进程起不来，硬塞进去只会得到一条环
    `require('electron')` 返回路径字符串、`app` 为 `undefined`。跑法：`env -u ELECTRON_RUN_AS_NODE electron scripts/browser-smoke.cjs`。
 2. 脚本必须放在 `apps/desktop` 下，否则 `require('electron')` 解析不到 `node_modules`。
 
-冒烟覆盖 10 步：本地 http 测试页导航 → 取正文 → 取链接 → 填值 + 回读（引号/反斜杠不逃逸）→ 点击命中
+冒烟覆盖 11 步：环境自检（绕开产品代码先开一个窗口，用来区分「环境不行」还是「代码不行」）
+→ 本地 http 测试页导航 → 取正文 → 取链接 → 填值 + 回读（引号/反斜杠不逃逸）→ 点击命中
 → 点击缺失元素必须报错 → 截图 PNG 真落盘 → 状态带 `lastShot` → 关闭后归零。
+
+### 真机实测（2026-09-01，Electron 36.9.5）：11/11 通过，并暴露三个必须留降级的问题
+
+在受限会话（无 GPU 合成、无交互桌面）里跑通了全链路，`Runtime.evaluate` / `Page.navigate` /
+`Page.captureScreenshot` 全部走 CDP 正路（`via=cdp`，截图 12408 字节）。过程中暴露三点，
+**都不是「CI 才有的怪事」，在用户锁屏 / 远程桌面 / 最小化时同样会发生**：
+
+1. **`Emulation.setDeviceMetricsOverride` 会让主进程直接消失**（退出码 127、stdout 空、
+   连 `try/catch` 都来不及）。它只用于把视口与设备像素比对齐（窗口本身已是 1280×900），
+   价值有限 → 现在带 2s 超时 + 失败忽略，且在 `ORCHDESK_BROWSER_NO_SANDBOX=1` 时直接跳过。
+2. **`Page.captureScreenshot` 取不到合成帧时会永久挂起，而不是报错**。同环境下 Electron 原生
+   `webContents.capturePage()` 68ms 就出图 → 截图改为「CDP（带超时，默认 8s）→ capturePage 回退」，
+   回退时如实告知模型只截到视口，不冒充整页。
+3. **`Page.navigate` 挂起时页面根本不会被打开** → 回退 `win.loadURL()`（did-finish-load 才 resolve）。
+   同理 `Page.enable` / `Runtime.enable` 只是锦上添花（前者只为收 `loadEventFired`，后者对
+   `Runtime.evaluate` 非必需），改为带超时的可降级调用；`Runtime.evaluate` 外层再加超时，
+   超时后退回 `executeJavaScript`（缺 awaitPromise / CSP 豁免，只作最后兜底）。
+
+**原则**：CDP 出问题时宁可降级也不要挂起——「工具没反应」比「降级后功能少一点」糟糕得多，
+且降级路径必须**可见**（结果里带 `via`，沙箱日志写明「已回退 capturePage」），
+不许用「跑通了」掩盖「其实是兜底跑通的」。
+
+另外两个纯环境坑（也已写进脚本）：没有主窗口时关掉最后一个窗口会让 Electron 默认 `quit`
+（表现为跑一半静默退出、rc=0 且无结果），冒烟脚本必须拦 `window-all-closed`；
+冒烟过程中不要中途开关窗口（关掉后再新建并 attach 会让主进程消失）。

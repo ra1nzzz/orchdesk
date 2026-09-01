@@ -38,6 +38,12 @@ class DebuggerStub extends EventEmitter {
     this.evaluateResult = { result: { type: 'string', value: 'stub-value' } };
     /** 导航后 webContents.getURL() 的返回值。 */
     this.url = '';
+    /**
+     * 截图行为：'ok' 正常返回 / 'hang' 永久挂起 / 'reject' 立即失败。
+     * 真机上合成器不产帧时 CDP 截图就是 hang —— 这个开关用来验证
+     * 「超时后回退 capturePage」的兜底真的存在，而不是只有注释里存在。
+     */
+    this.screenshotMode = 'ok';
   }
   attach(version) { this.attached = true; this.version = version; }
   detach() { this.attached = false; }
@@ -50,10 +56,31 @@ class DebuggerStub extends EventEmitter {
       setImmediate(() => this.emit('message', {}, 'Page.loadEventFired', {}));
       return {};
     }
-    if (method === 'Page.captureScreenshot') return { data: Buffer.from('stub-shot').toString('base64') };
+    if (method === 'Page.captureScreenshot') {
+      if (this.screenshotMode === 'hang') return new Promise(() => { /* 永不 resolve：模拟合成器不产帧 */ });
+      if (this.screenshotMode === 'reject') throw new Error('CDP 截图被拒绝');
+      return { data: Buffer.from('stub-shot').toString('base64') };
+    }
     if (method === 'Runtime.evaluate') return this.evaluateResult;
     return {};
   }
+}
+
+/** 假 nativeImage：够 browser-cdp 用来本地缩放生成缩略图。 */
+function makeImageStub(buf) {
+  const img = {
+    _buf: buf || Buffer.from('stub-png'),
+    getSize: () => ({ width: 1280, height: 900 }),
+    resize: (o) => {
+      const resized = makeImageStub(img._buf);
+      const w = (o && o.width) || 1280;
+      resized.getSize = () => ({ width: w, height: 900 });
+      return resized;
+    },
+    toJPEG: () => Buffer.from('stub-jpeg'),
+    toPNG: () => Buffer.from(img._buf),
+  };
+  return img;
 }
 
 /**
@@ -78,6 +105,8 @@ function makeElectronStub(opts = {}) {
   const windows = [];
   /** 所有窗口发出的 CDP 命令（ADR-0011 浏览器工具断言用）。 */
   const cdpCommands = [];
+  /** capturePage 调用记录（ADR-0011：CDP 截图超时后的回退路径断言用）。 */
+  const capturePageCalls = [];
   const shortcut = makeGlobalShortcutStub();
   const notifications = [];
 
@@ -91,6 +120,8 @@ function makeElectronStub(opts = {}) {
     windows,
     /** CDP 命令流水（webContents.debugger.sendCommand 全记录）。 */
     cdpCommands,
+    /** capturePage 回退调用记录（截图兜底断言用）。 */
+    capturePageCalls,
     /** 已注册的全局加速器（FR-4.2）。 */
     get shortcuts() { return shortcut.registered; },
     /** 已发出的系统通知（FR-4.2）。 */
@@ -123,6 +154,8 @@ function makeElectronStub(opts = {}) {
           getTitle: () => this.title || '',
           isLoading: () => false,
           debugger: dbg,
+          // CDP 截图超时后的回退路径（不依赖合成器）
+          capturePage: async () => { capturePageCalls.push(Date.now()); return makeImageStub(Buffer.from('captured-png')); },
           on: () => {},
           once: () => {},
         };
@@ -159,7 +192,11 @@ function makeElectronStub(opts = {}) {
     Notification: makeNotificationStub(notifications),
     screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) },
     Menu: { buildFromTemplate: () => ({}) },
-    nativeImage: { createEmpty: () => ({}), createFromPath: () => ({}) },
+    nativeImage: {
+      createEmpty: () => makeImageStub(Buffer.alloc(0)),
+      createFromPath: () => makeImageStub(Buffer.alloc(0)),
+      createFromBuffer: (buf) => makeImageStub(buf),
+    },
     contextBridge: { exposeInMainWorld: () => {} },
     shell: { openPath: async () => '' },
     safeStorage: opts.safeStorage || {

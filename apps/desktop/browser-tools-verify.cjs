@@ -120,6 +120,20 @@ function runExpr(expr, dom, extra = {}) {
     assert.strictEqual(bt.clampBrowserTimeout(null, 'eval'), bt.BROWSER_EVAL_TIMEOUT_DEFAULT);
     assert.strictEqual(bt.clampBrowserTimeout('', 'action'), bt.BROWSER_ACTION_TIMEOUT_DEFAULT);
     assert.strictEqual(bt.clampBrowserTimeout(99999, 'action'), bt.BROWSER_ACTION_TIMEOUT_MAX);
+    // 截图超时是「防卡死」的最后一道：默认 8s，缺省不得退化成下限 500ms
+    assert.strictEqual(bt.clampBrowserTimeout(999999, 'shot'), bt.BROWSER_SHOT_TIMEOUT_MAX);
+    assert.strictEqual(bt.clampBrowserTimeout(undefined, 'shot'), bt.BROWSER_SHOT_TIMEOUT_DEFAULT);
+    assert.strictEqual(bt.clampBrowserTimeout('', 'shot'), bt.BROWSER_SHOT_TIMEOUT_DEFAULT);
+    assert.strictEqual(bt.clampBrowserTimeout(300, 'shot'), bt.BROWSER_SHOT_TIMEOUT_MIN, '低于下限应钳到下限');
+    assert.strictEqual(bt.clampBrowserTimeout(1500, 'shot'), 1500);
+  });
+
+  await check('参数归一化：browser_screenshot 带出截图超时（给回退兜底用）', () => {
+    const r = bt.normalizeBrowserArgs('browser_screenshot', { fullPage: true });
+    assert.strictEqual(r.value.fullPage, true);
+    assert.strictEqual(r.value.timeoutMs, bt.BROWSER_SHOT_TIMEOUT_DEFAULT, '缺省应是默认超时，不是 undefined');
+    const r2 = bt.normalizeBrowserArgs('browser_screenshot', { timeout: 1200 });
+    assert.strictEqual(r2.value.timeoutMs, 1200);
   });
 
   await check('参数归一化：browser_text 缺省参数回落默认字数（不是下限 200）', () => {
@@ -387,6 +401,45 @@ function runExpr(expr, dom, extra = {}) {
     assert.ok(m[1].toLowerCase().endsWith('.png'));
     const shot = electronStub.cdpCommands.filter((c) => c.method === 'Page.captureScreenshot');
     assert.ok(shot.length >= 1, '应发出截图命令');
+  });
+
+  // 真机教训（2026-09-01）：合成器不产帧时 CDP 的 Page.captureScreenshot 会**永久挂起**
+  // 而不是报错——远程桌面 / 锁屏 / 无 GPU 会话下必挂，整个回合卡死。
+  // 因此必须有超时 + capturePage 回退，且这两件事都要有回归断言（不能只写在注释里）。
+  await check('browser_screenshot：CDP 截图挂起时超时回退 capturePage，仍然出图', async () => {
+    const win = electronStub.windows[electronStub.windows.length - 1];
+    win.webContents.debugger.screenshotMode = 'hang';
+    const before = electronStub.capturePageCalls.length;
+    const r = await runTool('browser_screenshot', { timeout: 500 });
+    const m = r.result && r.result.match(/截图已保存：(.*?)（视口截图/);
+    assert.ok(!r.error, '挂起也应回退出图，实际：' + JSON.stringify(r));
+    assert.ok(m, '结果应给出路径并说明是回退：' + r.result);
+    assert.ok(fs.existsSync(m[1]), '回退截图应落盘：' + m[1]);
+    assert.strictEqual(electronStub.capturePageCalls.length, before + 1, '应真的调用 capturePage 回退');
+    assert.ok(r.result.includes('视口截图'), '回退必须如实告知只截到视口：' + r.result);
+  });
+
+  await check('browser_screenshot：CDP 报错时同样走回退，而不是把错误抛给模型', async () => {
+    const win = electronStub.windows[electronStub.windows.length - 1];
+    win.webContents.debugger.screenshotMode = 'reject';
+    const r = await runTool('browser_screenshot', { timeout: 500 });
+    assert.ok(!r.error, 'CDP 失败应回退，实际：' + JSON.stringify(r));
+    assert.ok(/截图已保存：/.test(r.result), '应仍给出路径：' + r.result);
+    win.webContents.debugger.screenshotMode = 'ok';
+  });
+
+  await check('browser_screenshot：两条路都不通时如实报错（不假装成功）', async () => {
+    const win = electronStub.windows[electronStub.windows.length - 1];
+    win.webContents.debugger.screenshotMode = 'hang';
+    const origCapture = win.webContents.capturePage;
+    win.webContents.capturePage = async () => { throw new Error('capturePage 也失败'); };
+    try {
+      const r = await runTool('browser_screenshot', { timeout: 500 });
+      assert.ok(r.error, '应如实报错，实际：' + JSON.stringify(r));
+    } finally {
+      win.webContents.capturePage = origCapture;
+      win.webContents.debugger.screenshotMode = 'ok';
+    }
   });
 
   await check('browser_click：无 GUI 应答方时不开门（fail-closed），且沙箱日志记 denied', async () => {
