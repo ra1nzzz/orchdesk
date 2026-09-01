@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.12.0`（tag `v0.12.0` 已推送；GitHub Release 待发） | SemVer，pre-1.0 阶段；`0.11.0` 为上一 Release |
-| **最新 Commit** | `a99e4cc` | chore: memory for 2026-09-01（push 直连姿势 + Minke 同类项目分析） |
+| **最新 Commit** | `a17d9cd` | feat(verify): TS 直测 loader + 架构守护测试（ADR-0010） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.4.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.4.1) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ GitHub Release |
