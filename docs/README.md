@@ -2,7 +2,7 @@
 id: orch-root-001
 title: OrchDesk 知识库根索引
 status: canonical
-updated: 2026-08-17
+updated: 2026-09-02
 ---
 
 # OrchDesk 知识库
@@ -14,7 +14,7 @@ updated: 2026-08-17
 
 | 层 | 内容 | 入口 |
 |---|---|---|
-| 00-项目 | 当前状态、责任边界、来源并入 | [当前状态](00-项目/current-state.md) · [来源并入记录](00-项目/source-intake.md) |
+| 00-项目 | 当前状态、责任边界、来源并入 | [当前状态](00-项目/current-state.md) · [CHECKPOINT（批次快照/验证计数）](00-项目/CHECKPOINT.md) · [来源并入记录](00-项目/source-intake.md) |
 | 10-架构 | 系统边界与图示 | [总体架构](10-架构/architecture.md) |
 | 20-需求 | 产品合同 | [PRD](20-需求/PRD.md) · [UI/UX 规范](20-需求/ui-ux.md) |
 | 30-开发 | 协作与开发流程 | [分解 PLAN](30-开发/PLAN.md) · [工作流/SOP](30-开发/workflow.md) |

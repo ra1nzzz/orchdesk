@@ -3,7 +3,7 @@ id: orch-arc-001
 title: OrchDesk 总体架构
 status: canonical
 version: v1.0
-updated: 2026-08-17
+updated: 2026-09-02
 ---
 
 # OrchDesk 总体架构
@@ -127,3 +127,18 @@ OrchDesk 对策（`compensation` 插件）：
 | 意图网关挂 agent/pre-step | [ADR-0003](../70-决策/ADR-0003-intent-gateway-pre-step.md) |
 | 脑-手层级实现方式 | [ADR-0004](../70-决策/ADR-0004-brain-hands-hierarchy.md) |
 | 跨平台沙箱 backend | [ADR-0005](../70-决策/ADR-0005-sandbox-backends.md) |
+| 模型调用/工具循环为直连实现，主回合经 `firePreStep` 驱动 `agent/pre-step` | [ADR-0008](../70-决策/ADR-0008-model-loop-dsh-bridge.md) |
+| SessionEvent 事件流双写（不接管 dsh ctx.sessions） | [ADR-0009](../70-决策/ADR-0009-session-event-log.md) |
+| TS 直测 loader + 架构守护测试（纯逻辑模块零 electron 依赖） | [ADR-0010](../70-决策/ADR-0010-ts-direct-test-and-arch-guard.md) |
+| 浏览器工具走 Electron 自带 CDP（不引入 playwright/puppeteer） | [ADR-0011](../70-决策/ADR-0011-browser-tools-cdp.md) |
+| 终端 PTY 多候选加载 + 管道显式降级；文件面板只读优先 | [ADR-0012](../70-决策/ADR-0012-terminal-pty-and-file-panel.md) |
+| 文件面板编辑/diff：乐观并发（mtimeMs）+ 原子写回 + EOL 保护 | [ADR-0013](../70-决策/ADR-0013-file-edit-diff.md) |
+
+## 10. 桌面壳增强能力分层（Minke 对照交付）
+
+浏览器工具（ADR-0011）、终端 PTY（ADR-0012）、文件面板（ADR-0012/0013）遵循同一分层与口径：
+
+- **纯逻辑层**：`browser-tools.ts` / `terminal-tools.ts` / `file-panel.ts` 零 electron 依赖（arch-guard 守护）；渲染层共享逻辑用 UMD-lite 单文件（`session-fork.js` / `file-edit.js`），`<script>` 挂 app.js 之前。
+- **宿主层**：`browser-cdp.ts` / `terminal-pty.ts` 只依赖 node 内置；main.ts 只做 IPC 接线。
+- **安全口径**：Agent 的边界外动作（浏览器导航/点击、`file_write` 工具）走授权门；**用户亲手操作**（文件面板浏览/编辑/保存）不走授权门，以外部修改检测（mtimeMs）+ editable 统一判定 + 原子写回替代。
+- **降级必须可见**：CDP 挂起降级、`via:'pipe'` 终端、shiki/xterm 缺失回落、shiki 语言不猜——全部显式标注，禁止静默兜底。

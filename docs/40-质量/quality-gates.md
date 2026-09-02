@@ -2,7 +2,7 @@
 id: orch-qag-001
 title: OrchDesk 质量门禁与不变量
 status: canonical
-updated: 2026-08-17
+updated: 2026-09-02
 ---
 
 # 质量门禁与不变量
@@ -50,3 +50,12 @@ git diff --check
 - API Key：AES-256-GCM 加密存储，密钥派生自机器指纹（继承 OrchStar 设计）。
 - Token：SHA-256 哈希比较。
 - 密钥/令牌/本机绝对路径**不得**进入 `docs/` 与日志。
+
+## 6. 验证套件链（canonical 计数方：本节；最新批次快照见 CHECKPOINT）
+
+`cd apps/desktop && npm run verify` 为单一全量入口（2026-09-02 起 **24 套件 805 项**，EXIT=0 才算通过）。各计数与套件清单随批次演进，**以 CHECKPOINT「验证套件」行为最新快照**，本节只登记结构性约定：
+
+- **分层覆盖**：纯逻辑（importTs 直测源码）→ 宿主（require dist + stub 注入）→ 接线（stub electron 驱动 dist/main.js 真实 handler）。三层缺一即视为未验证。
+- **架构守护**：`arch-guard-verify.cjs` 维护 PURE_MODULES 清单（零 electron 依赖模块），新增纯逻辑模块必须登记。
+- **真机冒烟不进 verify 链**：`pnpm run smoke:browser`（CDP 真机 11 步）需真 GPU/渲染进程，非交互会话必假红，刻意隔离在链外；同理，任何需真实渲染进程的验收归入用户桌面会话执行（BUG-W02 门控口径）。
+- **计数防漂移口径**：VERIFY 链新增/删除套件或用例数变化时，同批次必须同步更新 CHECKPOINT 状态表；批量断言失败先怀疑实现再怀疑断言（历史教训：两次「疑似断言太严」均为真 bug）。

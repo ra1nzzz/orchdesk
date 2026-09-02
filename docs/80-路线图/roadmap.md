@@ -2,7 +2,7 @@
 id: orch-rmp-001
 title: OrchDesk 路线图
 status: canonical
-updated: 2026-08-17
+updated: 2026-09-02
 ---
 
 # OrchDesk 路线图
@@ -13,12 +13,15 @@ updated: 2026-08-17
 
 按 [PLAN](../30-开发/PLAN.md) 推进 P0–P6：底座 → 桌面壳 → 核心域 → 安全 → 智能 → 编排 → 生态打磨。
 
+**Minke 对照增强（2026-08-31 ~ 09-02 已交付）**：工程基建（ADR-0010）→ 浏览器工具（ADR-0011）→ 终端 PTY + 文件面板（ADR-0012）→ 文件编辑/diff（ADR-0013），verify 24 套件 805 项全绿。剩余收口：v0.13.0 发版（changelog → tag → dist 链）与真机 GUI 冒烟（终端/文件面板实机点击，须用户桌面会话）。
+
 ## 中期（P6 之后）
 
 | 方向 | 说明 | 来源 |
 |---|---|---|
 | 技能市场生态 | 接入观雅集：浏览/安装/发布技能；灵璧付费技能支持 | 观雅集 API（`guanji` SKILL 约定） |
 | macOS 沙箱 backend | sandbox-exec / 独立 helper，补 GAP-02 | [ADR-0005](../70-决策/ADR-0005-sandbox-backends.md) |
+| 文件面板编辑器升级 | CodeMirror merge 双栏 diff、大文件流式加载、目录书签 | [ADR-0013](../70-决策/ADR-0013-file-edit-diff.md) 后置项 |
 | 向量召回升级 | 本地 embedding 模型替代 TF-IDF | 继承 OrchStar Phase 3 |
 | Dreaming 离线评估 | 用历史 SessionEvent 日志离线回放评估意图拦截策略 | 笔记 125 DREAM |
 | 可视化工作流编排 | 拖拽式 Agent 协作链（编排层的图形化） | 继承 OrchStar Phase 3 |

@@ -2,7 +2,7 @@
 id: orch-cur-001
 title: OrchDesk 当前状态
 status: canonical
-updated: 2026-08-29
+updated: 2026-09-02
 ---
 
 # OrchDesk 当前状态
@@ -133,7 +133,7 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 
 1. **底座**：deepseek-harness（dsh），Cordis 内核。决策见 [ADR-0001](../70-决策/ADR-0001-base-deepseek-harness.md)。
 2. **dsh 没有桌面壳**：`apps/` 仅 `cli` 与 `web`；早期「存在 apps/qurvis（Electron）」的说法已证伪。桌面壳是 OrchDesk 自建增量。见 [冲突裁决](../70-决策/conflicts.md)。
-3. **OrchDesk 的自建增量**：桌面壳（`dsh-desktop` bundle + Electron）、跨平台沙箱 backend（**dsh 已内置三平台 backend**：win32 `windows-acl` / darwin `seatbelt` / linux `bwrap`→`landlock`，OrchDesk 不重写，仅接线+验证+GUI 暴露，见 [sandbox-backends.md](../30-开发/sandbox-backends.md)）、系统边界外补偿层、上游意图网关（挂 `agent/pre-step`）、**记忆分层 `memory-layers` 与系统提示词库 `prompt-lib`（P4 新增，因 dsh 无 memory/vector 专属包，属 OrchDesk 自建业务插件，本地优先、四域物理隔离、不调云端 embedding）**；以及 P6 生态层 **观雅集客户端（复用 guanji SKILL API 约定、TOKEN 用户配置不硬编码）与 OrchClaw Hub 配对客户端（凭据经 safeStorage 加密）**，均为 OrchDesk 自建客户端、不重写 guanji/Hub 核心（防漂移）。
+3. **OrchDesk 的自建增量**：桌面壳（`dsh-desktop` bundle + Electron）、跨平台沙箱 backend（**dsh 已内置三平台 backend**：win32 `windows-acl` / darwin `seatbelt` / linux `bwrap`→`landlock`，OrchDesk 不重写，仅接线+验证+GUI 暴露，见 [sandbox-backends.md](../30-开发/sandbox-backends.md)）、系统边界外补偿层、上游意图网关（挂 `agent/pre-step`）、**记忆分层 `memory-layers` 与系统提示词库 `prompt-lib`（P4 新增，因 dsh 无 memory/vector 专属包，属 OrchDesk 自建业务插件，本地优先、四域物理隔离、不调云端 embedding）**；以及 P6 生态层 **观雅集客户端（复用 guanji SKILL API 约定、TOKEN 用户配置不硬编码）与 OrchClaw Hub 配对客户端（凭据经 safeStorage 加密）**，均为 OrchDesk 自建客户端、不重写 guanji/Hub 核心（防漂移）。**2026-09 新增（Minke 对照）**：浏览器工具（自带 CDP，ADR-0011）、终端 PTY（多候选+管道显式降级，ADR-0012）、文件面板（只读→编辑/diff，ADR-0012/0013），分层与安全口径见 [架构 §10](../10-架构/architecture.md)、需求落点 [PRD FR-14](../20-需求/PRD.md)。
 4. **前身 OrchStar** 已完成 Web 后端（P0–P7、464 测试），但 UI 未接线、桌面壳未完成；其产品域作为 OrchDesk 的需求基线，代码不回迁。见 [归档索引](../99-归档/index.md)。
 5. **原型收敛结论（v0.6）**：3 入口（会话/插件/设置）、会话=一等公民、亮点功能视觉弱化但基于事实执行、一切皆插件、首批 5 内置插件（意图识别/TRACE/脑手解耦/多Agent编排/OrchClaw Hub 延后）。此为后续所有工作的基线，不可违背。
 6. **dsh 底座已内置 P3 核心**（收敛发现）：dsh-base 在 win32 自动挂载 `dsh-sandbox-windows-acl` 受限令牌沙箱链 + 三权限预设（`workspace-write`/`read-only`/`danger-full-access`）+ approval seam（`ask`/`never`）。OrchDesk 的 P3 主要工作收敛为 GUI 接线 + win32 ACL 验证 + fail-closed 复核，**无需从零写沙箱/授权核心**。bundle 机制（`cordis.patch.yml` 的 `insert` 按 id 覆盖叠加 + profile `dsh.profile.bundles` 多层）已确认，是 `dsh-desktop` 落地的机制基础。
@@ -207,3 +207,19 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 | **附加改进** | 软拒绝路径补 `[softReject]` 模型日志；空内容但去 tools 后仍空时**不**误置 `toolsRejected`，避免把真·空响应误判为网关不支持工具 |
 | **验证** | `model-loop-verify.cjs` 新增 M 组 3 项（M1 逐级降级 / M2 文本兜底完成任务 / M3 跨会话记忆）；`npm run verify` 扩至 **11 套件 313 项全绿**；tsc EXIT=0 |
 | **审阅** | `yt-dev-review` 三维度并发审阅：质量/效率均指出 toolsRejected 应跨会话持久化（已采纳）；质量指出空响应不应误置 toolsRejected（已采纳）；可复用性指出软拒绝分支缺日志与空白 content fail-open（已补日志；空白 content 边界本次未单独抽函数，留后续） |
+
+## 桌面能力增强：Minke 对照四批（2026-08-31 ~ 2026-09-02 · v0.12.x）
+
+> 同底座同类项目 Minke（lencx/Minke）三路对照分析的吸收批次。分阶段计划与每日细节见 CHECKPOINT 第十二~十六批；本节只登记结构性事实。
+
+| 批次 | 交付 | 裁决/证据 |
+|---|---|---|
+| P0 工程基建 | TS 直测 loader + 架构守护测试 | [ADR-0010](../70-决策/ADR-0010-ts-direct-test-and-arch-guard.md)：Node ≥22.13 硬要求；PURE_MODULES 登记制 |
+| P1 浏览器工具 | 8 工具并入统一工具表（TOOL_DEFS 7→15），Electron 自带 CDP | [ADR-0011](../70-决策/ADR-0011-browser-tools-cdp.md)；真机冒烟 `smoke:browser` 11/11（不进 verify 链） |
+| P2-10 终端 PTY | 终端 Tab（多会话、上限 6）：node-pty 多候选加载，全落空显式降级管道 | [ADR-0012](../70-决策/ADR-0012-terminal-pty-and-file-panel.md)：`via:'pty'\|'pipe'` 必须可见；vendor 物化 + asarUnpack |
+| P2-11 文件面板（只读） | 懒加载树 + 预览（shiki 精简 bundle，语言探测不到不猜） | 同上；2MB 显式截断、二进制双通道嗅探 |
+| P3 文件编辑/diff | 用户亲手编辑/保存/diff，不走授权门 | [ADR-0013](../70-决策/ADR-0013-file-edit-diff.md)：外部修改检测（mtimeMs）+ editable 统一判定 + 原子写回 + EOL 保护 |
+
+**验证规模**：`npm run verify` 11 套件 313 项（BUG-018 批次）→ **24 套件 805 项**（2026-09-02）。提交链：`81d804e`/`d0ab400`（P1）→ `bc07239`/`3661ef9`（P2）→ feat 文件编辑/`9444d61`（P3 文档）。需求侧落点为 [PRD FR-14](../20-需求/PRD.md)；分层与降级口径见 [架构 §10](../10-架构/architecture.md)。
+
+**遗留**：终端/文件面板真机 GUI 冒烟待用户桌面会话（BUG-W02 门控口径不变）；CodeMirror merge 级 diff 已列路线图中期。
