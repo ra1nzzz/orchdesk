@@ -266,6 +266,7 @@
       // 文件（P2-11）：无桥 → ok:false，面板显示「未接入」
       fileTree: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
       fileRead: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      fileWrite: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
     };
   })();
 
@@ -351,7 +352,10 @@
     terminalPanelOpen: false,
     // 文件（P2-11）：root='' = 尚未选择目录。children 是目录懒加载缓存。
     filePanelOpen: false,
-    filePanel: { loaded: false, root: '', truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false },
+    filePanel: { loaded: false, root: '', truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false,
+      // P3 编辑/diff：view = preview | edit | diff；diffRows/diffTooLarge 是最近一次计算结果
+      view: 'preview', editBuf: '', eol: 'lf', dirty: false, saving: false, discardArmed: false,
+      diffRows: null, diffTooLarge: false, diffLineDelta: 0, diffStat: '', saveError: '' },
     // 连接器（PRD FR-3）：真实后端注册表（凭证加密存储 + 保存即探测）。
     // loaded=false 时侧栏显示「未接入」，不能拿空数组冒充「都没配置」。
     connectors: { items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 }, loaded: false, expanded: null },
@@ -2533,6 +2537,9 @@
     const fp = state.filePanel;
     fp.previewPath = path;
     fp.previewLoading = true;
+    // 换文件 = 重置编辑态（编辑另一个文件前不保留上一个文件的缓冲）
+    fp.view = 'preview'; fp.editBuf = ''; fp.saving = false; fp.discardArmed = false;
+    fp.diffRows = null; fp.diffTooLarge = false; fp.diffLineDelta = 0; fp.saveError = '';
     const view = $('#fileView');
     if (view) view.innerHTML = `<div class="faint" style="padding:14px">读取中…</div>`;
     const r = await bridge.fileRead(path);
@@ -2546,9 +2553,65 @@
     }
     if (view && fp.previewPath !== path) return; // 用户已点开别的文件
     fp.preview = r;
-    const meta = `<div class="file-view-head"><span>${esc(path)}</span><span class="row" style="margin-left:auto"><span class="faint">${esc(r.sizeLabel || '')}${r.truncated ? ' · 已截断（只读前 2MB）' : ''}</span></span></div>`;
+    renderFileView();
+  }
+
+  /** 文件不可编辑的原因（显式降级：不说「能编辑」也不说「坏了」，说清为什么不能）。 */
+  function fileEditBlockReason(r) {
+    if (r.binary) return '二进制文件';
+    if (r.truncated) return '文件超过 2MB 读取上限（只读了前段，保存会截断文件）';
+    if (r.encodingSuspicious) return '内容不是有效 UTF-8（保存会产生乱码）';
+    return '';
+  }
+
+  /** 编辑缓冲的「将要写盘」形态：textarea 产物是纯 LF，CRLF 文件按原风格还原。 */
+  function fileEditWillSave() {
+    const fp = state.filePanel;
+    return window.OrchDeskFileEdit
+      ? window.OrchDeskFileEdit.applyEol(fp.editBuf, fp.eol)
+      : fp.editBuf;
+  }
+
+  function fileViewToolbar(r) {
+    const fp = state.filePanel;
+    const editable = !!r.editable && typeof bridge.fileWrite === 'function' && !!(window.OrchDeskFileEdit && window.OrchDeskFileEdit.computeDiff);
+    const reason = fileEditBlockReason(r);
+    const btns = [];
+    if (fp.view === 'edit') {
+      btns.push(`<button class="btn sm ${fp.diffRows ? 'ghost' : 'ghost'}" data-action="file-edit-diff">${fp.view === 'diff' ? '退出对比' : '对比变更'}</button>`);
+      btns.push(`<button class="btn sm primary" data-action="file-edit-save"${fp.saving ? ' disabled' : ''}>${fp.saving ? '保存中…' : '保存'}</button>`);
+      btns.push(`<button class="btn sm ghost" data-action="file-edit-cancel">${fp.discardArmed ? '确认丢弃？' : (fp.dirty ? '放弃修改' : '取消编辑')}</button>`);
+    } else if (editable) {
+      btns.push('<button class="btn sm ghost" data-action="file-edit">编辑</button>');
+    }
+    return `<span class="row" style="margin-left:auto">
+      ${!editable && reason ? `<span class="faint" title="该文件不可编辑">不可编辑：${esc(reason)}</span>` : ''}
+      ${fp.dirty ? '<span class="badge warn">未保存</span>' : ''}
+      ${btns.join('')}
+    </span>`;
+  }
+
+  function renderFileView() {
+    const fp = state.filePanel;
+    const view = $('#fileView');
+    const r = fp.preview;
+    if (!view || !r) return;
+    const renderPath = fp.previewPath;
+    const meta = `<div class="file-view-head"><span>${esc(fp.previewPath)}</span>
+      <span class="faint">${esc(r.sizeLabel || '')}${r.truncated ? ' · 已截断（只读前 2MB）' : ''}</span>
+      ${fileViewToolbar(r)}</div>`;
     if (r.binary) {
-      if (view) view.innerHTML = meta + `<div class="faint" style="padding:14px">二进制文件（${esc(r.sizeLabel || '')}），不提供内容预览。</div>`;
+      view.innerHTML = meta + `<div class="faint" style="padding:14px">二进制文件（${esc(r.sizeLabel || '')}），不提供内容预览。</div>`;
+      return;
+    }
+    if (fp.view === 'edit') {
+      view.innerHTML = meta
+        + (fp.saveError ? `<div class="file-edit-error">${esc(fp.saveError)} <button class="btn sm ghost" data-action="file-edit-reload">重新加载</button></div>` : '')
+        + `<textarea id="fileEditBuf" class="file-edit-area" spellcheck="false">${esc(fp.editBuf)}</textarea>`;
+      return;
+    }
+    if (fp.view === 'diff') {
+      view.innerHTML = meta + renderFileDiffBody();
       return;
     }
     // shiki 高亮：可用且语言受支持才走；否则纯文本 <pre>（不猜语言）
@@ -2556,17 +2619,137 @@
     const useShiki = typeof window !== 'undefined' && window.ShikiLite
       && lang && window.ShikiLite.supportedLang(lang) && lang !== 'plaintext';
     if (useShiki) {
-      try {
-        const theme = document.documentElement.dataset.theme === 'light' ? 'github-light' : 'github-dark';
-        const h = await window.ShikiLite.createHighlighter({ langs: FILE_SHIKI_LANGS, theme });
-        if (fp.previewPath !== path) return;
-        if (view) view.innerHTML = meta + `<div class="file-code">${h.codeToHtml(r.content, { lang })}</div>`;
-        return;
-      } catch (err) {
-        console.warn('[file] shiki 高亮失败，回落纯文本:', err && err.message);
+      window.ShikiLite.createHighlighter({ langs: FILE_SHIKI_LANGS, theme: document.documentElement.dataset.theme === 'light' ? 'github-light' : 'github-dark' })
+        .then((h) => {
+          if (fp.previewPath !== renderPath || fp.view !== 'preview' || fp.preview !== r) return;
+          view.innerHTML = meta + `<div class="file-code">${h.codeToHtml(r.content, { lang })}</div>`;
+        })
+        .catch((err) => {
+          console.warn('[file] shiki 高亮失败，回落纯文本:', err && err.message);
+          if (fp.view === 'preview') view.innerHTML = meta + `<pre class="file-pre">${esc(r.content)}</pre>`;
+        });
+      return;
+    }
+    view.innerHTML = meta + `<pre class="file-pre">${esc(r.content)}</pre>`;
+  }
+
+  function renderFileDiffBody() {
+    const fp = state.filePanel;
+    const fe = window.OrchDeskFileEdit;
+    if (!fe) return '<div class="faint" style="padding:14px">对比组件未接入（file-edit.js 未加载）。</div>';
+    if (fp.diffTooLarge) {
+      return `<div class="faint" style="padding:14px">变更过大（行数变化 ${fp.diffLineDelta > 0 ? '+' : ''}${fp.diffLineDelta}），不提供逐行对比；保存仍可用。</div>`;
+    }
+    const rows = fp.diffRows || [];
+    if (!rows.length) return '<div class="faint" style="padding:14px">无变更（与磁盘一致）。</div>';
+    const groups = fe.groupHunks(rows);
+    const html = groups.map((g) => {
+      const body = g.map((row) => {
+        const cls = row.t === 'add' ? 'add' : row.t === 'del' ? 'del' : 'ctx';
+        return `<div class="fd-row ${cls}"><span class="fd-no">${row.an || ''}</span><span class="fd-no">${row.bn || ''}</span><span class="fd-t">${esc(row.s) || '&nbsp;'}</span></div>`;
+      }).join('');
+      return `<div class="fd-hunk">${body}</div>`;
+    }).join('');
+    const stat = fp.diffStat || '';
+    return `<div class="fd-stat">${esc(stat)}</div><div class="file-diff">${html}</div>`;
+  }
+
+  function startFileEdit() {
+    const fp = state.filePanel;
+    const r = fp.preview;
+    if (!r || r.binary || r.truncated || r.encodingSuspicious) return;
+    const fe = window.OrchDeskFileEdit;
+    fp.eol = fe ? fe.detectEol(r.content) : 'lf';
+    fp.editBuf = r.content; // textarea 赋值后浏览器会把 CRLF 规范化为 LF（写盘时按 fp.eol 还原）
+    fp.dirty = false;
+    fp.view = 'edit';
+    fp.discardArmed = false;
+    fp.saveError = '';
+    fp.diffRows = null; fp.diffTooLarge = false;
+    renderFileView();
+    const ta = $('#fileEditBuf');
+    if (ta) ta.focus();
+  }
+
+  function computeFileDiff() {
+    const fp = state.filePanel;
+    const fe = window.OrchDeskFileEdit;
+    if (!fe || !fp.preview) return;
+    const will = fileEditWillSave();
+    const d = fe.computeDiff(fp.preview.content, will);
+    if (d.ok) {
+      fp.diffRows = d.rows;
+      fp.diffTooLarge = false;
+      fp.diffStat = `+${d.stats.adds} / -${d.stats.dels}`;
+    } else {
+      fp.diffRows = null;
+      fp.diffTooLarge = true;
+      fp.diffLineDelta = d.lineDelta;
+      fp.diffStat = '';
+    }
+  }
+
+  async function saveFileEdit() {
+    const fp = state.filePanel;
+    const r = fp.preview;
+    if (!r || fp.saving) return;
+    if (typeof bridge.fileWrite !== 'function') { toast('保存失败：主进程未接入', 'err'); return; }
+    fp.saving = true;
+    fp.saveError = '';
+    renderFileView();
+    const will = fileEditWillSave();
+    const res = await bridge.fileWrite(r.path || fp.previewPath, will, r.mtimeMs);
+    fp.saving = false;
+    if (res && res.ok) {
+      // 预览基线更新为刚写盘的内容（后续 diff/编辑以新基线为准）
+      fp.preview.content = will;
+      fp.preview.mtimeMs = res.mtimeMs;
+      fp.preview.size = res.size;
+      fp.preview.sizeLabel = res.sizeLabel;
+      fp.dirty = false;
+      fp.view = 'preview';
+      fp.editBuf = '';
+      toast(`已保存（${res.sizeLabel || ''}）`, 'ok');
+    } else {
+      fp.saveError = (res && res.reason) || '保存失败';
+      if (res && res.code === 'modified-externally') {
+        // 外部修改拒绝：编辑态保留缓冲（改动不丢），由用户决定重新加载或另作处理
+        fp.view = 'edit';
       }
     }
-    if (view) view.innerHTML = meta + `<pre class="file-pre">${esc(r.content)}</pre>`;
+    renderFileView();
+  }
+
+  function cancelFileEdit() {
+    const fp = state.filePanel;
+    if (fp.dirty && !fp.discardArmed) {
+      // 两段式确认：第一次点只 arm（不弹窗打断），3.5s 内再点才真的丢弃
+      fp.discardArmed = true;
+      renderFileView();
+      setTimeout(() => { if (fp.discardArmed) { fp.discardArmed = false; if (fp.view === 'edit') renderFileView(); } }, 3500);
+      return;
+    }
+    fp.view = 'preview';
+    fp.editBuf = '';
+    fp.dirty = false;
+    fp.discardArmed = false;
+    fp.saveError = '';
+    fp.diffRows = null; fp.diffTooLarge = false;
+    renderFileView();
+  }
+
+  function toggleFileDiff() {
+    const fp = state.filePanel;
+    if (fp.view === 'diff') { fp.view = 'edit'; renderFileView(); return; }
+    computeFileDiff();
+    fp.view = 'diff';
+    renderFileView();
+  }
+
+  async function reloadFilePreview() {
+    const fp = state.filePanel;
+    const p = fp.previewPath;
+    if (p) await openFilePreview(p);
   }
 
 
@@ -3759,6 +3942,12 @@
         break;
       }
       case 'file-open': openFilePreview(el.dataset.path, el.dataset.name); break;
+      // P3 编辑/diff
+      case 'file-edit': startFileEdit(); break;
+      case 'file-edit-diff': toggleFileDiff(); break;
+      case 'file-edit-save': saveFileEdit(); break;
+      case 'file-edit-cancel': cancelFileEdit(); break;
+      case 'file-edit-reload': reloadFilePreview(); break;
       case 'browser-shot-dir': {
         bridge.openBrowserShotDir().then((r) => {
           if (!r || r.ok === false) toast(`打开截图目录失败：${(r && r.reason) || '未接入'}`, 'err');
@@ -3897,6 +4086,24 @@
 
   document.body.addEventListener('input', (e) => {
     if (e.target.id === 'composer') { updateOutboundWarn(e.target.value); return; }
+    // 文件编辑缓冲（P3）：只更新 dirty 徽标，不重渲染（textarea 重渲染会丢焦点/光标）
+    if (e.target.id === 'fileEditBuf') {
+      const fp = state.filePanel;
+      const was = fp.dirty;
+      fp.editBuf = e.target.value;
+      fp.dirty = fp.editBuf !== (fp.preview && fp.preview.content != null
+        ? (window.OrchDeskFileEdit ? window.OrchDeskFileEdit.applyEol(fp.preview.content, 'lf') : fp.preview.content)
+        : '');
+      if (was !== fp.dirty) {
+        const badge = document.querySelector('#fileView .badge.warn');
+        if (badge) badge.remove();
+        if (fp.dirty) {
+          const bar = document.querySelector('#fileView .file-view-head .row');
+          if (bar) bar.insertAdjacentHTML('afterbegin', '<span class="badge warn">未保存</span>');
+        }
+      }
+      return;
+    }
     // 沙箱日志检索：条件变化即重拉。防抖 350ms —— 每敲一个字都发一次 IPC 会
     // 把输入变成卡顿源（日志体量可能上百条）。
     if (e.target.id === 'sblog-kw') {

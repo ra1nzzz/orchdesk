@@ -156,6 +156,7 @@ import {
   languageOf,
   normalizeFileRead,
   normalizeFileTree,
+  normalizeFileWrite,
   sniffBinary,
   sortTreeEntries,
   BINARY_EXTENSIONS,
@@ -2748,17 +2749,59 @@ ipcMain.handle('orchdesk:file-read', async (_e, input: unknown) => {
         return {
           ok: true as const, path: norm.path, binary: true, truncated: false,
           size: st.size, sizeLabel: humanSize(st.size), lang: null, content: '',
+          mtimeMs: st.mtimeMs, encodingSuspicious: false, editable: false,
         };
       }
       const truncated = st.size > norm.maxBytes;
+      // 编辑资格判定（P3）：截断过的文件保存会丢数据、解出 U+FFFD 说明不是
+      // UTF-8（保存即乱码）——一律 editable=false 且渲染层显式给原因。
+      const decoded = buf.subarray(0, read).toString('utf8');
+      const encodingSuspicious = decoded.includes('\uFFFD');
       return {
         ok: true as const, path: norm.path, binary: false, truncated,
         size: st.size, sizeLabel: humanSize(st.size), lang,
-        content: buf.subarray(0, read).toString('utf8'),
+        content: decoded,
+        mtimeMs: st.mtimeMs, encodingSuspicious,
+        editable: !truncated && !encodingSuspicious,
       };
     } finally {
       fs.closeSync(fd);
     }
+  } catch (err) {
+    return { ok: false as const, reason: (err as Error).message };
+  }
+});
+
+ipcMain.handle('orchdesk:file-write', async (_e, input: unknown) => {
+  const norm = normalizeFileWrite(input as {
+    path?: string; content?: string; expectedMtimeMs?: number | string;
+  });
+  if (!norm.ok) return { ok: false as const, reason: norm.reason };
+  try {
+    const st = fs.statSync(norm.path);
+    if (st.isDirectory()) return { ok: false as const, reason: '目标是目录，不是文件' };
+    // 乐观并发检查：读取之后磁盘上又被改过（编辑器 / git / Agent 工具）就拒绝。
+    // mtimeMs 是浮点，不同文件系统精度不一，留 2ms 容差。
+    if (Math.abs(st.mtimeMs - norm.expectedMtimeMs) > 2) {
+      return {
+        ok: false as const, code: 'modified-externally' as const,
+        reason: '文件在读取后被外部修改过，保存会覆盖那些改动；请先重新加载',
+      };
+    }
+    // 同目录临时文件 + rename：写一半崩溃不会留下半截文件损坏原文件。
+    const tmp = path.join(path.dirname(norm.path), '.' + path.basename(norm.path) + '.orchdesk-tmp');
+    fs.writeFileSync(tmp, norm.content, 'utf8');
+    try {
+      fs.renameSync(tmp, norm.path);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* 临时文件清理失败可忽略 */ }
+      throw err;
+    }
+    const st2 = fs.statSync(norm.path);
+    return {
+      ok: true as const, path: norm.path,
+      size: st2.size, sizeLabel: humanSize(st2.size), mtimeMs: st2.mtimeMs,
+    };
   } catch (err) {
     return { ok: false as const, reason: (err as Error).message };
   }

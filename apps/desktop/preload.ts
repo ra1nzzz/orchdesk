@@ -274,11 +274,20 @@ const orchdesk = {
     entries?: Array<{ name: string; kind: 'file' | 'dir'; size: number; mtime: number; ext: string; binary: boolean }>;
   }> => ipcRenderer.invoke('orchdesk:file-tree', { dir }),
 
-  /** 读文件（≤2MB，超出显式 truncated；二进制只给元信息不吐内容）。 */
+  /** 读文件（≤2MB，超出显式 truncated；二进制只给元信息不吐内容）。
+   *  editable/binary/truncated/encodingSuspicious 由主进程统一判定，渲染层不猜。 */
   fileRead: (path: string): Promise<{
     ok: boolean; reason?: string; path?: string; binary?: boolean; truncated?: boolean;
     size?: number; sizeLabel?: string; lang?: string | null; content?: string;
+    mtimeMs?: number; encodingSuspicious?: boolean; editable?: boolean;
   }> => ipcRenderer.invoke('orchdesk:file-read', { path }),
+
+  /** 写回文件（P3 用户亲手编辑；带读取时 mtime 做乐观并发检查，
+   *  外部修改过返回 code='modified-externally'，渲染层提示重新加载）。 */
+  fileWrite: (path: string, content: string, expectedMtimeMs: number): Promise<{
+    ok: boolean; reason?: string; code?: string;
+    path?: string; size?: number; sizeLabel?: string; mtimeMs?: number;
+  }> => ipcRenderer.invoke('orchdesk:file-write', { path, content, expectedMtimeMs }),
 
   // ---- FR-6 SessionEvent 事件流（ADR-0009） ----
   /** 会话回放数据源：事件流时间线（沿血缘链拼接）；source='legacy' = 历史会话无事件日志。 */

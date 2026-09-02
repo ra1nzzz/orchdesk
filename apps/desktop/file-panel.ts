@@ -141,6 +141,59 @@ function clampCount(v: unknown, min: number, max: number, dflt: number): number 
 }
 
 // ---------------------------------------------------------------------------
+// 写回归一化（P3 编辑：用户亲手编辑，不走 Agent 授权门——但要防呆）
+// ---------------------------------------------------------------------------
+
+export type FileWriteArgs = {
+  path?: string;
+  content?: string;
+  expectedMtimeMs?: number | string;
+};
+
+export type NormalizedFileWrite = {
+  ok: true;
+  path: string;
+  content: string;
+  expectedMtimeMs: number;
+  bytes: number;
+};
+export type RejectedFileWrite = { ok: false; reason: string };
+
+/**
+ * 文件写回参数归一化。三条防呆都是「事故预防」而非安全边界：
+ *  1. 二进制扩展名拒绝——把图片当文本保存必然损坏；
+ *  2. 内容 ≤2MB——与读取上限一致，超限说明编辑器拿到了不该拿的东西；
+ *  3. expectedMtimeMs 必带——外部修改检测是宿主的职责，但参数缺失在这里
+ *     就拒绝（「静默覆盖」是文件编辑最不可逆的事故）。
+ */
+export function normalizeFileWrite(
+  input: FileWriteArgs | undefined,
+): NormalizedFileWrite | RejectedFileWrite {
+  const src = input && typeof input === 'object' ? input : {};
+  const p = typeof src.path === 'string' ? src.path.trim() : '';
+  if (p === '') return { ok: false, reason: '缺少 path' };
+  if (p.length > FILE_PATH_MAX) return { ok: false, reason: '路径过长' };
+  if (!/^[a-zA-Z]:[\\/]/.test(p) && !p.startsWith('/')) {
+    return { ok: false, reason: 'path 必须是绝对路径' };
+  }
+  if (looksBinaryByName(p)) return { ok: false, reason: '二进制文件不支持文本编辑' };
+  if (typeof src.content !== 'string') return { ok: false, reason: '缺少 content' };
+  const bytes = Buffer.byteLength(src.content, 'utf8');
+  if (bytes > FILE_READ_MAX_BYTES) {
+    return { ok: false, reason: `内容超过写入上限（${humanSize(FILE_READ_MAX_BYTES)}）` };
+  }
+  const mt = typeof src.expectedMtimeMs === 'number'
+    ? src.expectedMtimeMs
+    : typeof src.expectedMtimeMs === 'string' && src.expectedMtimeMs.trim() !== ''
+      ? Number(src.expectedMtimeMs)
+      : NaN;
+  if (!Number.isFinite(mt) || mt < 0) {
+    return { ok: false, reason: '缺少 expectedMtimeMs（外部修改检测）' };
+  }
+  return { ok: true, path: p, content: src.content, expectedMtimeMs: mt, bytes };
+}
+
+// ---------------------------------------------------------------------------
 // 树排序与模型
 // ---------------------------------------------------------------------------
 
