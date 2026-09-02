@@ -10,7 +10,7 @@ OrchDesk = 本地优先的多 Agent 编排桌面工作台。前身 OrchStar（�
 - 冲突显式裁决记录于 docs/70-决策/conflicts.md；架构决策落 ADR。
 
 ## 关键决策（ADR）
-dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Cordis Fiber+isolate / 沙箱按平台 backend（win 首发）/ 浏览器工具走 Electron 自带 CDP（ADR-0011）/ **终端 PTY 多候选+管道显式降级、文件 Tab 只读（ADR-0012）**。
+dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Cordis Fiber+isolate / 沙箱按平台 backend（win 首发）/ 浏览器工具走 Electron 自带 CDP（ADR-0011）/ **终端 PTY 多候选+管道显式降级、文件 Tab 只读（ADR-0012）/ 文件编辑不走授权门+外部修改检测+EOL 保护（ADR-0013）**。
 
 ## 浏览器工具（ADR-0011）真机铁律
 - **CDP 出问题宁可降级也不要挂起**，且降级必须可见（结果带 `via`、日志写明已回退），不许用「跑通了」掩盖「其实是兜底跑通的」。
@@ -38,10 +38,11 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 - `waitForLoad` 双保险：`Page.loadEventFired` 为主 + 250ms 轮询 `document.readyState` 兜底（页面在 attach 前已加载完时事件不会再发）。debugger 的所有 CDP 事件都走同一个 `'message'`，method 在第二个参数里。
 - UI 是验收底线（写进 ADR）：标题栏「浏览器」面板 + `onBrowserState` 推送实时跟随；桥不可用时 `getBrowserStatus` 返 `{open:false}` 表示「未接入」，不冒充「已就绪只是没开」。
 
-## 终端 PTY + 文件 Tab（ADR-0012，Minke 对照 P2-10/11）
+## 终端 PTY + 文件 Tab（ADR-0012，Minke 对照 P2-10/11）｜文件编辑/diff（ADR-0013，P3）
 - **node-pty 多候选**：`ORCHDESK_PTY_MODULE` env > `<appDir>/vendor/node-pty`（vendor-dsh 第 3 步物化 + `asarUnpack:["vendor/node-pty/**"]`，原生 .node 不能在 asar 内）> node_modules > dsh profile；全落空 → `child_process` 管道降级，`via:'pipe'` 徽标+toast 必须可见。
 - **环境净化硬前提**：子进程 env 剔除 NODE_OPTIONS/NODE_PATH/ELECTRON_RUN_AS_NODE（`TERMINAL_ENV_STRIP`）。洪峰防护：16ms 攒批 / 单条 256KB 截断标记 / 64KB 回放缓冲 / 会话上限 6。
-- **文件 Tab 只读**（编辑/diff 后置 P3）：用户亲手浏览**不走授权门**（与浏览器工具口径相反）；懒加载每层 500 条、读取 ≤2MB 显式 truncated、二进制嗅探=扩展名+头 8KB NUL、语言探测不到→null 不许猜。
+- **文件 Tab**：用户亲手浏览/编辑**不走授权门**（Agent 的 file_write 工具链路不变）；编辑四道防呆——expectedMtimeMs 外部修改检测（2ms 容差→modified-externally）、editable 主进程统一判定（二进制/截断/U+FFFD→false+原因）、临时文件 rename 原子写回、normalizeFileWrite 入口拒绝（二进制/超2MB/缺 mtime）。懒加载每层 500 条、读取 ≤2MB 显式 truncated、语言探测不到→null。
+- **diff**：编辑缓冲 vs 磁盘基线（不做 git diff）；`renderer/file-edit.js` UMD-lite：LCS 前后缀裁剪+DP、groupHunks ±3 上下文、**EOL 保护**（textarea 把 CRLF 吃成 LF→写盘前 detectEol/applyEol 还原，diff 也在还原后算，否则整文件假 diff）、>5000 行或 DP>4M 单元→tooLarge 只给行数变化。LCS 回溯循环退出后必须吐完单侧剩余行（丢 add 的真 bug）。
 - **渲染层全屏覆盖层**（非 modal）：xterm 实例不能随状态推送重绘——骨架只建一次（`dataset.ready`），ESC 关面板但焦点在 `.term-container` 内不抢；xterm 用官方 UMD vendored，shiki 用 esbuild IIFE bundle（`createHighlighterCore`+`createJavaScriptRegexEngine` 纯 JS 引擎，897KB，`window.ShikiLite`；v3 的 `createHighlighter` 不在 core）。vendor 源包当前在 `C:/Users/my/node_modules`（npm 无 package.json 时沿祖先上溯污染 home，待移入 workspace）。
 
 ## 渲染层纯逻辑的双环境单文件方案（重要约束）
@@ -49,7 +50,8 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 - 结论：需要「Node 验证套件 + 浏览器渲染层共用同一份」的纯逻辑，写成 **UMD-lite 单文件**（`module.exports` + `window.OrchDeskXxx`），`<script src>` 挂在 app.js **之前**。范例：`renderer/session-fork.js`（+ `session-fork-verify.cjs`）。零构建步骤，杜绝源码/产物漂移。
 
 ## 验证入口（`cd apps/desktop`）
-- `npm run verify` = **23 套件 786 项**：plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / browser-tools 43 / **terminal-pty 26 / file-panel 15** / arch-guard 15 / e2e 152
+- `npm run verify` = **24 套件 814 项**：plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / browser-tools 43 / terminal-pty 29 / file-panel 20 / **file-edit 20** / arch-guard 15 / e2e 152
+- **重复小工具必须收敛到 `common-tools.ts`**（新建纯逻辑，已登记 arch-guard）：`clampInt` / `isAbsoluteLike` / `extOfName`。此前 clamp 有 4 份（browser/terminal/file/pty）、绝对路径正则 4 份。**`extOfName` 必须先切 basename 再找点**——对整个路径 `lastIndexOf('.')` 会被带点目录击穿（`D:/proj/com.example/src/app.ts` → ext 变 `example/src/app.ts`），导致语言探测返回 null、二进制快通道失效；这类 bug 只在特定目录结构下出现，最难发现。
 - **真机冒烟另设** `pnpm run smoke:browser`（11 步，**刻意不进 verify 链**：需真 GPU/渲染进程，非交互会话必假红）。跑法：`env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS ORCHDESK_SMOKE_CI=1 <electron.exe> scripts/browser-smoke.cjs`；脚本自检 `process.type`，并按 explorer.exe（或 `ORCHDESK_SMOKE_CI=1`）判定是否降级：关 Chromium sandbox + 关硬件加速。参见「浏览器工具真机铁律」一节。
 - electron 依赖套件用 `Module._load` 钩子 stub `electron` 后 require `dist/main.js` 驱动真实 handler；stub 在 `scripts/verify-kit.cjs`（`makeElectronStub`/`createChecker`，含 CDP `DebuggerStub` 与共享 `cdpCommands`）；`model-loop-verify.cjs` / `memory-summarize-verify.cjs` 用真 `node:http` mock 做线级验证
 - **真机 Electron 在此环境跑不起来（两个成因，别再重复排查）**：① 宿主向下继承 `ELECTRON_RUN_AS_NODE=1` → electron.exe 退化纯 Node（`require('electron')` 返字符串、`app` undefined），所有调用加 `env -u ELECTRON_RUN_AS_NODE`；② 非交互会话里 GPU 进程起不来（`gpu_process_host.cc:956` 连崩 → `FATAL: GPU process isn't usable. Goodbye.` → 退出码 127，stdout 都来不及刷），`--disable-gpu`/`no-sandbox`/`in-process-gpu` **全无效**。故真机 CDP 另设 `pnpm run smoke:browser`（`apps/desktop/scripts/browser-smoke.cjs`，10 步），**刻意不进 verify 链**（需要真 GPU，硬塞只会假红并诱使人放宽断言）；脚本启动期自检 `process.type`，非主进程退 2 并打印指引
@@ -71,6 +73,12 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 ## 审阅工作流
 - `yt-dev-review` 技能（~/.workbuddy/skills/）：3 并行审阅子代理（质量/效率/可复用性）→ 交叉比对 → 交叉修复 → 复验门禁。2026-08-29 第二轮以此抓到 5 个 P0 真问题（便携模式失效 / 导入竞态 / responses 丢历史 / 晋升恒断 / TRACE 定时器不上传）。
 - 教训：「测试过、生产坏」——verify 自注入依赖会掩盖调用方缺参；审阅时必须对照调用方实参。
+- **2026-09-02 第十七批（终端+文件+编辑，14 个真问题）**：子代理审阅最值钱的是**量化实测**（子代理真的跑 node 量出 shiki 2MB=10.5s、replayBuf 1000 会话 +115MB、esc() 2MB=43ms），不是泛泛而谈。三类高发问题：
+  ① **布尔三态**：`ptyCache !== null` 在 `undefined`（未探测）时返回 true，与同行 `via='pipe'` 自相矛盾——「未探测」「不可用」「可用」必须区分，这正是「未接入 vs 为空」铁律的布尔版。
+  ② **上限只截一半**：洪峰截断只截历史尾巴没截 chunk 本体（`head + chunk` 没再封顶），「64KB 尾巴 + 1MB chunk」照样绕过；**凡是拼接后要满足上限的地方，拼接结果必须再 slice 一次**。
+  ③ **判「未接入」用 `typeof bridge.fn !== 'function'`**：桥兜底 stub 也是函数，永远命中不了 → 把「未接入」显示成「为空」。正解是宿主返回显式标记（如 `bridgeMissing`）驱动。
+- 另外两条易漏：`readSync` 单次读不循环 → 短读时「内容比磁盘短却声称完整」；「解出 U+FFFD 即非 UTF-8」会把合法含替代字符的文件误判而禁编辑（应用 `TextDecoder(fatal:true)`）。
+- 审阅补断言时**别插在用例序列中间**——会污染后续用例的状态假设（会话数、fake 索引）。放到分组末尾；需要重载模块测干净实例时务必保存并恢复 `require.cache`（否则后续 C 组 require main.js 会拿到新实例）。
 
 ## ADR-0008 挂点桥接（长期裁决）
 - 主会话模型回合 = 直连工具循环 + `firePreStep()` 每回合驱动 `agent/pre-step` waterfall（intent 网关 reject 硬拒 / trace 遥测）。**不要**再把「接入 ctx.agents.followup」当待办——那是 P7 路线图项且切换前须新 ADR；fail 边界：runtime 未启动 → 放行 + WARN。详见 docs/70-决策/ADR-0008 与 conflicts C6。
