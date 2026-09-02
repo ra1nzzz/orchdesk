@@ -10,7 +10,7 @@ OrchDesk = 本地优先的多 Agent 编排桌面工作台。前身 OrchStar（�
 - 冲突显式裁决记录于 docs/70-决策/conflicts.md；架构决策落 ADR。
 
 ## 关键决策（ADR）
-dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Cordis Fiber+isolate / 沙箱按平台 backend（win 首发）/ 浏览器工具走 Electron 自带 CDP（ADR-0011）。
+dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Cordis Fiber+isolate / 沙箱按平台 backend（win 首发）/ 浏览器工具走 Electron 自带 CDP（ADR-0011）/ **终端 PTY 多候选+管道显式降级、文件 Tab 只读（ADR-0012）**。
 
 ## 浏览器工具（ADR-0011）真机铁律
 - **CDP 出问题宁可降级也不要挂起**，且降级必须可见（结果带 `via`、日志写明已回退），不许用「跑通了」掩盖「其实是兜底跑通的」。
@@ -38,12 +38,18 @@ dsh 底座 / Electron 壳 / 意图网关挂 agent-pre-step / 脑-手层级用 Co
 - `waitForLoad` 双保险：`Page.loadEventFired` 为主 + 250ms 轮询 `document.readyState` 兜底（页面在 attach 前已加载完时事件不会再发）。debugger 的所有 CDP 事件都走同一个 `'message'`，method 在第二个参数里。
 - UI 是验收底线（写进 ADR）：标题栏「浏览器」面板 + `onBrowserState` 推送实时跟随；桥不可用时 `getBrowserStatus` 返 `{open:false}` 表示「未接入」，不冒充「已就绪只是没开」。
 
+## 终端 PTY + 文件 Tab（ADR-0012，Minke 对照 P2-10/11）
+- **node-pty 多候选**：`ORCHDESK_PTY_MODULE` env > `<appDir>/vendor/node-pty`（vendor-dsh 第 3 步物化 + `asarUnpack:["vendor/node-pty/**"]`，原生 .node 不能在 asar 内）> node_modules > dsh profile；全落空 → `child_process` 管道降级，`via:'pipe'` 徽标+toast 必须可见。
+- **环境净化硬前提**：子进程 env 剔除 NODE_OPTIONS/NODE_PATH/ELECTRON_RUN_AS_NODE（`TERMINAL_ENV_STRIP`）。洪峰防护：16ms 攒批 / 单条 256KB 截断标记 / 64KB 回放缓冲 / 会话上限 6。
+- **文件 Tab 只读**（编辑/diff 后置 P3）：用户亲手浏览**不走授权门**（与浏览器工具口径相反）；懒加载每层 500 条、读取 ≤2MB 显式 truncated、二进制嗅探=扩展名+头 8KB NUL、语言探测不到→null 不许猜。
+- **渲染层全屏覆盖层**（非 modal）：xterm 实例不能随状态推送重绘——骨架只建一次（`dataset.ready`），ESC 关面板但焦点在 `.term-container` 内不抢；xterm 用官方 UMD vendored，shiki 用 esbuild IIFE bundle（`createHighlighterCore`+`createJavaScriptRegexEngine` 纯 JS 引擎，897KB，`window.ShikiLite`；v3 的 `createHighlighter` 不在 core）。vendor 源包当前在 `C:/Users/my/node_modules`（npm 无 package.json 时沿祖先上溯污染 home，待移入 workspace）。
+
 ## 渲染层纯逻辑的双环境单文件方案（重要约束）
 - 主窗口 `webPreferences.sandbox:true` → preload 拿不到 `require`；`renderer/app.js` 是 IIFE 纯 JS，也不能 `require` TS 产物。
 - 结论：需要「Node 验证套件 + 浏览器渲染层共用同一份」的纯逻辑，写成 **UMD-lite 单文件**（`module.exports` + `window.OrchDeskXxx`），`<script src>` 挂在 app.js **之前**。范例：`renderer/session-fork.js`（+ `session-fork-verify.cjs`）。零构建步骤，杜绝源码/产物漂移。
 
 ## 验证入口（`cd apps/desktop`）
-- `npm run verify` = **21 套件 745 项**：plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / **browser-tools 43** / arch-guard 15 / e2e 152
+- `npm run verify` = **23 套件 786 项**：plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / browser-tools 43 / **terminal-pty 26 / file-panel 15** / arch-guard 15 / e2e 152
 - **真机冒烟另设** `pnpm run smoke:browser`（11 步，**刻意不进 verify 链**：需真 GPU/渲染进程，非交互会话必假红）。跑法：`env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS ORCHDESK_SMOKE_CI=1 <electron.exe> scripts/browser-smoke.cjs`；脚本自检 `process.type`，并按 explorer.exe（或 `ORCHDESK_SMOKE_CI=1`）判定是否降级：关 Chromium sandbox + 关硬件加速。参见「浏览器工具真机铁律」一节。
 - electron 依赖套件用 `Module._load` 钩子 stub `electron` 后 require `dist/main.js` 驱动真实 handler；stub 在 `scripts/verify-kit.cjs`（`makeElectronStub`/`createChecker`，含 CDP `DebuggerStub` 与共享 `cdpCommands`）；`model-loop-verify.cjs` / `memory-summarize-verify.cjs` 用真 `node:http` mock 做线级验证
 - **真机 Electron 在此环境跑不起来（两个成因，别再重复排查）**：① 宿主向下继承 `ELECTRON_RUN_AS_NODE=1` → electron.exe 退化纯 Node（`require('electron')` 返字符串、`app` undefined），所有调用加 `env -u ELECTRON_RUN_AS_NODE`；② 非交互会话里 GPU 进程起不来（`gpu_process_host.cc:956` 连崩 → `FATAL: GPU process isn't usable. Goodbye.` → 退出码 127，stdout 都来不及刷），`--disable-gpu`/`no-sandbox`/`in-process-gpu` **全无效**。故真机 CDP 另设 `pnpm run smoke:browser`（`apps/desktop/scripts/browser-smoke.cjs`，10 步），**刻意不进 verify 链**（需要真 GPU，硬塞只会假红并诱使人放宽断言）；脚本启动期自检 `process.type`，非主进程退 2 并打印指引
