@@ -29,15 +29,36 @@
   /** 每个 hunk 两侧保留的上下文行数（与 git -U3 一致）。 */
   var CONTEXT = 3;
 
-  /** 检测换行风格：出现 CRLF 即按 CRLF 处理（混合风格以 CRLF 为准，保守写回）。 */
+  /**
+   * 检测换行风格，返回 'crlf' | 'cr' | 'lf'（多数派判定）。
+   *
+   * 不能写成「见一个 \r\n 就判 CRLF」：混合行尾的文件按少数派全量改写，会
+   * 产生肉眼不可见却实实在在的整文件变更——而 diff 是在规范化后的文本上算的，
+   * 用户连「我改了什么」都看不到。CR-only（老 Mac 风格）也必须单独识别：
+   * applyEol 的 lf 分支会把裸 \r 一起吃掉，不识别就等于保存时把整个文件并成一行。
+   */
   function detectEol(text) {
-    return typeof text === 'string' && text.indexOf('\r\n') >= 0 ? 'crlf' : 'lf';
+    if (typeof text !== 'string' || text === '') return 'lf';
+    var crlf = 0;
+    var cr = 0;
+    var lf = 0;
+    for (var i = 0; i < text.length; i++) {
+      var c = text.charAt(i);
+      if (c === '\r') {
+        if (text.charAt(i + 1) === '\n') { crlf++; i++; } else { cr++; }
+      } else if (c === '\n') { lf++; }
+    }
+    if (crlf > 0 && crlf >= lf && crlf >= cr) return 'crlf';
+    if (cr > 0 && cr > lf) return 'cr';
+    return 'lf';
   }
 
   /** 按目标风格规范化换行（textarea 产物是纯 LF）。 */
   function applyEol(text, eol) {
     if (typeof text !== 'string') return '';
-    return eol === 'crlf' ? text.replace(/\r?\n/g, '\r\n') : text.replace(/\r\n|\r/g, '\n');
+    if (eol === 'crlf') return text.replace(/\r\n|\r|\n/g, '\r\n');
+    if (eol === 'cr') return text.replace(/\r\n|\r|\n/g, '\r');
+    return text.replace(/\r\n|\r/g, '\n');
   }
 
   /** 按行拆分（保留末尾空行语义：以 \n 结尾的文本最后多一个 ''，两侧一致即可对齐）。 */

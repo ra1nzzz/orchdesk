@@ -263,9 +263,10 @@
       terminalStatus: () => Promise.resolve(null),
       onTerminalData: () => () => {},
       onTerminalExit: () => () => {},
-      // 文件（P2-11）：无桥 → ok:false，面板显示「未接入」
-      fileTree: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
-      fileRead: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      // 文件（P2-11）：无桥 → bridgeMissing 标记。不能用 `typeof fn !== 'function'`
+      // 判「未接入」——stub 本身也是函数，那样永远显示成「空目录」。
+      fileTree: () => Promise.resolve({ ok: false, reason: '主进程未接入', bridgeMissing: true }),
+      fileRead: () => Promise.resolve({ ok: false, reason: '主进程未接入', bridgeMissing: true }),
       fileWrite: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
     };
   })();
@@ -352,9 +353,9 @@
     terminalPanelOpen: false,
     // 文件（P2-11）：root='' = 尚未选择目录。children 是目录懒加载缓存。
     filePanelOpen: false,
-    filePanel: { loaded: false, root: '', truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false,
+    filePanel: { loaded: false, bridgeMissing: false, root: '', truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false,
       // P3 编辑/diff：view = preview | edit | diff；diffRows/diffTooLarge 是最近一次计算结果
-      view: 'preview', editBuf: '', eol: 'lf', dirty: false, saving: false, discardArmed: false,
+      view: 'preview', editBuf: '', editBase: '', eol: 'lf', dirty: false, saving: false, discardArmed: false,
       diffRows: null, diffTooLarge: false, diffLineDelta: 0, diffStat: '', saveError: '' },
     // 连接器（PRD FR-3）：真实后端注册表（凭证加密存储 + 保存即探测）。
     // loaded=false 时侧栏显示「未接入」，不能拿空数组冒充「都没配置」。
@@ -445,8 +446,10 @@
   }
 
   /* ---------- 渲染：消息（外部/用户可控内容统一转义，防 XSS） ---------- */
+  // 转义表提到闭包外：每次调用 new 一个字面量对象，2MB 文本实测 43ms。
+  const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function esc(v) {
-    return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    return String(v ?? '').replace(/[&<>"']/g, (c) => ESC_MAP[c]);
   }
 
   /* ---------- PRD FR-4.2 桌面集成 ---------- */
@@ -2418,6 +2421,9 @@
 
   /* ---------- 文件面板（P2-11：只读浏览 + shiki 高亮，编辑后置） ---------- */
   const FILE_SHIKI_LANGS = ['typescript', 'javascript', 'json', 'markdown', 'css', 'html', 'python', 'bash', 'yaml', 'go', 'rust', 'sql'];
+  // 语法高亮体积门槛（实测基准见 renderFileView 注释）：200KB ≈ 高亮耗时 ~1s。
+  const FILE_SHIKI_MAX_CHARS = 200 * 1024;
+  const FILE_SHIKI_MAX_LINES = 3000;
 
   function ensureFileSkeleton() {
     const root = $('#fileRoot');
@@ -2456,6 +2462,12 @@
 
   async function loadFileDir(dir) {
     const r = await bridge.fileTree(dir);
+    if (r && r.bridgeMissing) {
+      // 「未接入」与「接了但为空」必须分开：桥不存在时不能显示成「空目录」。
+      state.filePanel.bridgeMissing = true;
+      renderFilePanel();
+      return;
+    }
     if (!r || r.ok === false) {
       toast(`读取目录失败：${(r && r.reason) || '未接入'}`, 'err');
       state.filePanel.expanded.delete(dir);
@@ -2486,7 +2498,7 @@
       // entries 上补 path/sizeLabel（宿主排序返回的是纯条目）
       const full = e.path || (dir.replace(/[\\/]+$/, '') + '/' + e.name);
       e.path = full;
-      e.sizeLabel = e.sizeLabel || (e.kind === 'file' ? fmtSize(e.size) : '');
+      // sizeLabel 由宿主用 humanSize 给出（唯一真源），渲染层不再自己换算。
       let out = fileEntryHTML(e, depth);
       if (e.kind === 'dir' && state.filePanel.expanded.has(full)) {
         out += renderTreeLevel(full, depth + 1);
@@ -2497,19 +2509,14 @@
     return html;
   }
 
-  function fmtSize(n) {
-    if (!Number.isFinite(n) || n < 0) return '';
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / (1024 * 1024)).toFixed(1) + ' MB';
-  }
-
   function renderFilePanel() {
     if (!$('#fileRoot').dataset.ready) return;
     const fp = state.filePanel;
     const head = $('#fileHead');
     const closeBtn = '<button class="btn ghost sm" data-action="file-close">关闭</button>';
-    if (typeof bridge.fileTree !== 'function') {
+    // 「未接入」不能用 `typeof bridge.fileTree !== 'function'` 判——桥兜底 stub
+    // 也是函数，那样永远命中不了。真实信号是宿主返回的 bridgeMissing 标记。
+    if (fp.bridgeMissing) {
       head.innerHTML = `<b>文件</b><span class="faint">未接入主进程</span><span style="margin-left:auto"></span>${closeBtn}`;
       $('#fileTree').innerHTML = '<div class="faint" style="padding:10px">主进程未接入文件服务。</div>';
       $('#fileView').innerHTML = '';
@@ -2538,7 +2545,7 @@
     fp.previewPath = path;
     fp.previewLoading = true;
     // 换文件 = 重置编辑态（编辑另一个文件前不保留上一个文件的缓冲）
-    fp.view = 'preview'; fp.editBuf = ''; fp.saving = false; fp.discardArmed = false;
+    fp.view = 'preview'; fp.editBuf = ''; fp.editBase = ''; fp.dirty = false; fp.saving = false; fp.discardArmed = false;
     fp.diffRows = null; fp.diffTooLarge = false; fp.diffLineDelta = 0; fp.saveError = '';
     const view = $('#fileView');
     if (view) view.innerHTML = `<div class="faint" style="padding:14px">读取中…</div>`;
@@ -2614,8 +2621,19 @@
       view.innerHTML = meta + renderFileDiffBody();
       return;
     }
-    // shiki 高亮：可用且语言受支持才走；否则纯文本 <pre>（不猜语言）
+    // shiki 高亮：可用 + 语言受支持 + 体积在阈值内才走；否则纯文本 <pre>（不猜语言）。
+    // 体积门槛不是保守：codeToHtml 是同步阻塞渲染线程，实测 64KB=753ms、
+    // 256KB=1.34s、1MB=5.1s、**2MB=10.5s**，且 HTML 膨胀约 6.8 倍（2MB 文本
+    // 产出约 35 万个 span）。超过阈值一律回落 <pre> 并显式说明「为什么没高亮」。
     const lang = r.lang;
+    const tooBigForShiki = r.content.length > FILE_SHIKI_MAX_CHARS
+      || r.content.split('\n').length > FILE_SHIKI_MAX_LINES;
+    if (tooBigForShiki) {
+      view.innerHTML = meta
+        + `<div class="faint" style="padding:8px 14px">文件过大（${esc(r.sizeLabel || '')}），已跳过语法高亮以保证界面响应；编辑与保存不受影响。</div>`
+        + `<pre class="file-pre">${esc(r.content)}</pre>`;
+      return;
+    }
     const useShiki = typeof window !== 'undefined' && window.ShikiLite
       && lang && window.ShikiLite.supportedLang(lang) && lang !== 'plaintext';
     if (useShiki) {
@@ -2661,6 +2679,8 @@
     const fe = window.OrchDeskFileEdit;
     fp.eol = fe ? fe.detectEol(r.content) : 'lf';
     fp.editBuf = r.content; // textarea 赋值后浏览器会把 CRLF 规范化为 LF（写盘时按 fp.eol 还原）
+    // 缓存 dirty 比较基线（textarea 内容就是 LF 形态，与 editBuf 同形）
+    fp.editBase = fe ? fe.applyEol(r.content, 'lf') : r.content;
     fp.dirty = false;
     fp.view = 'edit';
     fp.discardArmed = false;
@@ -2709,6 +2729,11 @@
       fp.dirty = false;
       fp.view = 'preview';
       fp.editBuf = '';
+      // 基线轮转：连续编辑时以「刚写盘的内容」为新的比较基准，否则下一轮
+      // 编辑会被自己上一次的保存误判成 dirty。
+      fp.editBase = window.OrchDeskFileEdit
+        ? window.OrchDeskFileEdit.applyEol(will, 'lf')
+        : will;
       toast(`已保存（${res.sizeLabel || ''}）`, 'ok');
     } else {
       fp.saveError = (res && res.reason) || '保存失败';
@@ -4091,9 +4116,9 @@
       const fp = state.filePanel;
       const was = fp.dirty;
       fp.editBuf = e.target.value;
-      fp.dirty = fp.editBuf !== (fp.preview && fp.preview.content != null
-        ? (window.OrchDeskFileEdit ? window.OrchDeskFileEdit.applyEol(fp.preview.content, 'lf') : fp.preview.content)
-        : '');
+      // 基线在 startFileEdit 里算一次并缓存：每敲一键都对 2MB 文本做
+      // applyEol + 读 2MB textarea 值，是纯粹的浪费（实测每次 1.1ms）。
+      fp.dirty = fp.editBuf !== fp.editBase;
       if (was !== fp.dirty) {
         const badge = document.querySelector('#fileView .badge.warn');
         if (badge) badge.remove();
@@ -4232,8 +4257,16 @@
           if (!h) return; // 面板还没开：回放缓冲在主进程，重开 Tab 能补看
           if (h.term) h.term.write(ev.data);
           else if (h.pre) {
-            h.pre.textContent += ev.data;
-            if (h.pre.textContent.length > 400000) h.pre.textContent = h.pre.textContent.slice(-200000);
+            // 降级 <pre> 路径：缓存到数组再 join。`textContent +=` 每次都要
+            // 读出整个字符串再写回（O(n) 读 + O(n) 写），长会话会越敲越卡。
+            h.lines = h.lines || [];
+            h.lines.push(ev.data);
+            let s = h.lines.join('');
+            if (s.length > 400000) {
+              s = s.slice(-200000);
+              h.lines = [s];
+            }
+            h.pre.textContent = s;
             h.cont.scrollTop = h.cont.scrollHeight;
           }
         });
@@ -4242,7 +4275,11 @@
         bridge.onTerminalExit((ev) => {
           const h = termHandles.get(ev.id);
           if (h && h.term) h.term.write(`\r\n\x1b[33m[orchdesk: 进程已退出，退出码 ${ev.code}]\x1b[0m\r\n`);
-          else if (h && h.pre) h.pre.textContent += `\n[orchdesk: 进程已退出，退出码 ${ev.code}]`;
+          else if (h && h.pre) {
+            h.lines = h.lines || [];
+            h.lines.push(`\n[orchdesk: 进程已退出，退出码 ${ev.code}]`);
+            h.pre.textContent = h.lines.join('');
+          }
           refreshTerminal();
         });
       }

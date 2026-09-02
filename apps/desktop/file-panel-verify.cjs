@@ -95,6 +95,41 @@ const { check, summary } = createChecker();
     assert.strictEqual(fp.humanSize(NaN), '?');
   });
 
+  await check('扩展名探测只看 basename（路径里的带点目录不许击穿）', () => {
+    // 直接对整个路径 lastIndexOf('.') 会取到 "example/src/app.ts"，
+    // 于是语言探测返回 null（高亮静默降级）、二进制快通道失效（丢一道写保护）。
+    assert.strictEqual(fp.languageOf('D:/proj/com.example/src/app.ts'), 'typescript');
+    assert.strictEqual(fp.languageOf('D:/proj/v1.2.3/notes.md'), 'markdown');
+    assert.strictEqual(fp.looksBinaryByName('C:/a.b/logo.png'), true);
+    assert.strictEqual(fp.looksBinaryByName('C:/a.b/app.ts'), false);
+    // 以点开头的文件名（.gitignore）不算扩展名
+    assert.strictEqual(fp.languageOf('/repo/.gitignore'), null);
+  });
+
+  await check('sortTreeEntries 直接给出 sizeLabel（humanSize 是唯一真源）', () => {
+    const out = fp.sortTreeEntries([
+      { name: 'a.txt', kind: 'file', size: 2048, mtime: 1 },
+      { name: 'sub', kind: 'dir', size: 0, mtime: 1 },
+    ]);
+    assert.strictEqual(out[0].name, 'sub', '目录在前');
+    assert.strictEqual(out[0].sizeLabel, '', '目录不显示大小');
+    assert.strictEqual(out[1].sizeLabel, '2.0 KB');
+    assert.strictEqual(out[1].ext, 'txt');
+    assert.strictEqual(out[1].binary, false);
+  });
+
+  await check('clampInt 收敛后口径一致（空串/纯空格/负值都回落默认）', async () => {
+    const ct = await importTs('common-tools.ts');
+    assert.strictEqual(ct.clampInt('', 1, 10, 5), 5);
+    assert.strictEqual(ct.clampInt('   ', 1, 10, 5), 5, '纯空格不能当 0');
+    assert.strictEqual(ct.clampInt(undefined, 1, 10, 5), 5);
+    assert.strictEqual(ct.clampInt('3', 1, 10, 5), 3);
+    assert.strictEqual(ct.clampInt(99, 1, 10, 5), 10, '上限钳制');
+    assert.strictEqual(ct.isAbsoluteLike('D:/a'), true);
+    assert.strictEqual(ct.isAbsoluteLike('a/b'), false);
+    assert.strictEqual(ct.extOfName('D:/p/com.example/a.TS'), 'ts', '大小写归一');
+  });
+
   // =========================================================================
   console.log('== B. 接线：stub electron 驱动 dist/main.js ==');
   const electronStub = makeElectronStub({ home: HOME });
@@ -204,6 +239,28 @@ const { check, summary } = createChecker();
     const r2 = await fileRead(path.join(root, 'ghost.txt'));
     assert.strictEqual(r2.ok, false);
     assert.ok(r2.reason.length > 0);
+  });
+
+  await check('file-read：合法含 U+FFFD 的文本不得被判「非 UTF-8」（不许误禁编辑）', async () => {
+    // 「解出 U+FFFD 就判定非 UTF-8」会把本来就含替代字符的合法文本误判，
+    // 结果是可编辑的文件被禁掉编辑——必须用 TextDecoder(fatal) 严格校验。
+    const p = path.join(root, 'replacement.txt');
+    fs.writeFileSync(p, 'prefix ' + '�' + ' suffix\n', 'utf8');
+    const r = await fileRead(p);
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(r.encodingSuspicious, false);
+    assert.strictEqual(r.editable, true);
+    assert.ok(r.content.includes('�'));
+  });
+
+  await check('file-tree：条目自带 sizeLabel，且目录不 stat（不返回目录大小）', async () => {
+    const r = await fileTree(root);
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    const f = r.entries.find((e) => e.name === 'a.txt');
+    assert.ok(f && f.sizeLabel && f.sizeLabel.length > 0, '文件条目应带 sizeLabel');
+    const d = r.entries.find((e) => e.kind === 'dir');
+    assert.ok(d, '应有目录条目');
+    assert.strictEqual(d.sizeLabel, '');
   });
 
   // 清理

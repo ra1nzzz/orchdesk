@@ -63,7 +63,11 @@ function makeFakeChild() {
   const { EventEmitter } = require('node:events');
   const child = new EventEmitter();
   child.pid = 777;
-  child.stdin = { write: (d) => child.written.push(d), destroy() {} };
+  // stdin 必须是可写流语义（真实的 ChildProcess.stdin 是 Stream）：宿主会给它
+  // 挂 error 监听防 EPIPE，假件不带 on() 就会在 createTerminal 里直接抛。
+  child.stdin = new EventEmitter();
+  child.stdin.write = (d) => child.written.push(d);
+  child.stdin.destroy = () => {};
   child.written = [];
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
@@ -231,6 +235,14 @@ function makeFakeChild() {
     assert.ok(pushed[pushed.length - 1].data.includes('已截断'), '截断必须可见');
     const s = tp.getTerminalState().sessions.find((x) => x.id === created.id);
     assert.ok(s.replay.length <= tt.TERMINAL_REPLAY_MAX, '洪峰后回放缓冲仍在上限内');
+    // 单块本身超过上限时也必须封顶（先截 chunk 再对拼接结果封顶，两处 slice
+    // 缺一不可——否则「64KB 尾巴 + 1MB chunk」会绕过上限直接推给渲染层）。
+    for (const p of pushed) {
+      assert.ok(
+        p.data.length <= tt.TERMINAL_CHUNK_MAX + 64,
+        `单条推送不得超过 CHUNK_MAX+标记：实际 ${p.data.length}`,
+      );
+    }
   });
 
   await check('退出推送：onExit → exit 事件 + 状态标 exited', async () => {
@@ -301,6 +313,56 @@ function makeFakeChild() {
     assert.strictEqual(r7.ok, false);
     assert.ok(r7.reason.includes(String(tt.TERMINAL_MAX_SESSIONS)), '拒绝原因应说明上限：' + r7.reason);
     for (const id of ids) tp.killTerminal(id);
+  });
+
+  await check('已退出的会话不占名额（否则连开 6 个短命令后就再也开不了新终端）', () => {
+    const fakeX = makeFakePty();
+    tp.setPtyForTest(fakeX.spawn);
+    const ids = [];
+    for (let i = 0; i < tt.TERMINAL_MAX_SESSIONS; i++) {
+      const r = tp.createTerminal({ cwd: 'D:/w' }, mkOpts());
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      ids.push(r.session.id);
+    }
+    // 全部退出（留着看最后一眼输出），但 Tab 不关
+    ids.forEach((id, i) => fakeX.poke(i).exit(0));
+    const again = tp.createTerminal({ cwd: 'D:/w' }, mkOpts());
+    assert.strictEqual(again.ok, true, '退出的会话不应占名额：' + JSON.stringify(again));
+    tp.killTerminal(again.session.id);
+    for (const id of ids) tp.killTerminal(id);
+  });
+
+  await check('回放缓冲在退出/kill 后释放（不按 64KB/会话 常驻）', async () => {
+    const fakeY = makeFakePty();
+    tp.setPtyForTest(fakeY.spawn);
+    const r = tp.createTerminal({ cwd: 'D:/w' }, mkOpts());
+    fakeY.poke(0).data('y'.repeat(4096));
+    await new Promise((res) => setTimeout(res, 40));
+    const alive = tp.getTerminalState().sessions.find((x) => x.id === r.session.id);
+    assert.ok(alive.replay.length > 0, '活着时应有回放内容');
+    fakeY.poke(0).exit(0);
+    await new Promise((res) => setTimeout(res, 30));
+    const gone = tp.getTerminalState().sessions.find((x) => x.id === r.session.id);
+    assert.ok(gone, '退出但未关 Tab 时条目应保留（用户还要看最后一眼输出）');
+    assert.strictEqual(gone.replay, '', '退出后回放缓冲必须释放，否则反复开关终端会持续涨内存');
+    tp.killTerminal(r.session.id);
+  });
+
+  await check('ptyAvailable 未探测态不得冒充可用（undefined !== null 的经典坑）', () => {
+    // 干净实例：ptyCache 处于 undefined（ensurePtyLoaded 尚未跑 / 抛错被吞）
+    const p = require.resolve('./dist/terminal-pty.js');
+    const saved = require.cache[p];
+    delete require.cache[p];
+    try {
+      const fresh = require('./dist/terminal-pty.js');
+      const st = fresh.getTerminalState();
+      assert.strictEqual(st.ptyAvailable, false, '未探测 = 不可用，不许报 true');
+      assert.strictEqual(st.via, 'pipe', '未探测时 via 必须 pipe；ptyAvailable=true 却 via=pipe 就是降级不可见');
+    } finally {
+      delete require.cache[p];
+      // 恢复原模块实例：C 组随后 require main.js，必须拿到注入过 fake pty 的那一份
+      if (saved) require.cache[p] = saved;
+    }
   });
 
   // =========================================================================

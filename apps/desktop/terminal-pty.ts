@@ -15,11 +15,19 @@
  */
 
 import { spawn as cpSpawn, type ChildProcess } from 'child_process';
+import { clampInt } from './common-tools';
 import {
   TERMINAL_CHUNK_MAX,
+  TERMINAL_COLS_DEFAULT,
+  TERMINAL_COLS_MAX,
+  TERMINAL_COLS_MIN,
   TERMINAL_FLUSH_MS,
   TERMINAL_MAX_SESSIONS,
   TERMINAL_REPLAY_MAX,
+  TERMINAL_ROWS_DEFAULT,
+  TERMINAL_ROWS_MAX,
+  TERMINAL_ROWS_MIN,
+  describeTerminalState,
   normalizeTerminalCreate,
   ptyRequireCandidates,
   sanitizeTerminalEnv,
@@ -141,7 +149,11 @@ function pushData(id: string, chunk: string): void {
   }
   if (p.buf.length + chunk.length > TERMINAL_CHUNK_MAX) {
     // 超限截断：留 1/4 余量接后续，并打截断标记（可见，不静默丢）。
-    p.buf = p.buf.slice(-Math.floor(TERMINAL_CHUNK_MAX / 4)) + chunk;
+    // 两处 slice 缺一不可：先截 chunk（单块本身就可能超过上限），再对拼接
+    // 结果封顶——否则「64KB 尾巴 + 1MB chunk」会绕过上限直接推给渲染层。
+    const keep = Math.floor(TERMINAL_CHUNK_MAX / 4);
+    const head = p.buf.slice(-keep);
+    p.buf = (head + chunk).slice(-TERMINAL_CHUNK_MAX);
     p.truncated = true;
   } else {
     p.buf += chunk;
@@ -163,10 +175,16 @@ function pushExit(id: string, code: number): void {
   if (p) {
     if (p.timer) clearTimeout(p.timer);
     if (p.buf !== '') {
-      try { dataListener && dataListener({ id, data: p.buf }); } catch { /* 同上 */ }
+      // 冲刷时保留 truncated 标记：退出前的最后一批若是被截断过的，渲染层
+      // 必须看得见「中间丢过数据」，否则「跑完了但输出不全」会被当成完整结果。
+      const out = p.truncated ? '…[orchdesk: 数据洪峰已截断]…\r\n' + p.buf : p.buf;
+      try { dataListener && dataListener({ id, data: out }); } catch { /* 同上 */ }
     }
     pending.delete(id);
   }
+  // 会话已结束：回放缓冲是给「重开 Tab 补看」用的，进程都没了就没有保留价值，
+  // 不清会在反复开关终端时按 64KB/会话 常驻（实测 1000 会话 +115MB）。
+  replayBuf.delete(id);
   try { exitListener && exitListener({ id, code }); } catch { /* 推送失败不影响状态 */ }
 }
 
@@ -198,11 +216,20 @@ export function createTerminal(
   const norm = normalizeTerminalCreate(input, opts.fallbackCwd);
   if (!norm.ok) return norm;
 
-  if (sessions.size >= TERMINAL_MAX_SESSIONS) {
-    return {
-      ok: false,
-      reason: `终端会话已达上限（${TERMINAL_MAX_SESSIONS}），请先关闭不用的 Tab`,
-    };
+  // 上限只统计「活着」的会话：已退出的会话只是留着给用户看最后一眼输出，
+  // 不该占名额——否则连开 6 个短命令后就再也开不了新终端（只有手动关 Tab
+  // 才释放）。顺带回收已退出条目，避免 sessions 无限增长。
+  const activeCount = () => [...sessions.values()].filter((s) => !s.exited).length;
+  if (activeCount() >= TERMINAL_MAX_SESSIONS) {
+    for (const s of [...sessions.values()]) {
+      if (s.exited) killTerminal(s.id);
+    }
+    if (activeCount() >= TERMINAL_MAX_SESSIONS) {
+      return {
+        ok: false,
+        reason: `终端会话已达上限（${TERMINAL_MAX_SESSIONS}），请先关闭不用的 Tab`,
+      };
+    }
   }
 
   const env = sanitizeTerminalEnv(opts.env || process.env);
@@ -289,6 +316,11 @@ export function createTerminal(
     };
     child.stdout && child.stdout.on('data', pipeChunk);
     child.stderr && child.stderr.on('data', pipeChunk);
+    // stdin 必须有 error 监听：进程退出后渲染层仍在敲键会触发 EPIPE，
+    // 没有监听就是主进程 uncaughtException（整个应用跟着一起崩）。
+    if (child.stdin) {
+      child.stdin.on('error', () => { /* 进程已退出，忽略写入失败 */ });
+    }
     child.on('exit', (code) => {
       session.exited = true;
       session.exitCode = code === null ? -1 : code;
@@ -319,16 +351,10 @@ export function writeTerminal(id: string, data: string): boolean {
 export function resizeTerminal(id: string, cols: unknown, rows: unknown): boolean {
   const s = sessions.get(id);
   if (!s || s.exited) return false;
-  const c = clampDim(cols, 10, 500, 80);
-  const r = clampDim(rows, 2, 300, 24);
+  const c = clampInt(cols, TERMINAL_COLS_MIN, TERMINAL_COLS_MAX, TERMINAL_COLS_DEFAULT);
+  const r = clampInt(rows, TERMINAL_ROWS_MIN, TERMINAL_ROWS_MAX, TERMINAL_ROWS_DEFAULT);
   s.resize(c, r);
   return true;
-}
-
-function clampDim(v: unknown, min: number, max: number, dflt: number): number {
-  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
-  if (!Number.isFinite(n)) return dflt;
-  return Math.min(max, Math.max(min, Math.round(n)));
 }
 
 /** 关闭会话（幂等；已退出也清理条目）。 */
@@ -339,6 +365,7 @@ export function killTerminal(id: string): boolean {
   const p = pending.get(id);
   if (p && p.timer) clearTimeout(p.timer);
   pending.delete(id);
+  replayBuf.delete(id);
   sessions.delete(id);
   return true;
 }
@@ -361,10 +388,10 @@ export function getTerminalState(): {
     exitCode: s.exitCode,
     replay: replayBuf.get(s.id) || '',
   }));
-  return {
-    ptyAvailable: ptyCache !== null,
-    via: ptyCache ? 'pty' : 'pipe',
-    count: list.length,
-    sessions: list,
-  };
+  // 注意 `!!ptyCache` 而不是 `ptyCache !== null`：ptyCache 有三态——
+  // undefined（尚未探测，如 ensurePtyLoaded 抛错被吞）、null（探测过，不可用）、
+  // 函数（可用）。`undefined !== null` 为真，写成不等号会让「未探测」冒充
+  // 「可用」，恰好和 via='pipe' 自相矛盾（降级必须可见，不许自相矛盾）。
+  const base = describeTerminalState(list, !!ptyCache);
+  return { ...base, sessions: list };
 }

@@ -40,6 +40,17 @@ const { check, summary } = createChecker();
     assert.strictEqual(fe.applyEol(bufferized, 'crlf'), orig);
   });
 
+  await check('EOL：多数派判定 —— 混合行尾不按少数派全量改写，CR-only 不被并成一行', () => {
+    // 混合行尾若按「见一个 CRLF 就判 CRLF」处理，保存会产生看不见的整文件
+    // 变更（而 diff 在规范化后算，用户根本看不到自己改了什么）。
+    assert.strictEqual(fe.detectEol('a\nb\nc\r\n'), 'lf', 'LF 多数 → lf');
+    assert.strictEqual(fe.detectEol('a\r\nb\r\nc\n'), 'crlf', 'CRLF 多数 → crlf');
+    // CR-only（老 Mac 风格）：判成 lf 会让 applyEol 把裸 \r 吃掉 → 整个文件并成一行
+    assert.strictEqual(fe.detectEol('a\rb\rc'), 'cr');
+    assert.strictEqual(fe.applyEol('a\rb\rc', 'cr'), 'a\rb\rc');
+    assert.strictEqual(fe.applyEol('a\nb\nc', 'cr'), 'a\rb\rc');
+  });
+
   await check('diff：完全一致 → 空行序列 + 全 0 统计（渲染层显示「无变更」）', () => {
     const d = fe.computeDiff('a\nb\nc', 'a\nb\nc');
     assert.strictEqual(d.ok, true);

@@ -16,6 +16,8 @@
  * 但环境净化仍然必须：宿主继承的 NODE_OPTIONS 会劫持任何子进程里的 node。
  */
 
+import { clampInt, isAbsoluteLike } from './common-tools';
+
 // ---------------------------------------------------------------------------
 // 常量与钳制
 // ---------------------------------------------------------------------------
@@ -79,18 +81,6 @@ export type NormalizedTerminalCreate = {
 
 export type RejectedTerminalCreate = { ok: false; reason: string };
 
-/** clamp 助手：非数值（'' / undefined / NaN）返回 undefined，由调用方走默认值。 */
-function clampInt(
-  v: unknown,
-  min: number,
-  max: number,
-  dflt: number,
-): number {
-  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
-  if (!Number.isFinite(n)) return dflt;
-  return Math.min(max, Math.max(min, Math.round(n)));
-}
-
 /**
  * 归一化 createTerminal 参数。
  * 注意 `''` 与 undefined 都走默认值——`Number('') === 0` 的坑在浏览器工具
@@ -110,7 +100,7 @@ export function normalizeTerminalCreate(
     return { ok: false, reason: 'cwd 过长（>1024 字符）' };
   }
   // 形状校验：必须像绝对路径。真正的存在性检查由宿主做（纯逻辑不碰 fs）。
-  if (!/^[a-zA-Z]:[\\/]/.test(cwd) && !cwd.startsWith('/')) {
+  if (!isAbsoluteLike(cwd)) {
     return { ok: false, reason: 'cwd 必须是绝对路径：' + cwd.slice(0, 80) };
   }
   return {

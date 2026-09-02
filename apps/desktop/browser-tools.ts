@@ -17,6 +17,7 @@
  * 「引号、反斜杠、换行、</script> 都不会逃逸出字符串字面量」。
  */
 
+import { clampInt } from './common-tools';
 import type { ToolDef } from './agent-runtime';
 
 // ---------------------------------------------------------------------------
@@ -214,16 +215,9 @@ export type BrowserWaitMode = typeof BROWSER_WAIT_MODES[number];
 // 参数归一化
 // ---------------------------------------------------------------------------
 
-function clampInt(v: unknown, min: number, max: number, fallback: number): number {
-  // 缺省与空串必须回落默认值：Number('') 是 0，会被下限钳成最小值——
-  // 于是「模型没传 timeout」变成「给 500ms 超时」，几乎每次都超时（真踩到过）。
-  if (v === undefined || v === null || v === '') return fallback;
-  const n = typeof v === 'number' ? v : Number(String(v).trim());
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, Math.round(n)));
-}
-
 /** 超时钳制（导航 / 元素等待 / 求值各自上下限不同）。 */
+// clampInt 已收敛到 common-tools（原本 browser/terminal/file/pty 各有一份，
+// 口径会漂移）；「空串必须回落默认值」的语义见 common-tools.clampInt 注释。
 export function clampBrowserTimeout(v: unknown, kind: 'nav' | 'action' | 'eval' | 'shot'): number {
   if (kind === 'nav') return clampInt(v, BROWSER_NAV_TIMEOUT_MIN, BROWSER_NAV_TIMEOUT_MAX, BROWSER_NAV_TIMEOUT_DEFAULT);
   if (kind === 'action') return clampInt(v, BROWSER_ACTION_TIMEOUT_MIN, BROWSER_ACTION_TIMEOUT_MAX, BROWSER_ACTION_TIMEOUT_DEFAULT);

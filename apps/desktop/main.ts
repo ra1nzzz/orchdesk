@@ -154,12 +154,14 @@ import {
 import {
   humanSize,
   languageOf,
+  looksBinaryByName,
   normalizeFileRead,
   normalizeFileTree,
   normalizeFileWrite,
   sniffBinary,
   sortTreeEntries,
-  BINARY_EXTENSIONS,
+  FILE_TREE_MAX_ENTRIES,
+  SNIFF_WINDOW,
 } from './file-panel';
 
 // ============================================================================
@@ -2695,21 +2697,25 @@ ipcMain.handle('orchdesk:file-tree', async (_e, input: unknown) => {
     const dirents = fs.readdirSync(norm.dir, { withFileTypes: true });
     const raw: Array<{ name: string; kind: 'file' | 'dir'; size: number; mtime: number }> = [];
     let overflow = false;
+    // scanned 与 raw 分开计数：被跳过（符号链接/无权限）的条目也计入扫描量，
+    // 否则一个 5 万条目、绝大部分是坏链接的目录会被全量 stat 一遍才肯停。
+    let scanned = 0;
     for (const de of dirents) {
-      if (raw.length >= 500) { overflow = true; break; }
-      const full = path.join(norm.dir, de.name);
-      let size = 0;
-      let mtime = 0;
+      if (raw.length >= FILE_TREE_MAX_ENTRIES || scanned >= FILE_TREE_MAX_ENTRIES * 4) {
+        overflow = true;
+        break;
+      }
+      scanned++;
+      // 目录不 stat：渲染层不显示目录大小，省下 500 次里的大半 syscall
+      // （实测 500 次 statSync ≈ 17ms，主进程同步阻塞）。
+      if (de.isDirectory()) {
+        raw.push({ name: de.name, kind: 'dir', size: 0, mtime: 0 });
+        continue;
+      }
+      if (!de.isFile()) continue; // 符号链接等其它类型：跳过（防环）。
       try {
-        const st = fs.statSync(full);
-        size = st.size;
-        mtime = st.mtimeMs;
-        if (de.isFile()) {
-          raw.push({ name: de.name, kind: 'file', size, mtime });
-        } else if (de.isDirectory()) {
-          raw.push({ name: de.name, kind: 'dir', size, mtime });
-        }
-        // 符号链接等其它类型：跳过（防环）。
+        const st = fs.statSync(path.join(norm.dir, de.name));
+        raw.push({ name: de.name, kind: 'file', size: st.size, mtime: st.mtimeMs });
       } catch {
         // 无权限 / 竞态删除：跳过该条目，不让一个坏条目毁掉整棵树。
       }
@@ -2732,17 +2738,24 @@ ipcMain.handle('orchdesk:file-read', async (_e, input: unknown) => {
   try {
     const st = fs.statSync(norm.path);
     if (st.isDirectory()) return { ok: false as const, reason: '目标是目录，不是文件' };
+    // languageOf / looksBinaryByName 都接受完整路径（内部先切 basename），
+    // 不在这里自己 lastIndexOf('.')——路径里有带点目录时会取错扩展名。
     const lang = languageOf(norm.path);
-    const binaryByName = BINARY_EXTENSIONS.has(
-      norm.path.slice(norm.path.lastIndexOf('.') + 1).toLowerCase(),
-    );
+    const binaryByName = looksBinaryByName(norm.path);
     // 只读 maxBytes 字节；是否截断由 stat.size 与 maxBytes 比较得出（显式字段）。
     const fd = fs.openSync(norm.path, 'r');
     try {
       const want = Math.min(st.size, norm.maxBytes);
       const buf = Buffer.alloc(want);
-      const read = fs.readSync(fd, buf, 0, buf.length, 0);
-      const head = buf.subarray(0, Math.min(read, 8192));
+      // readSync 不保证一次读满（大文件 / 网络盘常见短读）。循环读满 want，
+      // 否则会产出「内容比磁盘短却声称完整」的假象——「截断必须显式」的底线。
+      let read = 0;
+      while (read < want) {
+        const n = fs.readSync(fd, buf, read, want - read, read);
+        if (n <= 0) break;
+        read += n;
+      }
+      const head = buf.subarray(0, Math.min(read, SNIFF_WINDOW));
       const binary = binaryByName || sniffBinary(head);
       if (binary) {
         // 二进制文件：只给元信息，不吐内容（渲染层显示「二进制文件」占位）。
@@ -2752,11 +2765,19 @@ ipcMain.handle('orchdesk:file-read', async (_e, input: unknown) => {
           mtimeMs: st.mtimeMs, encodingSuspicious: false, editable: false,
         };
       }
-      const truncated = st.size > norm.maxBytes;
-      // 编辑资格判定（P3）：截断过的文件保存会丢数据、解出 U+FFFD 说明不是
-      // UTF-8（保存即乱码）——一律 editable=false 且渲染层显式给原因。
+      const truncated = st.size > norm.maxBytes || read < want;
+      // 编辑资格判定（P3）：截断过的文件保存会丢数据、非 UTF-8 保存即乱码
+      // ——一律 editable=false 且渲染层显式给原因。
+      // 严格校验用 TextDecoder(fatal) 而不是「解出 U+FFFD 就判定」：后者会把
+      // 本来就合法含 U+FFFD 的文本（译不准的占位符很常见）误判成非 UTF-8，
+      // 结果是可编辑的文件被禁掉编辑。
       const decoded = buf.subarray(0, read).toString('utf8');
-      const encodingSuspicious = decoded.includes('\uFFFD');
+      let encodingSuspicious = false;
+      try {
+        new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, read));
+      } catch {
+        encodingSuspicious = true;
+      }
       return {
         ok: true as const, path: norm.path, binary: false, truncated,
         size: st.size, sizeLabel: humanSize(st.size), lang,

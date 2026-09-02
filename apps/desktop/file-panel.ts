@@ -15,6 +15,8 @@
  * 但所有读取都限长、限深、限条目，防止一个巨大的目录把渲染层拖死。
  */
 
+import { clampInt, extOfName, isAbsoluteLike } from './common-tools';
+
 // ---------------------------------------------------------------------------
 // 常量与钳制
 // ---------------------------------------------------------------------------
@@ -49,15 +51,12 @@ export const SNIFF_WINDOW = 8192;
 // 扩展名 / 语言
 // ---------------------------------------------------------------------------
 
-function extOf(name: string): string {
-  const i = name.lastIndexOf('.');
-  if (i <= 0 || i === name.length - 1) return '';
-  return name.slice(i + 1).toLowerCase();
-}
-
-/** 判断是否可能为二进制（扩展名快通道；内容嗅探由宿主调 sniffBinary）。 */
+/**
+ * 判断是否可能为二进制（扩展名快通道；内容嗅探由宿主调 sniffBinary）。
+ * 传完整路径也安全——extOfName 会先切 basename（路径里带点的目录不会误判）。
+ */
 export function looksBinaryByName(name: string): boolean {
-  return BINARY_EXTENSIONS.has(extOf(name));
+  return BINARY_EXTENSIONS.has(extOfName(name));
 }
 
 /**
@@ -89,8 +88,9 @@ const LANG_BY_EXT: Record<string, string> = {
   txt: 'plaintext',
 };
 
+/** 传完整路径也安全（内部走 extOfName 先切 basename）。 */
 export function languageOf(name: string): string | null {
-  return LANG_BY_EXT[extOf(name)] || null;
+  return LANG_BY_EXT[extOfName(name)] || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,10 +109,8 @@ export function normalizeFileTree(
   const dir = typeof src.dir === 'string' ? src.dir.trim() : '';
   if (dir === '') return { ok: false, reason: '缺少 dir' };
   if (dir.length > FILE_PATH_MAX) return { ok: false, reason: '路径过长' };
-  if (!/^[a-zA-Z]:[\\/]/.test(dir) && !dir.startsWith('/')) {
-    return { ok: false, reason: 'dir 必须是绝对路径' };
-  }
-  const depth = clampCount(src.depth, 1, FILE_TREE_MAX_DEPTH, 1);
+  if (!isAbsoluteLike(dir)) return { ok: false, reason: 'dir 必须是绝对路径' };
+  const depth = clampInt(src.depth, 1, FILE_TREE_MAX_DEPTH, 1);
   return { ok: true, dir, depth };
 }
 
@@ -128,16 +126,8 @@ export function normalizeFileRead(
   const p = typeof src.path === 'string' ? src.path.trim() : '';
   if (p === '') return { ok: false, reason: '缺少 path' };
   if (p.length > FILE_PATH_MAX) return { ok: false, reason: '路径过长' };
-  if (!/^[a-zA-Z]:[\\/]/.test(p) && !p.startsWith('/')) {
-    return { ok: false, reason: 'path 必须是绝对路径' };
-  }
+  if (!isAbsoluteLike(p)) return { ok: false, reason: 'path 必须是绝对路径' };
   return { ok: true, path: p, maxBytes: FILE_READ_MAX_BYTES };
-}
-
-function clampCount(v: unknown, min: number, max: number, dflt: number): number {
-  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
-  if (!Number.isFinite(n)) return dflt;
-  return Math.min(max, Math.max(min, Math.round(n)));
 }
 
 // ---------------------------------------------------------------------------
@@ -173,9 +163,7 @@ export function normalizeFileWrite(
   const p = typeof src.path === 'string' ? src.path.trim() : '';
   if (p === '') return { ok: false, reason: '缺少 path' };
   if (p.length > FILE_PATH_MAX) return { ok: false, reason: '路径过长' };
-  if (!/^[a-zA-Z]:[\\/]/.test(p) && !p.startsWith('/')) {
-    return { ok: false, reason: 'path 必须是绝对路径' };
-  }
+  if (!isAbsoluteLike(p)) return { ok: false, reason: 'path 必须是绝对路径' };
   if (looksBinaryByName(p)) return { ok: false, reason: '二进制文件不支持文本编辑' };
   if (typeof src.content !== 'string') return { ok: false, reason: '缺少 content' };
   const bytes = Buffer.byteLength(src.content, 'utf8');
@@ -200,31 +188,39 @@ export function normalizeFileWrite(
 export type RawEntry = {
   name: string;
   kind: 'file' | 'dir';
+  /** 目录建议传 0（不 stat，省一次 syscall；渲染层也不显示目录大小）。 */
   size: number;
   mtime: number;
 };
 
-export type TreeEntry = RawEntry & { ext: string; binary: boolean };
+export type TreeEntry = RawEntry & { ext: string; binary: boolean; sizeLabel: string };
 
 /**
  * 目录条目排序：目录在前、名称不区分大小写升序。
  * 渲染层不做排序逻辑——宿主给什么渲染什么，行为才可测。
+ *
+ * 排序键先用 Schwartzian 变换缓存小写名：比较器里直接 toLowerCase() 会让
+ * 500 条的比较过程产生约 9000 次全串小写与临时分配。
  */
 export function sortTreeEntries(entries: RawEntry[]): TreeEntry[] {
   return entries
     .slice(0, FILE_TREE_MAX_ENTRIES)
     .map((e) => ({
       ...e,
-      ext: e.kind === 'file' ? extOf(e.name) : '',
+      ext: e.kind === 'file' ? extOfName(e.name) : '',
       binary: e.kind === 'file' ? looksBinaryByName(e.name) : false,
+      // humanSize 是唯一真源：渲染层不再各写一个 fmtSize（口径会漂移）。
+      sizeLabel: e.kind === 'file' ? humanSize(e.size) : '',
+      _k: e.name.toLowerCase(),
     }))
     .sort((a, b) => {
       if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
-      return a.name.toLowerCase() < b.name.toLowerCase()
-        ? -1
-        : a.name.toLowerCase() > b.name.toLowerCase()
-          ? 1
-          : 0;
+      return a._k < b._k ? -1 : a._k > b._k ? 1 : 0;
+    })
+    .map((e) => {
+      const { _k, ...rest } = e;
+      void _k;
+      return rest;
     });
 }
 
