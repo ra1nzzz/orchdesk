@@ -38,3 +38,19 @@ Minke 对照三块缺口（浏览器 / PTY 终端 / 文件 Tab）中的后两块
 - 打包链新增一步物化（vendor-dsh 第 3 步）与 `asarUnpack`；node-pty 缺失只 warn 不阻断（管道降级兜底）。
 - 终端会话生命周期完全在主进程（Map 管理），Tab 关闭即 kill；主窗口关闭随进程退出清理。
 - 编辑器 / diff 视图 / 文件写入明确后置（P3），本 ADR 口径为只读。
+
+## 审阅后加固（2026-09-02，yt-dev-review 三方并行）
+
+首轮交付后经质量/效率/可复用三路审阅，修掉以下阻断项并补回归断言（不是风格调整，每一条都有可观测后果）：
+
+1. **`ptyAvailable` 三态**：`ptyCache` 有 `undefined`（未探测）/ `null`（探测过，不可用）/ 函数（可用）三态。原写法 `ptyCache !== null` 在 `undefined` 时返回 **true**，与同行的 `via:'pipe'` 自相矛盾——「降级必须可见」在这里被自己破坏。改为 `!!ptyCache`，并补「未探测态不得冒充可用」断言。
+2. **洪峰单条封顶缺一次 slice**：超限分支只截了历史尾巴，没截 chunk 本体，「64KB 尾巴 + 1MB chunk」照样绕过 `TERMINAL_CHUNK_MAX` 直推渲染层。改为先截 chunk 再对拼接结果封顶，断言补「单条推送长度 ≤ CHUNK_MAX+标记」。
+3. **回放缓冲泄漏**：`pushExit` / `killTerminal` 都没清 `replayBuf`，反复开关终端按 64KB/会话 常驻（实测 1000 会话 +115MB）。两处补 `replayBuf.delete(id)`，退出时保留会话条目（用户要看最后一眼输出）但释放缓冲。
+4. **已退出会话占名额**：上限 6 按 `sessions.size` 统计，连开 6 个短命令后就再也开不了新终端（只能手动关 Tab）。改为只统计活跃会话，并在新建时回收已退出条目。
+5. **stdin 无 error 监听**：管道模式下进程退出后继续敲键触发 EPIPE → 主进程 uncaughtException。补 `child.stdin.on('error')`。
+6. **扩展名被带点目录击穿**：`extOf` 对整个路径取 `lastIndexOf('.')`，`D:/proj/com.example/src/app.ts` 会取到 `example/src/app.ts` → 语言探测返回 null（高亮静默降级）、二进制扩展名快通道失效（写保护少一道）。收敛为 `common-tools.extOfName`（先切 basename）。
+7. **readSync 单次读不循环**：短读时内容比磁盘短却声称完整，违反「截断必须显式」。改为循环读满，`truncated = st.size > maxBytes || read < want`。
+8. **重复实现收敛**：新建 `common-tools.ts` 收 `clampInt` / `isAbsoluteLike` / `extOfName`（原 browser-tools、terminal-tools、file-panel、terminal-pty 各有一份 clamp，绝对路径正则四份），登记 arch-guard `PURE_MODULES`；`describeTerminalState` 由 `getTerminalState` 真实调用（此前零生产调用方 = 死挂点）；`humanSize` 成为 sizeLabel 唯一真源（渲染层 `fmtSize` 删除）。
+9. **目录不 stat**：渲染层不显示目录大小，500 次 statSync（≈17ms 同步阻塞）里的大半是浪费；同时把扫描量上限与条目上限分开计数（大量坏链接时不会全量 stat 一遍才停）。
+
+验证：terminal-pty 26→29 项、file-panel 15→20 项，全量 verify 805→**814 项**（24 套件）。

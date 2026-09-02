@@ -10,13 +10,13 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.12.0`（tag `v0.12.0` 已推送；Release 已发布） | SemVer，pre-1.0 阶段；`0.11.0` 为上一 Release |
-| **最新 Commit** | `a7afcf2` | feat(desktop): 文件 Tab 编辑与 diff（ADR-0013，Minke 对照 P3） |
+| **最新 Commit** | `2708489` | fix(desktop): yt-dev-review 三方审阅交叉修复（终端/文件/编辑） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.12.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.12.0) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正（`gh release edit v0.12.0 --notes-file … --draft=false`）——CI 不会自动发布 |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
-| **验证套件** | 805/805 PASS | `npm run verify`（plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / browser-tools 43 / terminal-pty 26 / file-panel 15 / **file-edit 19** / arch-guard 15 / e2e 152）—— 24 套件；另设不进链的真机冒烟 `pnpm run smoke:browser`（11/11，需真 GPU/渲染进程） |
+| **验证套件** | 814/814 PASS | `npm run verify`（plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / browser-tools 43 / terminal-pty 29 / file-panel 20 / **file-edit 20** / arch-guard 15 / e2e 152）—— 24 套件；另设不进链的真机冒烟 `pnpm run smoke:browser`（11/11，需真 GPU/渲染进程） |
 | **真机冒烟** | 待人工执行 | `pnpm run smoke:browser`（`apps/desktop/scripts/browser-smoke.cjs`，10 步）。**刻意不进 verify 链**：需要真 GPU/渲染进程，CI 与非交互会话必假红；脚本启动期即自检 `process.type` 并给出退出码 2 的显式指引 |
 
 > **v0.4.1 关键修复**：StepFun / 部分 OpenAI 兼容网关在 chat 模式下带 `tools` 参数时返回 HTTP 200、content/toolCalls 全空（软拒绝），导致「发消息能响应，要求执行任务则报错」。现 `callOpenAICompatible` 识别软拒绝并逐级降级到不带 tools，成功后把 `provider.id|model` 记入进程级记忆，后续会话直接走 `<tool:>` 文本兜底解析。新增 model-loop M 组 3 项回归测试。
@@ -275,5 +275,7 @@ git push origin main --follow-tags  # 推送 + 触发 CI
 
 ---
 
-*最后更新：2026-09-02（第十六批：文件 Tab 编辑与 diff（ADR-0013）｜verify 786→805，24 套件；外部修改检测 + EOL 保护 + UMD diff；真机 GUI 冒烟待用户桌面会话）*
+> **第十七批（yt-dev-review 三方并行审阅与交叉修复，2026-09-02）**：对 P2-10 终端 PTY、P2-11 文件 Tab、P3 编辑/diff 三块交付跑质量 / 效率 / 可复用三路并行审阅（子代理只读分析，修复回主会话）。**交叉共识 5 项**（≥2 方同时指出）：扩展名取全路径被带点目录击穿、洪峰单条 256KB 未真正封顶、`replayBuf` 泄漏、常量与工具重复实现、`describeTerminalState` 零调用方死挂点。**单点但复核确认为真**：`ptyAvailable` 在 `ptyCache === undefined`（未探测）时返回 true 与 `via='pipe'` 自相矛盾、shiki 对 2MB 文件高亮实测阻塞 10.5s、`readSync` 单次读的短读会产出「内容比磁盘短却声称完整」、文件面板用 `typeof bridge.fileTree !== 'function'` 判「未接入」对 stub 恒不命中（把「未接入」显示成「为空」）。修复清单见 ADR-0012 / ADR-0013 的「审阅后加固」章节，要点：新建 `common-tools.ts` 收敛 `clampInt` / `isAbsoluteLike` / `extOfName`（原 4 份 clamp + 4 份绝对路径正则）并登记 arch-guard；`encodingSuspicious` 改 `TextDecoder(fatal)` 严格校验（原「含 U+FFFD 即非 UTF-8」会把合法文本误判而禁编辑）；EOL 改多数派判定并补 CR-only 分支（混合行尾不被少数派全量改写）；shiki 加 200KB/3000 行门槛，超限回落 `<pre>` 并显式说明原因。验证：terminal-pty 26→29、file-panel 15→20、file-edit 19→20，全量 verify **805→814**（24 套件）全绿。
+
+*最后更新：2026-09-02（第十七批：yt-dev-review 审阅交叉修复｜verify 805→814，24 套件；common-tools 收敛、三态 ptyAvailable、EOL 多数派、shiki 门槛；真机 GUI 冒烟待用户桌面会话）*
 *上游文档：[current-state.md](./current-state.md) | [VERSION-GOVERNANCE.md](./VERSION-GOVERNANCE.md) | [PRD差距补齐复盘](../99-归档/PRD差距补齐-2026-08-29.md) | 变更日志 `apps/desktop/CHANGELOG.md`（仓库根，docs 外）*

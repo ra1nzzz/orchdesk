@@ -25,3 +25,13 @@ ADR-0012 把文件 Tab 定为「只读优先」，编辑 / diff 明确后置 P3�
 - 渲染层新增依赖：`file-edit.js`（<10KB，无外部包）。
 - Agent 侧 `file_write` 工具链路不变（仍走授权门 + 白名单）。
 - git diff / 编辑器级体验（CodeMirror merge）仍后置，待用户需求明确再议。
+
+## 审阅后加固（2026-09-02，yt-dev-review 三方并行）
+
+1. **EOL 多数派判定**：原 `detectEol` 是「见一个 `\r\n` 就判 CRLF」，混合行尾的文件会按少数派全量改写——产生肉眼不可见的整文件变更，而 diff 在规范化后的文本上算，用户连「我改了什么」都看不到。改为统计 CRLF/CR/LF 三种计数取多数派，并新增 CR-only 分支（老 Mac 风格）：判成 lf 会让 `applyEol` 把裸 `\r` 吃掉，保存时整个文件并成一行。
+2. **encodingSuspicious 改成严格校验**：原判定是「解出的文本含 U+FFFD」，会把本来就合法含替代字符的文件误判成非 UTF-8（结果是可编辑的文件被禁掉编辑）。改用 `TextDecoder('utf-8', { fatal: true })`。
+3. **shiki 体积门槛**：`codeToHtml` 同步阻塞渲染线程，实测 64KB=753ms、256KB=1.34s、1MB=5.1s、**2MB=10.5s**，HTML 膨胀约 6.8 倍（2MB 文本产出约 35 万 span）。超过 200KB / 3000 行一律回落 `<pre>`，并显式说明「文件过大，已跳过语法高亮以保证界面响应」——降级必须可见，且不影响编辑与保存。
+4. **dirty 基线缓存**：原实现每敲一键都对 2MB 文本做 `applyEol` + 读整个 textarea（实测每次 1.1ms）。基线在 `startFileEdit` 算一次缓存，保存成功后随基线轮转一起更新。
+5. **「未接入」判定修正**：文件面板原用 `typeof bridge.fileTree !== 'function'` 判未接入——桥兜底 stub 本身也是函数，永远命中不了，用户只看到「选择一个目录」（把「未接入」显示成「为空」）。改为宿主返回 `bridgeMissing` 标记驱动。
+
+验证：file-edit 19→20 项，全量 verify 805→**814 项**（24 套件）。
