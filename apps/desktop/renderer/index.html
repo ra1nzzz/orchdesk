@@ -5,6 +5,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;">
 <title>OrchDesk · 会话优先的本地 Agent 工作台</title>
 <link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="vendor/xterm/xterm.css">
 </head>
 <body>
 
@@ -16,6 +17,10 @@
   <span style="margin-left:auto" class="row">
     <!-- 浏览器（ADR-0011）：Agent 默认在后台窗口操作网页，这里是用户的观察与制动入口 -->
     <button class="btn ghost sm" data-action="browser-panel" id="browserBtn" title="内置浏览器">浏览器</button>
+    <!-- 终端（P2-10）：用户亲手操作的交互式终端（非 Agent 工具，不过授权门） -->
+    <button class="btn ghost sm" data-action="terminal-panel" id="terminalBtn" title="终端">终端</button>
+    <!-- 文件（P2-11）：本地文件浏览与高亮预览（只读优先） -->
+    <button class="btn ghost sm" data-action="file-panel" id="fileBtn" title="文件">文件</button>
     <span style="color:var(--fg-faint)" id="clock"></span>
     <button class="btn ghost sm" data-action="toggle-theme">深色</button>
   </span>
@@ -45,8 +50,15 @@
 <div id="modalRoot"></div>
 <div id="menuRoot"></div>
 <div id="toastRoot"></div>
+<!-- 终端 / 文件：全屏覆盖层（不用 modal 体系 —— xterm 实例与滚动位置不能随推送重绘） -->
+<div id="terminalRoot" class="fullscreen-panel hidden"></div>
+<div id="fileRoot" class="fullscreen-panel hidden"></div>
 
 <script src="vendor/marked.min.js"></script>
+<!-- 终端（P2-10）与文件（P2-11）的 vendored 依赖：加载失败时 app.js 显式降级 -->
+<script src="vendor/xterm/xterm.js"></script>
+<script src="vendor/xterm/addon-fit.js"></script>
+<script src="vendor/shiki-bundle.js"></script>
 <!-- FR-6 分叉与回放：纯逻辑，无依赖，须在 app.js 之前加载 -->
 <script src="session-fork.js"></script>
 <script src="app.js"></script>

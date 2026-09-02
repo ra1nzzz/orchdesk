@@ -141,6 +141,25 @@ import {
   screenshotBrowser,
   setBrowserVisible,
 } from './browser-cdp';
+import {
+  createTerminal,
+  ensurePtyLoaded,
+  getTerminalState,
+  killTerminal,
+  onTerminalData,
+  onTerminalExit,
+  resizeTerminal,
+  writeTerminal,
+} from './terminal-pty';
+import {
+  humanSize,
+  languageOf,
+  normalizeFileRead,
+  normalizeFileTree,
+  sniffBinary,
+  sortTreeEntries,
+  BINARY_EXTENSIONS,
+} from './file-panel';
 
 // ============================================================================
 // OrchDesk 桌面壳主进程（P1）
@@ -2588,6 +2607,163 @@ ipcMain.handle('orchdesk:browser-open-shot-dir', async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// 终端（PTY）IPC：渲染层「终端」Tab（吸收计划 P2-10）
+// ---------------------------------------------------------------------------
+// 终端是「用户亲手操作」的入口，不走 Agent 授权门；但环境净化（NODE_OPTIONS 等
+// shim 变量）在 terminal-pty.ts 的 sanitizeTerminalEnv 里强制执行。
+// 数据/退出事件用推送（与 browser-state 同模式），Tab 栏状态用拉取。
+
+/** 终端应用目录：dev = apps/desktop，packaged = app.asar（asarUnpack 透明重定向）。 */
+const TERMINAL_APP_DIR = path.resolve(__dirname, '..');
+
+/** dsh 运行时自建的 profile node_modules（dev 环境常有 node-pty，作最后候选）。 */
+function terminalExtraPtyDirs(): string[] {
+  const cands = [
+    path.join(TERMINAL_APP_DIR, '..', '.dsh-home', 'profiles', 'node_modules'),
+    path.join(process.cwd(), '.dsh-home', 'profiles', 'node_modules'),
+  ];
+  return [...new Set(cands)];
+}
+
+/** 终端数据推送：攒批后的输出块（节流在 terminal-pty.ts 内）。 */
+onTerminalData((ev) => {
+  try {
+    const w = (mainWindow && !mainWindow.isDestroyed())
+      ? mainWindow
+      : BrowserWindow.getAllWindows().find((x) => !x.isDestroyed());
+    if (w) w.webContents.send('orchdesk:terminal-data', ev);
+  } catch { /* 窗口已关闭 */ }
+});
+
+/** 终端退出推送：Tab 栏把该会话标记为已退出（不自动关闭，保留回看）。 */
+onTerminalExit((ev) => {
+  try {
+    const w = (mainWindow && !mainWindow.isDestroyed())
+      ? mainWindow
+      : BrowserWindow.getAllWindows().find((x) => !x.isDestroyed());
+    if (w) w.webContents.send('orchdesk:terminal-exit', ev);
+  } catch { /* 窗口已关闭 */ }
+});
+
+/** 创建终端会话。via='pipe' 时渲染层必须显示「管道模式」提示（降级可见）。 */
+ipcMain.handle('orchdesk:terminal-create', async (_e, input: unknown) => {
+  return createTerminal(
+    (input && typeof input === 'object' ? input : {}) as { cwd?: string; cols?: number | string; rows?: number | string },
+    {
+      appDir: TERMINAL_APP_DIR,
+      extraPtyDirs: terminalExtraPtyDirs(),
+      fallbackCwd: process.cwd(),
+    },
+  );
+});
+
+/** 写入用户键入。 */
+ipcMain.handle('orchdesk:terminal-write', async (_e, id: unknown, data: unknown) => {
+  if (typeof id !== 'string' || typeof data !== 'string') {
+    return { ok: false, reason: '参数不合法' };
+  }
+  return { ok: writeTerminal(id, data) };
+});
+
+/** 调整尺寸（管道模式 no-op）。 */
+ipcMain.handle('orchdesk:terminal-resize', async (_e, id: unknown, cols: unknown, rows: unknown) => {
+  if (typeof id !== 'string') return { ok: false, reason: '参数不合法' };
+  return { ok: resizeTerminal(id, cols, rows) };
+});
+
+/** 关闭会话（幂等）。 */
+ipcMain.handle('orchdesk:terminal-kill', async (_e, id: unknown) => {
+  if (typeof id !== 'string') return { ok: false, reason: '参数不合法' };
+  return { ok: killTerminal(id) };
+});
+
+/** 全量状态：Tab 栏 + 每会话回放缓冲（重开 Tab 补看历史输出）。 */
+ipcMain.handle('orchdesk:terminal-status', async () => getTerminalState());
+
+// ---------------------------------------------------------------------------
+// 文件 Tab IPC（吸收计划 P2-11，只读优先）
+// ---------------------------------------------------------------------------
+// 目录逐层懒加载（每次只列一层，防巨大目录树一次全量扫描）；
+// 文件读取限 2MB + 二进制嗅探（NUL 字节），「截断」必须显式返回，不许静默。
+
+ipcMain.handle('orchdesk:file-tree', async (_e, input: unknown) => {
+  const norm = normalizeFileTree(input as { dir?: string; depth?: number | string });
+  if (!norm.ok) return { ok: false as const, reason: norm.reason };
+  try {
+    const dirents = fs.readdirSync(norm.dir, { withFileTypes: true });
+    const raw: Array<{ name: string; kind: 'file' | 'dir'; size: number; mtime: number }> = [];
+    let overflow = false;
+    for (const de of dirents) {
+      if (raw.length >= 500) { overflow = true; break; }
+      const full = path.join(norm.dir, de.name);
+      let size = 0;
+      let mtime = 0;
+      try {
+        const st = fs.statSync(full);
+        size = st.size;
+        mtime = st.mtimeMs;
+        if (de.isFile()) {
+          raw.push({ name: de.name, kind: 'file', size, mtime });
+        } else if (de.isDirectory()) {
+          raw.push({ name: de.name, kind: 'dir', size, mtime });
+        }
+        // 符号链接等其它类型：跳过（防环）。
+      } catch {
+        // 无权限 / 竞态删除：跳过该条目，不让一个坏条目毁掉整棵树。
+      }
+    }
+    return {
+      ok: true as const,
+      dir: norm.dir,
+      entries: sortTreeEntries(raw),
+      truncated: overflow,
+      total: dirents.length,
+    };
+  } catch (err) {
+    return { ok: false as const, reason: (err as Error).message };
+  }
+});
+
+ipcMain.handle('orchdesk:file-read', async (_e, input: unknown) => {
+  const norm = normalizeFileRead(input as { path?: string });
+  if (!norm.ok) return { ok: false as const, reason: norm.reason };
+  try {
+    const st = fs.statSync(norm.path);
+    if (st.isDirectory()) return { ok: false as const, reason: '目标是目录，不是文件' };
+    const lang = languageOf(norm.path);
+    const binaryByName = BINARY_EXTENSIONS.has(
+      norm.path.slice(norm.path.lastIndexOf('.') + 1).toLowerCase(),
+    );
+    // 只读 maxBytes 字节；是否截断由 stat.size 与 maxBytes 比较得出（显式字段）。
+    const fd = fs.openSync(norm.path, 'r');
+    try {
+      const want = Math.min(st.size, norm.maxBytes);
+      const buf = Buffer.alloc(want);
+      const read = fs.readSync(fd, buf, 0, buf.length, 0);
+      const head = buf.subarray(0, Math.min(read, 8192));
+      const binary = binaryByName || sniffBinary(head);
+      if (binary) {
+        // 二进制文件：只给元信息，不吐内容（渲染层显示「二进制文件」占位）。
+        return {
+          ok: true as const, path: norm.path, binary: true, truncated: false,
+          size: st.size, sizeLabel: humanSize(st.size), lang: null, content: '',
+        };
+      }
+      const truncated = st.size > norm.maxBytes;
+      return {
+        ok: true as const, path: norm.path, binary: false, truncated,
+        size: st.size, sizeLabel: humanSize(st.size), lang,
+        content: buf.subarray(0, read).toString('utf8'),
+      };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    return { ok: false as const, reason: (err as Error).message };
+  }
+});
+
 ipcMain.handle('orchdesk:memory-promotions-clear', async () => {  const cleared = promotionLog.length;
   promotionLog = [];
   persistPromotionLog();
@@ -3167,6 +3343,15 @@ app.whenReady().then(async () => {
 
   // 数据目录确定后告知宿主服务（沙箱状态落盘位置）。
   process.env.ORCHDESK_DATA_DIR = dataDir();
+
+  // 终端（P2-10）：启动期探测 node-pty 可用性，让 getTerminalState 的
+  // ptyAvailable 从一开始就是确定值（未探测 ≠ 不可用，不许混淆）。
+  try {
+    const ok = ensurePtyLoaded(TERMINAL_APP_DIR, terminalExtraPtyDirs());
+    log('INFO', 'terminal', ok ? 'node-pty 已加载（真 PTY 模式）' : 'node-pty 不可用，终端将以管道模式降级');
+  } catch (err) {
+    log('WARN', 'terminal', 'node-pty 探测异常：' + (err as Error).message);
+  }
 
   // BUG-014 根因修复：启动真实 Cordis 运行时（宿主服务 + 9 个插件），
   // 此前 packages/plugin/* 从未被加载，FR-7/9/10/11/12/13 在应用内全是空壳。

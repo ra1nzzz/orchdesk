@@ -152,6 +152,22 @@ function main() {
   }
   console.log(`[vendor-dsh] OrchDesk 插件 ${plugCount} 个`);
 
+  // ---- 3. node-pty（终端 PTY 正路；缺失时终端降级管道模式，不阻断打包）----
+  // 来源：dsh 运行时自建的 profile node_modules（N-API 预编译，Electron/Node 通用）。
+  // 目标：vendor/node-pty（dev 与 packaged 同路径；asarUnpack 保证 .node 可加载）。
+  const ptyCandidates = [
+    path.join(ROOT, '.dsh-home', 'profiles', 'node_modules', 'node-pty'),
+    path.join(DESKTOP, 'node_modules', 'node-pty'),
+  ];
+  const ptySrc = ptyCandidates.find((p) => fs.existsSync(path.join(p, 'package.json')));
+  if (ptySrc) {
+    const ptyDst = path.join(VENDOR, 'node-pty');
+    const files = syncDir(ptySrc, ptyDst);
+    console.log(`[vendor-dsh] node-pty  ${ptySrc.replace(ROOT, '.')}  (${files} 文件)`);
+  } else {
+    console.warn('[vendor-dsh] 未找到 node-pty（终端将以管道模式降级，不阻断打包）');
+  }
+
   console.log(`[vendor-dsh] 完成：${pkgCount} 个 dsh 包 + ${plugCount} 个插件`);
   if (pkgCount === 0 || plugCount === 0) process.exit(1);
 }

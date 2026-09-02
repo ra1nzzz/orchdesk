@@ -255,6 +255,17 @@
       closeBrowser: () => Promise.resolve({ ok: false, closed: false }),
       openBrowserShotDir: () => Promise.resolve({ ok: false, reason: '未接入' }),
       onBrowserState: () => () => {},
+      // 终端（P2-10）：无桥 → null，面板显示「未接入」而不是「0 个会话」
+      terminalCreate: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      terminalWrite: () => Promise.resolve({ ok: false }),
+      terminalResize: () => Promise.resolve({ ok: false }),
+      terminalKill: () => Promise.resolve({ ok: false }),
+      terminalStatus: () => Promise.resolve(null),
+      onTerminalData: () => () => {},
+      onTerminalExit: () => () => {},
+      // 文件（P2-11）：无桥 → ok:false，面板显示「未接入」
+      fileTree: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      fileRead: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
     };
   })();
 
@@ -334,6 +345,13 @@
     browser: { loaded: false, open: false, url: '', title: '', visible: false, lastShot: null, lastError: '', shotsDir: '' },
     // 浏览器面板是否打开（状态推送时据此决定是否重绘）
     browserPanelOpen: false,
+    // 终端（P2-10）：ptyAvailable=false = 管道模式降级（必须显式展示，不冒充 PTY）。
+    // loaded=false = 桥未接入；sessions=[] = 没有打开的终端（两者不是一回事）。
+    terminal: { loaded: false, ptyAvailable: false, via: 'pipe', sessions: [], activeId: null },
+    terminalPanelOpen: false,
+    // 文件（P2-11）：root='' = 尚未选择目录。children 是目录懒加载缓存。
+    filePanelOpen: false,
+    filePanel: { loaded: false, root: '', truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false },
     // 连接器（PRD FR-3）：真实后端注册表（凭证加密存储 + 保存即探测）。
     // loaded=false 时侧栏显示「未接入」，不能拿空数组冒充「都没配置」。
     connectors: { items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 }, loaded: false, expanded: null },
@@ -2225,6 +2243,333 @@
     rerenderBrowserPanelIfOpen();
   }
 
+  /* ---------- 终端面板（P2-10：node-pty 正路 + 管道模式显式降级） ---------- */
+  // 终端是「用户亲手操作」的入口，与浏览器面板（观察 Agent）相反。
+  // xterm 实例与滚动位置不能随状态推送重绘 —— 所以走全屏覆盖层 +
+  // 「骨架只建一次，头部与可见性单独更新」，不走 modal 体系。
+  const termHandles = new Map(); // id -> { cont, term, fit, pre }
+
+  function xtermAvailable() { return typeof window !== 'undefined' && window.Terminal; }
+  function fitAvailable() { return typeof window !== 'undefined' && window.FitAddon && window.FitAddon.FitAddon; }
+
+  function ensureTermSkeleton() {
+    const root = $('#terminalRoot');
+    if (root.dataset.ready) return;
+    root.innerHTML = '<div class="fp-head" id="termHead"></div><div class="term-body" id="termBody"></div>';
+    root.dataset.ready = '1';
+  }
+
+  function openTerminalPanel() {
+    state.terminalPanelOpen = true;
+    $('#terminalRoot').classList.remove('hidden');
+    ensureTermSkeleton();
+    refreshTerminal();
+  }
+
+  function closeTerminalPanel() {
+    state.terminalPanelOpen = false;
+    $('#terminalRoot').classList.add('hidden');
+  }
+
+  function terminalShortcutLabel() {
+    return state.terminal.ptyAvailable ? 'PTY' : '管道模式';
+  }
+
+  async function refreshTerminal() {
+    if (typeof bridge.terminalStatus !== 'function') {
+      state.terminal.loaded = false;
+      renderTerminalPanel();
+      return;
+    }
+    try {
+      const st = await bridge.terminalStatus();
+      if (!st || typeof st !== 'object') {
+        state.terminal.loaded = false;
+      } else {
+        state.terminal.loaded = true;
+        state.terminal.ptyAvailable = !!st.ptyAvailable;
+        state.terminal.via = st.via || 'pipe';
+        const ids = new Set((st.sessions || []).map((s) => s.id));
+        for (const id of [...termHandles.keys()]) if (!ids.has(id)) disposeTerm(id);
+        (st.sessions || []).forEach((s) => { if (!termHandles.has(s.id)) attachTerm(s); });
+        state.terminal.sessions = st.sessions || [];
+        if (!state.terminal.activeId || !ids.has(state.terminal.activeId)) {
+          state.terminal.activeId = state.terminal.sessions.length
+            ? state.terminal.sessions[state.terminal.sessions.length - 1].id
+            : null;
+        }
+      }
+    } catch (err) {
+      state.terminal.loaded = false;
+    }
+    renderTerminalPanel();
+  }
+
+  function attachTerm(s) {
+    const body = $('#termBody');
+    if (!body) return;
+    const cont = document.createElement('div');
+    cont.className = 'term-container';
+    cont.dataset.tid = s.id;
+    body.appendChild(cont);
+    const rec = { cont, term: null, fit: null, pre: null };
+    termHandles.set(s.id, rec);
+    if (xtermAvailable()) {
+      const term = new window.Terminal({
+        cursorBlink: true, fontSize: 12, scrollback: 5000,
+        fontFamily: 'Consolas, "Courier New", monospace',
+        theme: { background: '#161622', foreground: '#e6e6f0', cursor: '#a78bfa' },
+      });
+      rec.term = term;
+      if (fitAvailable()) {
+        rec.fit = new window.FitAddon.FitAddon();
+        term.loadAddon(rec.fit);
+      }
+      term.open(cont);
+      if (rec.fit) { try { rec.fit.fit(); } catch { /* 尺寸为 0 时静默（面板还藏着） */ } }
+      term.onResize(({ cols, rows }) => { bridge.terminalResize(s.id, cols, rows); });
+      term.onData((d) => { bridge.terminalWrite(s.id, d); });
+      if (s.replay) term.write(s.replay);
+    } else {
+      // 降级（可见）：xterm 缺失 → 只读回放 + 逐行输入，不冒充完整交互终端
+      cont.innerHTML = '<div class="term-degrade">xterm 未加载：已降级为逐行输入模式（输出照常显示，方向键/交互式程序不可用）</div>'
+        + '<pre class="term-pre"></pre>'
+        + '<div class="term-fb-row"><span class="term-fb-ps">$</span><input type="text" class="term-fb-input" placeholder="输入命令后回车发送"></div>';
+      rec.pre = cont.querySelector('.term-pre');
+      if (s.replay) rec.pre.textContent = s.replay;
+      const inp = cont.querySelector('.term-fb-input');
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && inp.value) {
+          bridge.terminalWrite(s.id, inp.value + '\r');
+          inp.value = '';
+        }
+      });
+    }
+  }
+
+  function disposeTerm(id) {
+    const h = termHandles.get(id);
+    if (!h) return;
+    if (h.term) { try { h.term.dispose(); } catch { /* 已销毁 */ } }
+    h.cont.remove();
+    termHandles.delete(id);
+  }
+
+  function showTermEmpty(text) {
+    const body = $('#termBody');
+    if (!body) return;
+    let empty = body.querySelector('.term-empty');
+    if (!text) { if (empty) empty.remove(); return; }
+    if (!empty) {
+      empty = document.createElement('div');
+      empty.className = 'term-empty';
+      body.appendChild(empty);
+    }
+    empty.innerHTML = text;
+  }
+
+  function renderTerminalPanel() {
+    if (!$('#terminalRoot').dataset.ready) return;
+    const t = state.terminal;
+    const head = $('#termHead');
+    const closeBtn = '<button class="btn ghost sm" data-action="term-close">关闭</button>';
+    if (!t.loaded) {
+      head.innerHTML = `<b>终端</b><span class="faint">未接入主进程</span><span style="margin-left:auto"></span>${closeBtn}`;
+      showTermEmpty('<div class="faint">主进程未接入终端服务（桥不可用）。</div>');
+      return;
+    }
+    const tabs = t.sessions.map((s) => {
+      const name = (s.shell || 'shell').split(/[\\/]/).pop();
+      return `<button class="term-tab${s.id === t.activeId ? ' on' : ''}" data-action="term-tab" data-id="${s.id}" title="${esc(s.cwd)}（PID ${s.pid} · ${s.via === 'pty' ? 'PTY' : '管道'}）">${esc(name)}${s.exited ? '（已退出）' : ''}<span class="term-tab-x" data-action="term-tab-close" data-id="${s.id}" title="结束该会话">×</span></button>`;
+    }).join('');
+    head.innerHTML = `<b>终端</b>
+      <span class="badge${t.ptyAvailable ? '' : ' warn'}" title="${t.ptyAvailable ? 'node-pty 已加载（真 PTY）' : 'node-pty 不可用：已降级为管道模式（交互式程序受限）'}">${terminalShortcutLabel()}</span>
+      <span class="row" style="margin-left:10px">${tabs}</span>
+      <button class="btn sm ghost" data-action="term-new" ${t.sessions.length >= 6 ? 'disabled title="已达会话上限（6）"' : ''}>+ 新建</button>
+      <span style="margin-left:auto"></span>${closeBtn}`;
+    if (!t.sessions.length) {
+      showTermEmpty('<div class="faint">没有打开的终端。点「+ 新建」开一个。</div>');
+      return;
+    }
+    showTermEmpty('');
+    for (const [id, h] of termHandles) h.cont.classList.toggle('hidden', id !== t.activeId);
+    const active = termHandles.get(t.activeId);
+    if (active) {
+      if (active.fit) { try { active.fit.fit(); } catch { /* 隐藏中 */ } }
+      if (active.term) active.term.focus();
+    }
+  }
+
+  async function newTerminalSession() {
+    const r = await bridge.terminalCreate({});
+    if (!r || r.ok === false) {
+      toast(`创建终端失败：${(r && r.reason) || '未接入'}`, 'err');
+      return;
+    }
+    await refreshTerminal();
+    if (r.session && r.session.via === 'pipe') {
+      toast('node-pty 不可用，已降级为管道模式（交互式程序受限）', 'warn');
+    }
+  }
+
+  /* ---------- 文件面板（P2-11：只读浏览 + shiki 高亮，编辑后置） ---------- */
+  const FILE_SHIKI_LANGS = ['typescript', 'javascript', 'json', 'markdown', 'css', 'html', 'python', 'bash', 'yaml', 'go', 'rust', 'sql'];
+
+  function ensureFileSkeleton() {
+    const root = $('#fileRoot');
+    if (root.dataset.ready) return;
+    root.innerHTML = '<div class="fp-head" id="fileHead"></div>'
+      + '<div class="file-body"><div class="file-tree" id="fileTree"></div><div class="file-view" id="fileView"></div></div>';
+    root.dataset.ready = '1';
+  }
+
+  function openFilePanel() {
+    state.filePanelOpen = true;
+    $('#fileRoot').classList.remove('hidden');
+    ensureFileSkeleton();
+    if (!state.filePanel.root) renderFilePanel();
+    else renderFilePanel();
+  }
+
+  function closeFilePanel() {
+    state.filePanelOpen = false;
+    $('#fileRoot').classList.add('hidden');
+  }
+
+  async function pickFileRoot() {
+    const r = await bridge.pickFolder();
+    if (r && r.ok && r.path) {
+      state.filePanel.root = r.path;
+      state.filePanel.expanded = new Set();
+      state.filePanel.children = new Map();
+      state.filePanel.preview = null;
+      state.filePanel.previewPath = '';
+      await loadFileDir(r.path);
+    } else if (r && r.ok === false) {
+      toast(`选择目录失败：${(r && r.reason) || '未接入'}`, 'err');
+    }
+  }
+
+  async function loadFileDir(dir) {
+    const r = await bridge.fileTree(dir);
+    if (!r || r.ok === false) {
+      toast(`读取目录失败：${(r && r.reason) || '未接入'}`, 'err');
+      state.filePanel.expanded.delete(dir);
+      renderFilePanel();
+      return;
+    }
+    state.filePanel.loaded = true;
+    state.filePanel.children.set(dir, { entries: r.entries || [], truncated: !!r.truncated });
+    if (!state.filePanel.root) state.filePanel.root = dir;
+    renderFilePanel();
+  }
+
+  function fileEntryHTML(e, depth) {
+    const pad = `padding-left:${8 + depth * 16}px`;
+    if (e.kind === 'dir') {
+      const open = state.filePanel.expanded.has(e.path);
+      return `<div class="file-row dir${open ? ' open' : ''}" style="${pad}" data-action="file-toggle" data-path="${esc(e.path)}"><span class="file-caret">${open ? '▾' : '▸'}</span>${ic(open ? 'folderOpen' : 'folder', 14)}${esc(e.name)}</div>`;
+    }
+    const active = state.filePanel.previewPath === e.path ? ' active' : '';
+    const ico = e.binary ? ic('fileText', 14) : ic(e.ext === 'md' ? 'fileText' : 'code', 14);
+    return `<div class="file-row file${active}" style="${pad}" data-action="file-open" data-path="${esc(e.path)}" data-name="${esc(e.name)}"><span class="file-caret"></span>${ico}${esc(e.name)}<span class="file-size">${esc(e.sizeLabel || '')}</span></div>`;
+  }
+
+  function renderTreeLevel(dir, depth) {
+    const cached = state.filePanel.children.get(dir);
+    if (!cached) return '';
+    let html = (cached.entries || []).map((e) => {
+      // entries 上补 path/sizeLabel（宿主排序返回的是纯条目）
+      const full = e.path || (dir.replace(/[\\/]+$/, '') + '/' + e.name);
+      e.path = full;
+      e.sizeLabel = e.sizeLabel || (e.kind === 'file' ? fmtSize(e.size) : '');
+      let out = fileEntryHTML(e, depth);
+      if (e.kind === 'dir' && state.filePanel.expanded.has(full)) {
+        out += renderTreeLevel(full, depth + 1);
+      }
+      return out;
+    }).join('');
+    if (cached.truncated) html += `<div class="file-row faint" style="padding-left:${8 + depth * 16}px">（条目超上限，已截断）</div>`;
+    return html;
+  }
+
+  function fmtSize(n) {
+    if (!Number.isFinite(n) || n < 0) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function renderFilePanel() {
+    if (!$('#fileRoot').dataset.ready) return;
+    const fp = state.filePanel;
+    const head = $('#fileHead');
+    const closeBtn = '<button class="btn ghost sm" data-action="file-close">关闭</button>';
+    if (typeof bridge.fileTree !== 'function') {
+      head.innerHTML = `<b>文件</b><span class="faint">未接入主进程</span><span style="margin-left:auto"></span>${closeBtn}`;
+      $('#fileTree').innerHTML = '<div class="faint" style="padding:10px">主进程未接入文件服务。</div>';
+      $('#fileView').innerHTML = '';
+      return;
+    }
+    head.innerHTML = `<b>文件</b>
+      <span class="file-root" title="${esc(fp.root)}">${esc(fp.root || '（未选择目录）')}</span>
+      <span class="row" style="margin-left:8px">
+        <button class="btn sm ghost" data-action="file-pick">${fp.root ? '更换目录' : '选择目录'}</button>
+        ${fp.root ? `<button class="btn sm ghost" data-action="file-refresh">刷新</button>` : ''}
+      </span>
+      <span style="margin-left:auto"></span>${closeBtn}`;
+    if (!fp.root) {
+      $('#fileTree').innerHTML = '<div class="faint" style="padding:10px">选择一个目录开始浏览（只读；编辑与 diff 后续按需加入）。</div>';
+      $('#fileView').innerHTML = '';
+      return;
+    }
+    $('#fileTree').innerHTML = renderTreeLevel(fp.root, 0) || '<div class="faint" style="padding:10px">（空目录）</div>';
+    if (!fp.preview && !fp.previewLoading) {
+      $('#fileView').innerHTML = '<div class="faint" style="padding:14px">左侧点选文件预览（只读）。</div>';
+    }
+  }
+
+  async function openFilePreview(path, name) {
+    const fp = state.filePanel;
+    fp.previewPath = path;
+    fp.previewLoading = true;
+    const view = $('#fileView');
+    if (view) view.innerHTML = `<div class="faint" style="padding:14px">读取中…</div>`;
+    const r = await bridge.fileRead(path);
+    fp.previewLoading = false;
+    if (!r || r.ok === false) {
+      fp.preview = null;
+      if (view && fp.previewPath === path) {
+        view.innerHTML = `<div class="file-view-head">${esc(path)}</div><div class="faint" style="padding:14px">读取失败：${esc((r && r.reason) || '未接入')}</div>`;
+      }
+      return;
+    }
+    if (view && fp.previewPath !== path) return; // 用户已点开别的文件
+    fp.preview = r;
+    const meta = `<div class="file-view-head"><span>${esc(path)}</span><span class="row" style="margin-left:auto"><span class="faint">${esc(r.sizeLabel || '')}${r.truncated ? ' · 已截断（只读前 2MB）' : ''}</span></span></div>`;
+    if (r.binary) {
+      if (view) view.innerHTML = meta + `<div class="faint" style="padding:14px">二进制文件（${esc(r.sizeLabel || '')}），不提供内容预览。</div>`;
+      return;
+    }
+    // shiki 高亮：可用且语言受支持才走；否则纯文本 <pre>（不猜语言）
+    const lang = r.lang;
+    const useShiki = typeof window !== 'undefined' && window.ShikiLite
+      && lang && window.ShikiLite.supportedLang(lang) && lang !== 'plaintext';
+    if (useShiki) {
+      try {
+        const theme = document.documentElement.dataset.theme === 'light' ? 'github-light' : 'github-dark';
+        const h = await window.ShikiLite.createHighlighter({ langs: FILE_SHIKI_LANGS, theme });
+        if (fp.previewPath !== path) return;
+        if (view) view.innerHTML = meta + `<div class="file-code">${h.codeToHtml(r.content, { lang })}</div>`;
+        return;
+      } catch (err) {
+        console.warn('[file] shiki 高亮失败，回落纯文本:', err && err.message);
+      }
+    }
+    if (view) view.innerHTML = meta + `<pre class="file-pre">${esc(r.content)}</pre>`;
+  }
+
+
   /* ---------- 通用输入弹窗（Electron 不支持 window.prompt，统一走 modal） ---------- */
   function askInput(opts) {
     openModal(`<div class="mh">${ic('at', 18)}<b>${esc(opts.title)}</b></div>
@@ -2510,6 +2855,13 @@
   });
   /* composer Enter-to-send（homeComposer + 会话内 #composer） */
   document.body.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      // 终端 / 文件面板：ESC 收起。但焦点在终端内部（xterm 的输入区 / 降级输入框）
+      // 时不收 —— vim/less 等交互程序也用 ESC，不能被面板快捷键抢走。
+      const inTerm = e.target && e.target.closest && e.target.closest('#terminalRoot .term-container');
+      if (state.terminalPanelOpen && !inTerm) { closeTerminalPanel(); return; }
+      if (state.filePanelOpen) { closeFilePanel(); return; }
+    }
     if (e.key === 'Enter' && !e.shiftKey && (e.target.id === 'homeComposer' || e.target.id === 'composer')) {
       e.preventDefault();
       const sendBtn = e.target.closest('.home-textarea-wrap')?.querySelector('[data-action="home-send"]')
@@ -3367,6 +3719,46 @@
       case 'browser-show': browserAct(() => bridge.setBrowserVisible(true)); break;
       case 'browser-hide': browserAct(() => bridge.setBrowserVisible(false)); break;
       case 'browser-close': browserAct(() => bridge.closeBrowser(), '浏览器已关闭'); break;
+
+      /* 终端面板（P2-10） */
+      case 'terminal-panel': openTerminalPanel(); break;
+      case 'term-close': closeTerminalPanel(); break;
+      case 'term-new': newTerminalSession(); break;
+      case 'term-tab': {
+        if (state.terminal.activeId !== id) {
+          state.terminal.activeId = id;
+          renderTerminalPanel();
+        }
+        break;
+      }
+      case 'term-tab-close': {
+        bridge.terminalKill(id).then(() => refreshTerminal());
+        break;
+      }
+
+      /* 文件面板（P2-11） */
+      case 'file-panel': openFilePanel(); break;
+      case 'file-close': closeFilePanel(); break;
+      case 'file-pick': pickFileRoot(); break;
+      case 'file-refresh': {
+        state.filePanel.children.delete(state.filePanel.root);
+        state.filePanel.expanded = new Set([state.filePanel.root]);
+        loadFileDir(state.filePanel.root);
+        break;
+      }
+      case 'file-toggle': {
+        const path = el.dataset.path;
+        if (state.filePanel.expanded.has(path)) {
+          state.filePanel.expanded.delete(path);
+          renderFilePanel();
+        } else {
+          state.filePanel.expanded.add(path);
+          if (state.filePanel.children.has(path)) renderFilePanel();
+          else loadFileDir(path);
+        }
+        break;
+      }
+      case 'file-open': openFilePreview(el.dataset.path, el.dataset.name); break;
       case 'browser-shot-dir': {
         bridge.openBrowserShotDir().then((r) => {
           if (!r || r.ok === false) toast(`打开截图目录失败：${(r && r.reason) || '未接入'}`, 'err');
@@ -3624,6 +4016,30 @@
         });
       }
     } catch (err) { console.warn('[init] 浏览器状态订阅失败:', err); }
+
+    // 订阅终端输出/退出（P2-10）：xterm 实例常驻，数据到达直接 write。
+    try {
+      if (typeof bridge.onTerminalData === 'function') {
+        bridge.onTerminalData((ev) => {
+          const h = termHandles.get(ev.id);
+          if (!h) return; // 面板还没开：回放缓冲在主进程，重开 Tab 能补看
+          if (h.term) h.term.write(ev.data);
+          else if (h.pre) {
+            h.pre.textContent += ev.data;
+            if (h.pre.textContent.length > 400000) h.pre.textContent = h.pre.textContent.slice(-200000);
+            h.cont.scrollTop = h.cont.scrollHeight;
+          }
+        });
+      }
+      if (typeof bridge.onTerminalExit === 'function') {
+        bridge.onTerminalExit((ev) => {
+          const h = termHandles.get(ev.id);
+          if (h && h.term) h.term.write(`\r\n\x1b[33m[orchdesk: 进程已退出，退出码 ${ev.code}]\x1b[0m\r\n`);
+          else if (h && h.pre) h.pre.textContent += `\n[orchdesk: 进程已退出，退出码 ${ev.code}]`;
+          refreshTerminal();
+        });
+      }
+    } catch (err) { console.warn('[init] 终端订阅失败:', err); }
 
     // 订阅工具执行步骤（此前主进程发 orchdesk:tool-step 但无人订阅 → 步骤条永远为空）
     try {

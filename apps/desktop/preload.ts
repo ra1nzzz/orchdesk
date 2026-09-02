@@ -229,6 +229,57 @@ const orchdesk = {
     return () => ipcRenderer.removeListener('orchdesk:browser-state', listener);
   },
 
+  // ---- 终端（PTY）Tab（吸收计划 P2-10） ----
+  /** 创建终端会话；result.via='pipe' 表示降级（渲染层必须显示管道模式提示）。 */
+  terminalCreate: (input?: { cwd?: string; cols?: number; rows?: number }): Promise<{
+    ok: boolean; reason?: string; session?: { id: string; pid: number; shell: string; cwd: string; via: 'pty' | 'pipe' };
+  }> => ipcRenderer.invoke('orchdesk:terminal-create', input || {}),
+
+  /** 写入用户键入（键盘事件直通）。 */
+  terminalWrite: (id: string, data: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('orchdesk:terminal-write', id, data),
+
+  /** 调整尺寸（管道模式 no-op）。 */
+  terminalResize: (id: string, cols: number, rows: number): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('orchdesk:terminal-resize', id, cols, rows),
+
+  /** 关闭会话（幂等）。 */
+  terminalKill: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('orchdesk:terminal-kill', id),
+
+  /** 全量状态：Tab 栏数据源 + 每会话回放缓冲。ptyAvailable=false = 管道模式。 */
+  terminalStatus: (): Promise<{
+    ptyAvailable: boolean; via: 'pty' | 'pipe'; count: number;
+    sessions: Array<{ id: string; pid: number; shell: string; cwd: string; via: 'pty' | 'pipe'; exited: boolean; exitCode?: number; replay: string }>;
+  }> => ipcRenderer.invoke('orchdesk:terminal-status'),
+
+  /** 终端输出推送（主进程已攒批节流）。 */
+  onTerminalData: (cb: (ev: { id: string; data: string }) => void): (() => void) => {
+    const listener = (_e: unknown, ev: { id: string; data: string }): void => cb(ev);
+    ipcRenderer.on('orchdesk:terminal-data', listener);
+    return () => ipcRenderer.removeListener('orchdesk:terminal-data', listener);
+  },
+
+  /** 终端退出推送（Tab 保留为已退出状态，可回看输出）。 */
+  onTerminalExit: (cb: (ev: { id: string; code: number }) => void): (() => void) => {
+    const listener = (_e: unknown, ev: { id: string; code: number }): void => cb(ev);
+    ipcRenderer.on('orchdesk:terminal-exit', listener);
+    return () => ipcRenderer.removeListener('orchdesk:terminal-exit', listener);
+  },
+
+  // ---- 文件 Tab（吸收计划 P2-11，只读优先） ----
+  /** 列一层目录（渲染层懒加载逐层展开）；truncated=条目超上限被裁。 */
+  fileTree: (dir: string): Promise<{
+    ok: boolean; reason?: string; dir?: string; truncated?: boolean; total?: number;
+    entries?: Array<{ name: string; kind: 'file' | 'dir'; size: number; mtime: number; ext: string; binary: boolean }>;
+  }> => ipcRenderer.invoke('orchdesk:file-tree', { dir }),
+
+  /** 读文件（≤2MB，超出显式 truncated；二进制只给元信息不吐内容）。 */
+  fileRead: (path: string): Promise<{
+    ok: boolean; reason?: string; path?: string; binary?: boolean; truncated?: boolean;
+    size?: number; sizeLabel?: string; lang?: string | null; content?: string;
+  }> => ipcRenderer.invoke('orchdesk:file-read', { path }),
+
   // ---- FR-6 SessionEvent 事件流（ADR-0009） ----
   /** 会话回放数据源：事件流时间线（沿血缘链拼接）；source='legacy' = 历史会话无事件日志。 */
   getSessionEvents: (sid: string): Promise<{
