@@ -698,12 +698,9 @@ function nowTime(): string { return new Date().toLocaleTimeString('zh-CN', { hou
 //   orchdesk:load-sessions()             启动时拉取持久化会话
 //   orchdesk:persist-sessions(arr)       任意变更后落盘
 //   orchdesk:run-agent-turn(id,text,opt) Agent 回合（工具调用 + 真实模型）
-//   orchdesk:tool-execute(name,args)     执行 Agent 工具（文件/命令/浏览器）
 // ============================================================================
 
 // --- 工具执行引擎（Agent Runtime 核心） ---
-
-// --- 工具执行引擎（Agent Runtime 核心）---
 // 类型（ToolCall / ToolResult / ApiMessage）与工具定义（TOOL_DEFS / ALLOWED_COMMANDS）
 // 统一在 agent-runtime.ts 中定义，便于在 node 下直接单测。
 
@@ -1053,9 +1050,23 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
           recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
           return { name, result: '', error: '路径不在允许范围内' };
         }
+        // 防御超大文件：工具承诺最大回传 50KB，但整读不入上限文件会阻塞主进程并吃内存尖峰。
+        // 先 stat 拿尺寸，超上限直接拒绝（不整读），与渲染层 file 面板的 2MB 读取上限呼应。
+        let size = -1;
+        try {
+          size = fs.statSync(filePath).size;
+        } catch (err) {
+          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'error', reason: `stat 失败：${(err as Error).message}`, sessionId: sid });
+          return { name, result: '', error: `无法读取文件：${(err as Error).message}` };
+        }
+        const MAX_READ_BYTES = 2 * 1024 * 1024; // 与渲染层 file 面板读取上限一致（2MB）
+        if (size > MAX_READ_BYTES) {
+          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: `文件 ${size} 字节超过 2MB 读取上限`, sessionId: sid });
+          return { name, result: '', error: `文件过大（${size} 字节），超过 2MB 读取上限，请用文件面板或分段读取` };
+        }
         const content = fs.readFileSync(filePath, 'utf-8');
         recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'allowed', sessionId: sid });
-        return { name, result: content.slice(0, 50000) }; // 限制 50KB
+        return { name, result: content.slice(0, 50000) }; // 限制 50KB 回传
       }
       case 'file_write': {
         const filePath = path.resolve(cwd, String(args.path || ''));
@@ -1171,9 +1182,29 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
         }
         try {
           const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-          const text = await res.text();
+          // 响应体积护栏：承诺只回传 30KB，但不能因此整读超大响应进内存（防 OOM / 主进程阻塞）。
+          // content-length 预检 + 流式读满上限即停，两重保险。
+          const MAX_FETCH_BYTES = 1 * 1024 * 1024;
+          const declared = Number(res.headers.get('content-length') || '0');
+          if (declared > MAX_FETCH_BYTES) {
+            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: `响应声明 ${declared} 字节超 ${MAX_FETCH_BYTES} 上限`, sessionId: sid });
+            return { name, result: '', error: `响应过大（${declared} 字节），超过读取上限` };
+          }
+          if (!res.body) {
+            const buf = Buffer.from(await res.arrayBuffer());
+            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
+            return { name, result: buf.toString('utf-8').slice(0, 30000) };
+          }
+          const chunks: Buffer[] = [];
+          let total = 0;
+          for await (const chunk of res.body) {
+            const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            total += b.length;
+            if (total > MAX_FETCH_BYTES) break; // 超上限即截停，不整读
+            chunks.push(b);
+          }
           recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
-          return { name, result: text.slice(0, 30000) };
+          return { name, result: Buffer.concat(chunks).toString('utf-8').slice(0, 30000) };
         } catch (err) {
           recordSandbox({ tool: name, kind: 'network', target: url, decision: 'error', reason: (err as Error).message, sessionId: sid });
           return { name, result: '', error: (err as Error).message.slice(0, 2000) };
@@ -1495,7 +1526,9 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
   return { text: finalReply, intent: 'ACT', tools: toolSteps, steps: stepCount };
 }
 
-// IPC
+// 测试后门（非渲染层桥）：browser-tools-verify / credentials-verify 经此驱动
+// executeTool 做接线级断言。渲染层不触达（preload 无对应 invoke），生产仅作
+// 单工具执行入口（无会话装配/回放记账）——测试专用，勿接 UI。
 ipcMain.handle('orchdesk:tool-execute', async (_e, tool: ToolCall) => {
   const result = await executeTool(tool);
   return result;
@@ -2250,11 +2283,6 @@ ipcMain.handle('orchdesk:memory-summarize-status', () => {
   } catch { /* 配置读取失败按「未配置」处理，不阻断设置页渲染 */ }
   const ready = memorySummarizeSeam && !!model;
   return { seam: memorySummarizeSeam, provider: providerName, model, mode: ready ? 'llm' : 'extractive' };
-});
-ipcMain.handle('orchdesk:memory-recall', async (_e, query: string, opts: unknown) => {
-  const svc = getService<MemoryServiceLike>('memory');
-  if (!svc?.recall) return null;
-  return svc.recall(String(query || ''), opts || {});
 });
 
 // ---------------------------------------------------------------------------

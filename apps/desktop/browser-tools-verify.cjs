@@ -136,6 +136,20 @@ function runExpr(expr, dom, extra = {}) {
     assert.strictEqual(r2.value.timeoutMs, 1200);
   });
 
+  await check('参数归一化：显式字符串 "false" 不被当 true（Boolean("false")===true 陷阱回归）', () => {
+    // 模型文本兜底常把开关写成字符串 "false"；Boolean("false")===true 曾让
+    // fullPage/clear/pressEnter 在用户显式关掉时仍被当成开。用 toBool 后必须为 false。
+    const shot = bt.normalizeBrowserArgs('browser_screenshot', { fullPage: 'false' });
+    assert.strictEqual(shot.value.fullPage, false, '字符串 "false" 应解析为 false');
+    const shotT = bt.normalizeBrowserArgs('browser_screenshot', { fullPage: 'true' });
+    assert.strictEqual(shotT.value.fullPage, true, '字符串 "true" 应解析为 true');
+    const type = bt.normalizeBrowserArgs('browser_type', { selector: '#q', text: 'hi', clear: 'false', pressEnter: 'false' });
+    assert.strictEqual(type.value.clear, false, 'clear 显式 "false" 不应清空');
+    assert.strictEqual(type.value.pressEnter, false, 'pressEnter 显式 "false" 不应回车');
+    const typeClearDefault = bt.normalizeBrowserArgs('browser_type', { selector: '#q', text: 'hi' });
+    assert.strictEqual(typeClearDefault.value.clear, true, 'clear 缺省仍应清空（保持原语义）');
+  });
+
   await check('参数归一化：browser_text 缺省参数回落默认字数（不是下限 200）', () => {
     const r = bt.normalizeBrowserArgs('browser_text', {});
     assert.strictEqual(r.value.maxChars, bt.BROWSER_TEXT_DEFAULT);

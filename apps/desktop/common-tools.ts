@@ -61,3 +61,23 @@ export function extOfName(name: string): string {
   if (i <= 0 || i === base.length - 1) return '';
   return base.slice(i + 1).toLowerCase();
 }
+
+/**
+ * 宽容布尔解析：真布尔直接返回；字符串按 'false'/'0'/'no'/'' 等判否，其余判真；
+ * 数字 0/NaN → false，非零 → true；undefined 用默认值。
+ *
+ * 不能写成 `Boolean(v)`——`Boolean('false') === true`，上游模型文本兜底常传
+ * JSON 字符串 "false"，会让 `fullPage/clear/pressEnter` 这类开关在用户显式给
+ * "false" 时仍被当成 true（browser-tools 踩过的坑）。
+ */
+export function toBool(v: unknown, dflt = false): boolean {
+  if (typeof v === 'boolean') return v;
+  if (v === undefined || v === null) return dflt;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    if (s === '' || s === 'false' || s === '0' || s === 'no' || s === 'off' || s === 'null') return false;
+    return true;
+  }
+  if (typeof v === 'number') return v !== 0 && Number.isFinite(v);
+  return Boolean(v);
+}

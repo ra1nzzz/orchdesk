@@ -102,6 +102,23 @@ check('非数组输入 → 空数组', () => {
   assert.deepStrictEqual(rt.normalizeNativeToolCalls(null), []);
   assert.deepStrictEqual(rt.normalizeNativeToolCalls({}), []);
 });
+check('畸形 function=primitive string 不抛 TypeError（"arguments" in 原始值会炸）', () => {
+  // 某些网关对 function 返回裸字符串而非对象；旧代码 `'arguments' in fn` 对
+  // primitive 抛 `Cannot use 'in' operator`。顶层有 name 时应正常解析并回落顶层 args。
+  const out = rt.normalizeNativeToolCalls([
+    { id: 'c1', name: 'file_list', function: 'file_list', arguments: '{"path":"."}' },
+  ]);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].name, 'file_list');
+  assert.deepStrictEqual(out[0].arguments, { path: '.' });
+  // function 是 primitive 且顶层也无 name → 丢弃（不炸）
+  assert.strictEqual(rt.normalizeNativeToolCalls([{ id: 'x', function: 'boom' }]).length, 0);
+});
+check('顶层 input 兜底（与 wrapper 分支口径一致）', () => {
+  const out = rt.normalizeNativeToolCalls([{ name: 'file_read', input: '{"path":"a.txt"}' }]);
+  assert.strictEqual(out.length, 1);
+  assert.deepStrictEqual(out[0].arguments, { path: 'a.txt' });
+});
 
 // ---------------------------------------------------------------------------
 console.log('== 3. extractToolCalls：文本兜底解析 ==');

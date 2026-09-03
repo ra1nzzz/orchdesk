@@ -285,7 +285,13 @@ export function normalizeNativeToolCalls(raw: unknown): NativeToolCall[] {
       ? fn.name
       : typeof item.name === 'string' ? item.name : '';
     if (!name) continue;
-    const rawArgs = fn && 'arguments' in fn ? fn.arguments : item.arguments;
+    // fn 可能是畸形网关返回的 primitive（string/number）：对 primitive 用 `in`
+    // 会抛 TypeError，先把 fn 收窄为对象再访问字段（fail-safe，畸形当无参）。
+    const fnObj = fn && typeof fn === 'object' ? fn : undefined;
+    // 三态兜底：函数内 arguments → 顶层 arguments → 顶层 input（与 wrapper 分支口径一致）。
+    const rawArgs = fnObj && 'arguments' in fnObj
+      ? (fnObj as { arguments?: unknown }).arguments
+      : (item.arguments !== undefined ? item.arguments : (item as { input?: unknown }).input);
     const rawStr = typeof rawArgs === 'string'
       ? rawArgs
       : rawArgs == null ? '' : JSON.stringify(rawArgs);

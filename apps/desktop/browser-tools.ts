@@ -17,7 +17,7 @@
  * 「引号、反斜杠、换行、</script> 都不会逃逸出字符串字面量」。
  */
 
-import { clampInt } from './common-tools';
+import { clampInt, toBool } from './common-tools';
 import type { ToolDef } from './agent-runtime';
 
 // ---------------------------------------------------------------------------
@@ -346,13 +346,13 @@ export function normalizeBrowserArgs(
           name,
           selector: sel,
           text: text.slice(0, 10_000),
-          clear: a.clear === undefined ? true : Boolean(a.clear),
-          pressEnter: Boolean(a.pressEnter),
+          clear: toBool(a.clear, true), // 缺省清空；显式 "false" 才保留原内容
+          pressEnter: toBool(a.pressEnter),
         },
       };
     }
     case 'browser_screenshot': {
-      return { ok: true, value: { name, fullPage: Boolean(a.fullPage), timeoutMs: clampBrowserTimeout(a.timeout, 'shot') } };
+      return { ok: true, value: { name, fullPage: toBool(a.fullPage), timeoutMs: clampBrowserTimeout(a.timeout, 'shot') } };
     }
     case 'browser_eval': {
       const expr = String(a.expression ?? '').trim();

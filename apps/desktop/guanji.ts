@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { safeStorage } from 'electron';
 import { DATA_FILE_NAMES, SKILLS_DIR_NAME, getDataDir } from './data-dir';
+import { isMarketDirName } from './plugin-market';
 
 // ============================================================================
 // 观雅集技能市场客户端（T-P6-1）
@@ -80,6 +81,9 @@ const LOW_RISK_CAPS = new Set<string>([
   'fs.read', 'doc.read', 'web.read', 'memory.read',
   'chart.render', 'role.bind',
 ]);
+
+/** 单个 .skill 包体积上限（64 MB）：防恶意/失控远端把主进程内存打爆。 */
+const MAX_SKILL_BYTES = 64 * 1024 * 1024;
 
 /** 配置文件：统一落在规范化数据目录（非 userData，避免跨安装形态丢失 TOKEN）。 */
 function configFile(): string {
@@ -207,9 +211,22 @@ export class GuanjiClient {
       if (!res.ok) {
         return { ok: false, review, reason: `下载失败 HTTP ${res.status}` };
       }
+      // slug 是来自远端/渲染层的不可信字符串：落盘前必须过目录名白名单，
+      // 防 `../../evil` 之类穿越 skills 目录任意写文件（与插件市场 isMarketDirName 同纪律）。
+      if (!isMarketDirName(skill.slug)) {
+        return { ok: false, review, reason: `技能标识「${String(skill.slug).slice(0, 64)}」非法，拒绝落盘` };
+      }
+      const contentLength = Number(res.headers.get('content-length') || '0');
+      if (contentLength > MAX_SKILL_BYTES) {
+        return { ok: false, review, reason: `下载包超过 ${MAX_SKILL_BYTES} 字节上限，拒绝落盘` };
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      // 体积双保险：content-length 可能缺失/伪造，以实际读到的字节为准。
+      if (buf.length > MAX_SKILL_BYTES) {
+        return { ok: false, review, reason: `下载包实际 ${buf.length} 字节超上限，拒绝落盘` };
+      }
       const dir = path.join(getDataDir(), SKILLS_DIR_NAME);
       fs.mkdirSync(dir, { recursive: true });
-      const buf = Buffer.from(await res.arrayBuffer());
       const out = path.join(dir, `${skill.slug}.skill`);
       fs.writeFileSync(out, buf);
       return { ok: true, review, path: out };
