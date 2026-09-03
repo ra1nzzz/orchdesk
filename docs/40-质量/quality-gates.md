@@ -51,9 +51,9 @@ git diff --check
 - Token：SHA-256 哈希比较。
 - 密钥/令牌/本机绝对路径**不得**进入 `docs/` 与日志。
 
-## 6. 验证套件链（canonical 计数方：本节；最新批次快照见 CHECKPOINT）
+## 6. 验证套件链（canonical 计数方：CHECKPOINT；本节只登记结构性约定）
 
-`cd apps/desktop && npm run verify` 为单一全量入口（2026-09-02 起 **24 套件 805 项**，EXIT=0 才算通过）。各计数与套件清单随批次演进，**以 CHECKPOINT「验证套件」行为最新快照**，本节只登记结构性约定：
+`cd apps/desktop && npm run verify` 为单一全量入口，EXIT=0 才算通过。套件/用例**计数与清单的 canonical 责任方是 [CHECKPOINT「验证套件」行](../00-项目/CHECKPOINT.md)**（当前 24 套件 814 项），本节不复制具体计数，只登记结构性约定：
 
 - **分层覆盖**：纯逻辑（importTs 直测源码）→ 宿主（require dist + stub 注入）→ 接线（stub electron 驱动 dist/main.js 真实 handler）。三层缺一即视为未验证。
 - **架构守护**：`arch-guard-verify.cjs` 维护 PURE_MODULES 清单（零 electron 依赖模块），新增纯逻辑模块必须登记。
