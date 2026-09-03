@@ -72,6 +72,13 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
 - 打包踩坑：见上文「BUG-016 变体 · asar 句柄泄漏」。
 - **尚未实机冒烟**：GUI / PTY / CDP 类验收按 [实机冒烟清单](../40-质量/smoke-checklist.md) 在桌面会话执行后回勾。
 
+## v0.13.2（2026-09-03）
+
+- **已打包**：release commit `eb57ce2`，tag `v0.13.2`；GitHub Release 待推。
+- 修复：**BUG-023** —— 项目绑定目录贯通会话工作区（新 IPC `set-session-cwd` + 沙箱白名单纳入工作区 + 渲染层五驱动点重放 + 文件面板/终端缺省落项目目录；详见 [60-BUG](../60-BUG/index.md)）。
+- 验证：model-loop +5 / e2e +7，verify **24 套件 832 项全绿**。
+- 资产：`OrchDesk Setup 0.13.2.exe` + `OrchDesk 0.13.2.exe` + blockmap + `latest.yml`；Setup sha512 `jfG1ccbTOJiYtlCQJwho…`（与 `latest.yml` 一致）。成功输出目录 `release-v0132-r1`。
+
 ## v0.13.1（2026-09-03）
 
 - **已打包**：release commit `09784ba`，tag `v0.13.1`（打包之后打，遵守 `check-version.cjs` 顺序铁律）；GitHub Release 待推。
