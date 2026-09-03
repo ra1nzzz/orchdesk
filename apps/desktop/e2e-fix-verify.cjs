@@ -156,6 +156,9 @@ async function run() {
       },
       forks: [],
     };
+    // 死挂点修复 e2e（#48）：专家团派发链路 —— composeTeam 调用留痕，
+    // 供断言「askInput 回调真的把任务派发出去」（旧代码 .then 崩溃 → 永不可达）。
+    window.__composeCalls = [];
     window.orchdesk = {
       // 启动路径要求 loadSessions 返回数组（remote.length 判断）。默认返回对象
       // （走 wizard「首次运行」路径，前 13 组依赖该行为）；组 14 reload 前设置
@@ -170,9 +173,37 @@ async function run() {
       persistSessions: (arr) => Promise.resolve({ ok: true }),
       loadProjects: () => Promise.resolve(JSON.parse(JSON.stringify(seedProjects))),
       persistProjects: (arr) => Promise.resolve({ ok: true }),
-      onToolStep: () => () => {},
-      getPluginRuntime: () => Promise.resolve({ ready: false, activeCount: 0, total: 0, plugins: [] }),
+      // 死挂点修复 e2e：捕获 onToolStep 订阅回调，测试侧才能向渲染层推送真实工具事件
+      // （live 工具步骤行 = 订阅写 + 读，两者都要真实走通）。旧实现丢弃回调。
+      onToolStep: (cb) => { window.__toolStepCb = typeof cb === 'function' ? cb : null; },
+      // localStorage __rt='1' 时返回「运行时就绪 + 插件状态」（statbar/技能标签真实分支断言）；
+      // 缺省 ready:false 与旧行为一致，不影响前 14 组。
+      getPluginRuntime: () => Promise.resolve(
+        (() => { try { return localStorage.getItem('__rt') === '1'; } catch (e) { return false; } })()
+          ? {
+              ready: true, activeCount: 3, total: 4,
+              plugins: [
+                { name: 'intent', active: true, available: true },
+                { name: 'trace', active: false, available: true, error: '已停用（逆回滚完成）' },
+                { name: 'brain', active: false, available: true, error: '装载完成但未激活（fiber.state=1，注入的依赖未满足）' },
+                { name: 'multi', active: true, available: true },
+              ],
+            }
+          : { ready: false, activeCount: 0, total: 0, plugins: [] }),
       setPluginEnabled: () => Promise.resolve({ ok: false, reason: 'E2E mock' }),
+      // 死挂点修复 e2e（#48）：composeTeam 记录调用（tid+task）并返回一张 3 节点委派树。
+      // 旧渲染代码对 askInput 返回值调 .then 必抛 TypeError，这里必须真的被派发到。
+      composeTeam: (tid, task) => {
+        window.__composeCalls.push({ tid, task: String(task || ''), at: Date.now() });
+        return Promise.resolve({
+          rootId: 'ceo-e2e',
+          nodes: [
+            { id: 'ceo-e2e', label: 'CEO（主会话）', layer: 'ceo', status: 'done' },
+            { id: 'd1', label: '开发总监', layer: 'director', status: 'done' },
+            { id: 'w1', label: 'Worker-1', layer: 'worker', status: 'running' },
+          ],
+        });
+      },
       getOrchestrationCatalog: () => Promise.resolve(null),
       testModel: () => Promise.resolve({ ok: true, latencyMs: 12 }),
       runAgentTurn: (sid, text, opts) => Promise.resolve({
@@ -1382,6 +1413,196 @@ async function run() {
   await assert(forks.length >= 1 && forks[forks.length - 1].from === 's3', '分叉调用 appendForkEvent（from=s3）');
   await assert(forks[forks.length - 1].atIndex === 2, '血缘 atIndex=2（s3 共 2 条消息，默认全继承）');
   await assert(!!forks[forks.length - 1].newId, '血缘记录新分支 id');
+
+  // ================================================================
+  // 测试组 15：死挂点修复回归（2026-09-03 批次 #44-#47 的 UI 真机覆盖）
+  // 这批修复的共同形态是「有写入无读取 / 订阅被丢弃 / 假 Promise 接口」——
+  // 单测看不出来，只有真 UI 交互才暴露。此组用真实渲染层复现每条链路：
+  //   ① live 工具步骤：onToolStep 订阅写入 → typing 消息实时读（而非等到回合结束）；
+  //   ② 静态 tools/steps：回合结束写进 agent 消息 →「N 步 · M 个动作」+ 可展开明细；
+  //   ③ 设置页 statbar：真实数据目录 + 运行时就绪（不再硬编码 %APPDATA%/dsh 版本）；
+  //   ④ 任务监控「技能与MCP」：按运行时真实装载标注（trace 主动停用≠brain 真异常）；
+  //   ⑤ 专家团派发：askInput 是回调式（不返回 Promise）→ 点「派发任务」不再崩，任务真下发；
+  //   ⑥ 文件面板：打开/关闭可见性真实切换。
+  // ================================================================
+  console.log('📋 测试组 15：死挂点修复回归');
+
+  // reload 到干净种子态；同时置 __rt='1' 让插件运行时「就绪」（③④ 依赖真实分支）。
+  await page.evaluate(() => {
+    try {
+      localStorage.setItem('__rt', '1');
+      localStorage.setItem('__seedArr', '1');
+    } catch (e) { /* ignore */ }
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForTimeout(1100);
+  try {
+    const wzSkip = page.locator('[data-action="wz-skip"]');
+    if (await wzSkip.count() > 0) { await wzSkip.click({ force: true }); await page.waitForTimeout(300); }
+  } catch (e) { /* ignore */ }
+
+  // ---- ②+① 会话 s3：静态工具明细 + live 工具步骤 ----
+  try {
+    await page.locator('[data-action="nav"][data-id="session"]').first().click();
+    await page.waitForTimeout(500);
+    // 项目默认折叠 → 按需展开 p1
+    if (await page.locator('.sess[data-action="sel"][data-id="s3"]').count() === 0) {
+      const p1h = page.locator('.proj-head[data-action="proj-toggle"][data-id="p1"]');
+      if (await p1h.count() > 0) { await p1h.first().click(); await page.waitForTimeout(300); }
+    }
+    await page.locator('.sess[data-action="sel"][data-id="s3"]').first().click();
+    await page.waitForTimeout(500);
+
+    // ② 静态：s3 种子 assistant 消息自带 tools/steps → 摘要 + 明细可展开
+    const seedScroll = await page.locator('#msgScroll').innerText();
+    await assert(/1 步 · 1 个动作/.test(seedScroll), '静态 agent 消息显示「1 步 · 1 个动作」摘要');
+    await assert(await page.locator('#msgScroll details.tools').count() === 1, '种子消息渲染出 1 个 tools 明细折叠区');
+    await page.locator('#msgScroll details.tools summary').first().click();
+    await page.waitForTimeout(250);
+    const opened = await page.locator('#msgScroll details.tools').first().evaluate((el) => el.open);
+    const toolRows = await page.locator('#msgScroll details.tools .trow').allInnerTexts();
+    await assert(opened === true, '点击摘要展开工具明细');
+    await assert(toolRows.length === 1 && /file_list/.test(toolRows[0]) && /完成/.test(toolRows[0]),
+      `明细行显示工具名与终态（实际=${JSON.stringify(toolRows)}）`);
+
+    // ① live：接管 runAgentTurn 为「手动放行」，typing 消息才能停留足够久做实时断言
+    await page.evaluate(() => {
+      window.orchdesk.runAgentTurn = (sid, text, opts) => new Promise((resolve) => {
+        window.__turnResolve = (r) => resolve(r);
+      });
+    });
+    await page.locator('#composer').fill('列出当前项目文件');
+    await page.locator('[data-action="send"]').first().click();
+    await page.waitForTimeout(300);
+
+    // 推送 running 步骤 → 节流 150ms 后整页重建 → typing 行实时显示
+    await page.evaluate(() => {
+      if (typeof window.__toolStepCb === 'function') {
+        window.__toolStepCb({ sessionId: 's3', name: 'file_list', ph: 'running' });
+      }
+    });
+    await page.waitForTimeout(400);
+    let live = await page.locator('#msgScroll').innerText();
+    await assert(/正在执行工具/.test(live), 'typing 期间显示「正在执行工具」（live 轨迹被读，不再存而不显）');
+    await assert(/file_list/.test(live) && /执行中/.test(live), 'running 步骤行实时出现（file_list · 执行中）');
+
+    // running → done：同一行翻转为完成（onToolStep 归一化 done 事件）
+    await page.evaluate(() => {
+      if (typeof window.__toolStepCb === 'function') {
+        window.__toolStepCb({ sessionId: 's3', name: 'file_list', ph: 'done' });
+      }
+    });
+    await page.waitForTimeout(350);
+    live = await page.locator('#msgScroll').innerText();
+    await assert(!/执行中/.test(live) && /完成/.test(live), '步骤完成：done 行替换 running（无残留「执行中」）');
+
+    // 放行回合 → typing 被静态消息替换：tools 落库为可展开明细（第二个 details）
+    await page.evaluate(() => {
+      if (typeof window.__turnResolve === 'function') {
+        window.__turnResolve({ text: '文件清单：README.md、src/、tests/ 共 12 项。', intent: 'ACT', tools: [{ n: 'file_list', ph: 'done' }], steps: 1 });
+      }
+    });
+    await page.waitForTimeout(500);
+    const doneText = await page.locator('#msgScroll').innerText();
+    await assert(!/思考中/.test(doneText), '回合结束 typing 消息被静态回复替换');
+    await assert(await page.locator('#msgScroll details.tools').count() === 2,
+      '回合返回 tools 落库为第二个「N 步 · M 个动作」明细区');
+    await assert(/1 步 · 1 个动作/.test(doneText), '静态 tools 摘要渲染正确');
+  } catch (e) {
+    await assert(false, `死挂点 ①② 工具步骤链路交互完成 (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ---- ④ 任务监控「技能与MCP」：插件状态按运行时真实装载标注 ----
+  try {
+    if (await page.locator('.ctx-tab').count() === 0) {
+      const tg = page.locator('[data-action="toggle-ctx"]').first();
+      if (await tg.count() > 0) { await tg.click(); await page.waitForTimeout(250); }
+    }
+    const skillTab = page.locator('.ctx-tab[data-action="ctx-tab"][data-id="skills"]');
+    await assert(await skillTab.count() > 0, '右侧面板有「技能与MCP」tab');
+    await skillTab.first().click();
+    await page.waitForTimeout(350);
+    const pluginStates = await page.evaluate(() => {
+      const out = {};
+      document.querySelectorAll('.ctx-skill').forEach((row) => {
+        const nm = row.querySelector('.sk-name');
+        const st = row.querySelector('.sk-status');
+        if (nm && st) out[nm.textContent.trim()] = st.textContent.trim();
+      });
+      return out;
+    });
+    await assert(pluginStates.intent === '已启用', `intent 运行时 active → 已启用（实际=${pluginStates.intent}）`);
+    await assert(pluginStates.multi === '已启用', `multi 运行时 active → 已启用（实际=${pluginStates.multi}）`);
+    await assert(pluginStates.trace === '已停用', `trace 主动停用（error 前缀「已停用」）→ 已停用而非异常（实际=${pluginStates.trace}）`);
+    await assert(pluginStates.brain === '异常', `brain 装载失败（非停用前缀 error）→ 异常（实际=${pluginStates.brain}）`);
+  } catch (e) {
+    await assert(false, `死挂点 ④ 技能状态真实标注完成 (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ---- ③ 设置页 statbar：真实数据目录 + 运行时就绪（去掉硬编码 %APPDATA%/dsh）----
+  try {
+    await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+    await page.waitForTimeout(900);
+    const sb = await page.locator('.statbar').innerText();
+    await assert(/…\/mock\/OrchDesk-Data/.test(sb), `数据目录 stat 显示真实目录末两段（实际=${sb.replace(/\n/g, ' | ').slice(0, 120)}）`);
+    await assert(/插件运行时就绪 · 3\/4/.test(sb), '运行时 stat 显示就绪计数 3/4（取自 getPluginRuntime）');
+    await assert(!/%APPDATA%/.test(sb), '不再硬编码 %APPDATA%/OrchDesk');
+    await assert(!/本地（未扫描）/.test(sb) && !/未启动/.test(sb), '桥已接入时 statbar 不显示占位文案');
+  } catch (e) {
+    await assert(false, `死挂点 ③ statbar 真实状态完成 (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ---- ⑤ 专家团派发：askInput 回调式 → 派发不再崩，composeTeam 真被调用 ----
+  try {
+    await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+    await page.waitForTimeout(600);
+    // 专家·专家团在插件页左栏分组里，默认折叠 → 展开到能看见「派发任务」按钮
+    if (await page.locator('[data-action="team-compose"]').count() === 0) {
+      const exp = page.locator('.ss-h[data-action="pside-toggle"][data-id="experts"]').first();
+      if (await exp.count() > 0) { await exp.click(); await page.waitForTimeout(300); }
+    }
+    const composeBtns = page.locator('[data-action="team-compose"]');
+    await assert(await composeBtns.count() > 0, '展开专家团分组后出现「派发任务」按钮');
+
+    await page.evaluate(() => { window.__composeCalls = []; });
+    await composeBtns.first().click();
+    await page.waitForTimeout(350);
+    await assert(await page.locator('#askInput').count() === 1, '点击「派发任务」弹出任务输入（旧代码此处直接 TypeError 崩溃）');
+    await page.locator('#askInput').fill('生成一份开发周报');
+    await page.locator('[data-action="ask-input-ok"]').click();
+    await page.waitForTimeout(800);
+    const calls = await page.evaluate(() => window.__composeCalls || []);
+    await assert(calls.length === 1 && /开发周报/.test(calls[0].task || ''),
+      `composeTeam 真被派发（task=${calls.length ? JSON.stringify(calls[0].task) : '（无调用）'}）`);
+    const delHead = await page.locator('.ss-h[data-action="pside-toggle"][data-id="delegation"]').innerText().catch(() => '');
+    await assert(/最近一次委派树/.test(delHead) && /3/.test(delHead),
+      `派发结果渲染委派树分组（3 节点，实际=${delHead.replace(/\n/g, ' | ').slice(0, 80)}）`);
+  } catch (e) {
+    await assert(false, `死挂点 ⑤ 专家团派发链路完成 (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ---- ⑥ 文件面板：打开/关闭可见性真实切换 ----
+  try {
+    await page.locator('[data-action="file-panel"]').first().click();
+    await page.waitForTimeout(350);
+    const openState = await page.evaluate(() => {
+      const r = document.querySelector('#fileRoot');
+      return !!r && !r.classList.contains('hidden');
+    });
+    await assert(openState, '点击「文件」打开文件面板（#fileRoot 移除 hidden）');
+    await assert(await page.locator('#fileHead').count() === 1, '文件面板骨架（头部）已渲染');
+    const closeBtn = page.locator('[data-action="file-close"]');
+    await assert(await closeBtn.count() > 0, '文件面板有关闭按钮');
+    await closeBtn.first().click();
+    await page.waitForTimeout(250);
+    const closedState = await page.evaluate(() => {
+      const r = document.querySelector('#fileRoot');
+      return !!r && r.classList.contains('hidden');
+    });
+    await assert(closedState, '点关闭后 #fileRoot 恢复 hidden（打开关闭真实切换）');
+  } catch (e) {
+    await assert(false, `死挂点 ⑥ 文件面板开关完成 (error: ${e.message.slice(0, 80)})`);
+  }
 
   // ================================================================
   // 总结
