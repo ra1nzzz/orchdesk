@@ -184,6 +184,41 @@ let tray: Tray | null = null;
 const isDev = !app.isPackaged;
 
 // ---------------------------------------------------------------------------
+// IPC sender 校验（遗留项①，纵深防御）：全仓唯一带 preload 的窗口是 mainWindow
+// （悬浮窗 floatingWindow 与浏览器窗 browser-cdp 均无 preload → 无 ipcRenderer，
+// 发不出 invoke）。故唯一可信 IPC 调用方 = mainWindow.webContents。
+//
+// fail-closed 语义：
+//   - event.sender 为 null/undefined → 放行。这是进程内直调（verify 套件 stub
+//     dist/main.js 后以 (null, args) 直调 handler、以及任何无 IPC 上下文的调用），
+//     不是来自某个 webContents 的真实 IPC，无渲染层威胁面。
+//   - event.sender 是真实 webContents → 必须 === mainWindow.webContents，否则拒绝。
+//     当前不存在第二可信窗；未来若加带 preload 的合法窗，在此白名单追加。
+//
+// 实现：顶层 patch ipcMain.handle 一次。因 92 个 handler 全经 ipcMain.handle 注册
+// （模块顶层 + bootRuntime 内），此 patch 在首个注册（orchdesk:tool-execute）之前
+// 生效即全覆盖，无需逐个改动。拒绝一律抛错（fail-closed，不静默回假数据）。
+// ---------------------------------------------------------------------------
+function isTrustedIpcSender(sender: unknown): boolean {
+  if (sender == null) return true; // 进程内直调（测试后门等），非真实 webContents
+  try {
+    return !!(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents);
+  } catch { return false; }
+}
+// 可被 verify 套件断言（不导出默认走 tsc 无害；仅供测试观测校验决策）
+const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(ipcMain as any).handle = (channel: string, listener: (event: any, ...args: any[]) => any): void => {
+  _ipcHandleOrig(channel, async (event: any, ...args: any[]): Promise<any> => {
+    if (!isTrustedIpcSender(event && event.sender)) {
+      console.warn(`[orchdesk] 拒绝不可信 IPC sender 调用 ${channel}（仅主窗可信）`);
+      throw new Error(`ipc:untrusted-sender:${channel}`);
+    }
+    return listener(event, ...args);
+  });
+};
+
+// ---------------------------------------------------------------------------
 // 会话持久化（本地 JSON，作为 SessionEvent 日志的落盘形态；可重启回放）
 // ---------------------------------------------------------------------------
 let store: Record<string, unknown> = {};
