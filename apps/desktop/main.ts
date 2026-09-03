@@ -373,7 +373,9 @@ const MODELS_FILE = () => path.join(dataDir(), DATA_FILE_NAMES.models);
 function loadModelConfig(): ModelConfig {
   try {
     const file = MODELS_FILE();
-    if (!fs.existsSync(file)) return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' };
+    // 三路径默认一致（20 = 无配置时的保守兜底；用户显式配置最多到 200，见 saveModelConfig 钳制）。
+    // 坏文件回落到保守值而非「假装健康」，与项目 fail-closed 纪律一致。
+    if (!fs.existsSync(file)) return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: 20 };
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
     let migrated = false;
     const providers = (raw.providers as Array<Record<string, unknown>> | undefined)?.map(p => {
@@ -391,12 +393,13 @@ function loadModelConfig(): ModelConfig {
       providers,
       defaultProvider: (raw.defaultProvider as string | undefined) || 'ollama',
       defaultModel: (raw.defaultModel as string | undefined) || 'qwen3:14b',
-      maxToolIterations: (raw.maxToolIterations as number | undefined) || 200,
+      // ?? 而非 ||：显式配置 0 不应用默认值吞掉（虽随后被消费端钳到 1）。
+      maxToolIterations: (raw.maxToolIterations as number | undefined) ?? 20,
     };
     const hasPlainKey = migrated;
     if (hasPlainKey) saveModelConfig(cfg);
     return cfg;
-  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: 200 }; }
+  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: 20 }; }
 }
 
 function saveModelConfig(cfg: ModelConfig): void {
@@ -1553,6 +1556,14 @@ function createWindow(): void {
       sandbox: true,
     },
   });
+  // 导航防护（安全纵深）：主窗口永远只载本地 file:// 页面。一旦被导航到远端，
+  // preload 暴露的 bridge API 就落进外部内容手里——即使 contextIsolation 也在，
+  // 也应在源头堵死。内部浏览器走独立 BrowserWindow（browser-cdp.ts），不在此窗口导航。
+  mainWindow.webContents.on('will-navigate', (event) => {
+    event.preventDefault();
+  });
+  // 拒绝 window.open / target=_blank 逃逸（无 popup 需求；内部打开走别通道）。
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.once('ready-to-show', () => mainWindow?.show());
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
@@ -1718,6 +1729,10 @@ function createFloatingWindow(): void {
     webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
   });
   floatingWindow.on('closed', () => { floatingWindow = null; });
+  // 导航防护与主窗一致（纵深防御）：悬浮窗内容全由主进程 loadURL(data:) 生成，
+  // 无渲染层合法导航；禁止渲染层内部任何导航逃逸。
+  floatingWindow.webContents.on('will-navigate', (event) => { event.preventDefault(); });
+  floatingWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   // 悬浮窗是沙箱渲染进程，页面内无 ipcRenderer —— 用窗口聚焦事件实现「点击唤起主窗」。
   floatingWindow.on('focus', () => showMainWindow());
   floatingWindow.once('ready-to-show', () => floatingWindow?.show());

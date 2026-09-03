@@ -158,6 +158,9 @@ function makeElectronStub(opts = {}) {
           capturePage: async () => { capturePageCalls.push(Date.now()); return makeImageStub(Buffer.from('captured-png')); },
           on: () => {},
           once: () => {},
+          // 导航防护（ADR：will-navigate 拦截 + 拒绝弹窗）——main.ts createWindow 调它，
+          // 桩需提供方法否则加载即崩。返回 deny 语义的空对象即可（main 未消费返回值）。
+          setWindowOpenHandler: () => ({ action: 'deny' }),
         };
         this.destroyed = false;
         this.loaded = null;
