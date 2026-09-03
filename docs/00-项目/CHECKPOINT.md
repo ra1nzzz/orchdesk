@@ -9,8 +9,8 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.13.1`（tag `v0.13.1` 已打；Release 待推） | SemVer，pre-1.0 阶段；`0.13.0` 为上一 Release（亦待推） |
-| **最新 Commit** | `09784ba` | chore: release v0.13.1 |
+| **当前版本** | `0.13.1`（tag 已推；实机冒烟第二批反馈 BUG-023 已修，随 v0.13.2 出） | SemVer，pre-1.0 阶段 |
+| **最新 Commit** | BUG-023 修复（见 git log） | fix: BUG-023 项目绑定目录贯通会话工作区 |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.12.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.12.0)（`v0.13.0` 已本地打包、待推） | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正（`gh release edit v0.12.0 --notes-file … --draft=false`）——CI 不会自动发布。v0.13.0 产物已出（Setup 88,081,451 B / portable 87,736,328 B，sha512 与 `latest.yml` 一致，asar 195 文件校验通过），**待桌面会话实机冒烟后再推 Release** |
@@ -281,5 +281,7 @@ git push origin main --follow-tags  # 推送 + 触发 CI
 
 > **第十九批（实机冒烟首批反馈 + BUG-022 + v0.13.1，2026-09-03）**：用户桌面按 [smoke-checklist](../40-质量/smoke-checklist.md) 首轮实跑，A 组发现真 BUG：**新建项目绑定 D 盘目录后，··· 菜单「打开项目目录」弹出的却是 C 盘数据目录**（登记 [BUG-022](../60-BUG/index.md)）。根因是 `orchdesk:open-project-dir` handler 恒开 `dataDir()`（「项目目录 = userData」的早期概念混用遗留），而项目对象的 `path` 字段有写入方、无读取方——又一个死挂点变体（渲染层早已用 `p.path` 渲染图标，唯独行为没跟上）。修复：handler 接受可选 `projectPath`、有绑定时 `statSync` 校验目录真实存在再打开、无绑定时明确报「该项目未绑定本地文件夹」而非误开数据目录；渲染层传 `p.path` + toast 回显实际路径；顺手修同族 `open-log-dir` 吞失败返回值（失败也报 ok）。验证：e2e 新增 6 条断言（152→158），**verify 24 套件 820 项全绿**。教训固化：e2e 套件 bridge mock 之前对 `openProjectDir` 无条件返 ok、种子项目无 `path` 字段——**mock 太宽容会让传参错误类死挂点测不出来**，新断言已让 mock 逐调用记录参数（`window.__openedPath`）。随后切 **v0.13.1**：changelog → bump → release commit `09784ba` → `tsc` + `vendor-dsh` → 打包（全新目录 `release-v0131-r1`，一次通过）→ tag `v0.13.1`；Setup 88,082,407 B，sha512 与 `latest.yml` 一致。main 与 tag 均已推送（GitHub Release 仍待实机冒烟后转正）。
 
-*最后更新：2026-09-03（第十九批：实机冒烟首批反馈 → BUG-022 修复 → v0.13.1 打包+tag｜verify 820 项 / 24 套件全绿；第十八批：OpenWorker 对照剖析｜v0.13.0 打包 + tag｜EBUSY 卡点=electron-builder 报错后进程不退出，换输出目录首次即通过）*
+> **第二十批（实机冒烟第二批反馈 + BUG-023 会话工作区贯通，2026-09-03）**：用户实跑发现**同一根因的三处断点**——① 指定项目目录的新会话默认 cwd 仍是 user home（`git pull` 报「C:\Users\my 不是 Git 仓库」）；② 会话中重选项目也不切换工作区；③ 即使 Agent 自己 `set_cwd` 到 D 盘项目也会被沙箱白名单拒。登记 [BUG-023](../60-BUG/index.md)：项目 `path` 只在渲染层，主进程 `sessionCwds` 只由 `set_cwd` 工具写入，项目绑定目录到会话工作区**整条链路从未接通**（BUG-020 修了「Agent 主动切」，没修「项目自动切」——工具有了 ≠ 链路通了）。修复：新 IPC `orchdesk:set-session-cwd`（用户 GUI 绑定不走授权门，但严格校验绝对路径 + 存在 + 是目录）+ `isPathAllowed` 纳入会话工作区根 + 渲染层 `applySessionCwd()` 在五个驱动点重放（创建会话 / 打开会话（幂等，覆盖重启 Map 失忆）/ 重选项目 / home 发送 / 分叉）+ 文件面板缺省根与终端缺省 cwd 落项目目录。验证：model-loop B1–B5 + e2e 7 条，verify 24 套件 **832 项**全绿。
+
+*最后更新：2026-09-03（第二十批：BUG-023 会话工作区贯通｜verify 832 项全绿；第十九批：实机冒烟首批 → BUG-022 → v0.13.1）*
 *上游文档：[current-state.md](./current-state.md) | [VERSION-GOVERNANCE.md](./VERSION-GOVERNANCE.md) | [PRD差距补齐复盘](../99-归档/PRD差距补齐-2026-08-29.md) | 变更日志 `apps/desktop/CHANGELOG.md`（仓库根，docs 外）*

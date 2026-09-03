@@ -156,7 +156,8 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 
 ## 下一步
 
-- **[2026-09-03] 实机冒烟首批反馈：BUG-022 已修，v0.13.1 已打包**：用户实跑发现项目菜单「打开项目目录」恒开 C 盘数据目录（详见 [60-BUG](../60-BUG/index.md)）——`path` 字段有写入方、无读取方的死挂点变体。已修（handler 接受 `projectPath` + 有绑定校验目录存在 + 未绑定明确提示 + toast 回显实际路径），e2e 152→158、**verify 24 套件 820 项全绿**。**v0.13.1 已出**：release commit `09784ba`，tag 已打已推，Setup 88,082,407 B（sha512 与 `latest.yml` 一致）。**下一步：装 Setup 0.13.1 复验 A1（打开项目目录），继续按 [实机冒烟清单](../40-质量/smoke-checklist.md) 跑 A–F 剩余项**，主体项过完再转正两个 GitHub Release。
+- **[2026-09-03] 实机冒烟第二批反馈：BUG-023 会话工作区贯通，随 v0.13.2 出**：用户实跑发现指定项目目录的会话 cwd 仍是 user home（git pull 报「C:\Users\my 不是 Git 仓库」）、重选项目也不切换。根因是项目绑定目录 → 会话工作区整条链路未接通（详见 [60-BUG](../60-BUG/index.md)）。已修：`set-session-cwd` IPC + 沙箱白名单纳入工作区 + 渲染层五个驱动点重放 + 文件面板/终端缺省落项目目录。verify 24 套件 **832 项**全绿。**下一步：切 v0.13.2 发版，桌面复验会话工作区**，继续清单 A–F。
+- **[2026-09-03] 实机冒烟首批反馈：BUG-022 已修，v0.13.1 已打包**：项目菜单「打开项目目录」恒开 C 盘数据目录（详见 [60-BUG](../60-BUG/index.md)）——`path` 字段有写入方、无读取方的死挂点变体。已修（handler 接受 `projectPath` + 有绑定校验目录存在 + 未绑定明确提示 + toast 回显实际路径），e2e 152→158。v0.13.1：release commit `09784ba`，tag 已打已推，Setup 88,082,407 B（sha512 与 `latest.yml` 一致）。
 - **[2026-09-03] v0.13.0 已打包**：产物已出（Setup 88,081,451 B / portable 87,736,328 B，asar 195 文件校验通过，tag `v0.13.0` 已打），verify 24 套件 814 项全绿。Release 转正继续等清单 A–F 主体项过完；清单三条硬口径：降级不算通过、未接入 ≠ 为空、不为全绿放宽预期。
 - **[2026-08-29 补齐] dsh/Cordis 运行时已真实接入**：此前 [差距盘点](../99-归档/PRD差距盘点-2026-08-29.md) 指出 2515 行插件是「写完了没接线」的死代码（单点根因 = 运行时缺席）。现 `apps/desktop/dsh-runtime.ts` 在主进程 `new Context()` 装载全部 9 插件（9/9 ACTIVE，`getService()` 可取）、`main.ts` 用 `bootRuntime()` 替换 `initAuthzBridge({get:()=>undefined})`、11 个 `dshBridgeStub` 改为真实 `ctx.get(...)`、7 插件 `provide(name,value,true)` 第三参误传修复；凭据升级 AES-256-GCM（`credentials.ts`）、沙箱子进程隔离、6 处渲染层缺陷修复；插件测试 2/9 → 9/9（`scripts/verify-plugins.mjs`），验证套件扩至 158 项全绿。**PRD 完成度从 ≈ 30% 升至 ≈ 75%**。完整复盘见 [归档/PRD差距补齐-2026-08-29](../99-归档/PRD差距补齐-2026-08-29.md)。三笔提交（`e820e33`/`2d988c5`/`91ae26b`）已落 `main`，未打 tag / 未发布（预期 v0.4.0）。
 

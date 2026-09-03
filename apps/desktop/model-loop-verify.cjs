@@ -629,6 +629,74 @@ function lastAssistant(sessionId) {
   });
 
   // =========================================================================
+  console.log('== N+. BUG-023 项目绑定目录 → 会话工作区（set-session-cwd 贯通）==');
+
+  // 项目目录在临时区且**不在任何白名单根下**（非 dataDir / stub home / temp）——
+  // 修复前：即使 cwd 设成功，file_* 也会被 isPathAllowed 拒绝（工作区名存实亡）。
+  const PROJ = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-wire-proj-'));
+  const setSessionCwd = ipcHandlers.get('orchdesk:set-session-cwd');
+  const rel = (p) => path.resolve(p);
+
+  await check('B1 set-session-cwd：合法绝对路径 → ok 且返回 resolved 路径', async () => {
+    assert.ok(setSessionCwd, 'orchdesk:set-session-cwd handler 应已注册');
+    const r = await setSessionCwd(null, 's-b23', PROJ);
+    assert.strictEqual(r.ok, true, '实际: ' + JSON.stringify(r));
+    assert.strictEqual(r.path, rel(PROJ));
+  });
+
+  await check('B2 set-session-cwd 拒绝非法输入（相对路径 / 不存在 / 缺 sid）', async () => {
+    const r1 = await setSessionCwd(null, 's-b23', 'relative/dir');
+    assert.strictEqual(r1.ok, false, '相对路径应被拒');
+    const r2 = await setSessionCwd(null, 's-b23', path.join(PROJ, '不存在的目录'));
+    assert.strictEqual(r2.ok, false, '不存在的目录应被拒');
+    assert.ok(String(r2.reason).includes('不存在'), 'reason 应说明目录不存在');
+    const r3 = await setSessionCwd(null, '', PROJ);
+    assert.strictEqual(r3.ok, false, '缺 sid 应被拒');
+  });
+
+  await check('B3 会话工作区注入 system prompt「当前工作目录」（渲染层驱动即生效）', async () => {
+    reset();
+    writeModels({ id: 'p-b23', name: '工作区网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+    plan = [chat('好的', undefined)];
+    out = await runAgentTurn(null, 's-b23', '拉取更新', {});
+    const sys = calls[0].body.messages.find((m) => m.role === 'system');
+    assert.ok(sys, '应有 system 消息');
+    assert.ok(sys.content.includes(rel(PROJ)), `cwd 应为项目目录 ${rel(PROJ)}`);
+  });
+
+  await check('B4 沙箱白名单纳入会话工作区：file_list "." 在项目目录内可用', async () => {
+    fs.writeFileSync(path.join(PROJ, 'marker-b23.txt'), 'proj-root', 'utf-8');
+    reset();
+    plan = [
+      chat('', [tc('b4', 'file_list', { path: '.' })]),
+      chat('列好了', undefined),
+    ];
+    out = await runAgentTurn(null, 's-b23', '列一下项目目录', {});
+    const msgs = calls[1].body.messages;
+    const toolMsg = msgs.find((m) => m.role === 'tool');
+    assert.ok(toolMsg, '应有工具结果');
+    assert.ok(!String(toolMsg.content).includes('不允许'), `不应被沙箱拒绝: ${String(toolMsg.content).slice(0, 120)}`);
+    assert.ok(toolMsg.content.includes('marker-b23.txt'), `相对路径应落在项目目录，实际: ${String(toolMsg.content).slice(0, 200)}`);
+  });
+
+  await check('B5 set_cwd 到项目子目录被放行（白名单根扩展），目录外仍被拒', async () => {
+    const sub = fs.mkdtempSync(path.join(PROJ, 'sub-'));
+    reset();
+    plan = [chat('', [tc('b5', 'set_cwd', { path: sub })]), chat('切好了', undefined)];
+    out = await runAgentTurn(null, 's-b23', '切到子目录', {});
+    const a = lastAssistant('s-b23');
+    const cwdTool = (a.tools || []).find((t) => t.n === 'set_cwd');
+    assert.ok(cwdTool, '应有 set_cwd 调用');
+    assert.ok(String(cwdTool.result).includes('工作目录已切换'), '项目子目录应放行: ' + cwdTool.result + cwdTool.error);
+    reset();
+    plan = [chat('', [tc('b5b', 'set_cwd', { path: os.tmpdir() })]), chat('', undefined)];
+    out = await runAgentTurn(null, 's-b23', '切到外面', {});
+    const a2 = lastAssistant('s-b23');
+    const cwdTool2 = (a2.tools || []).find((t) => t.n === 'set_cwd');
+    assert.ok(cwdTool2 && String(cwdTool2.result + (cwdTool2.error || '')).includes('路径不在允许范围内'), '白名单外目录仍应被拒');
+  });
+
+  // =========================================================================
   console.log('== O. 意图网关桥接（agent/pre-step waterfall，ADR-0008）==');
 
   writeModels({ id: 'p-gate', name: '门控网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);

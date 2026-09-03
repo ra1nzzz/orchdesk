@@ -1971,6 +1971,29 @@
     }, 0);
   }
 
+  /* ---------- 会话工作区（BUG-023）：项目绑定目录 → 会话默认 cwd ---------- */
+  // 主进程 sessionCwds 是进程内 Map（重启即失），所以「创建会话 / 打开会话 /
+  // 重选项目 / 分叉」每次都要重放一次；无绑定或任务模式跳过（不误设）。
+  // 失败必须可见（toast），不许静默——静默会让工作区悄悄回落 user home，
+  // Agent 又在 C:\Users\my 里找 git 仓库，正是本 BUG 的形态。
+  function projectPathOf(sid) {
+    const s = state.sessions[sid];
+    if (!s || !s.pid || s.pid === '__task__') return '';
+    const p = state.projects.find((x) => x.id === s.pid);
+    return p ? String(p.path || '').trim() : '';
+  }
+
+  async function applySessionCwd(sid) {
+    const dir = projectPathOf(sid);
+    if (!dir) return;
+    try {
+      const r = await bridge.setSessionCwd(sid, dir);
+      if (!r || r.ok !== true) toast(`项目工作区未生效：${(r && r.reason) || '未知原因'}`, 'warn');
+    } catch {
+      toast('项目工作区未设置（桥不可用）', 'warn');
+    }
+  }
+
   function createSessionInProject(pid) {
     const id = 's' + Date.now().toString(36);
     const p = state.projects.find((x) => x.id === pid);
@@ -1982,6 +2005,7 @@
     state.selProjForComposer = pid;
     state.projDropdownOpen = false;
     persist(); render();
+    applySessionCwd(id);
     const pName = p ? p.n : pid;
     toast(`已新建会话 → ${pName}`, 'ok');
   }
@@ -2065,6 +2089,7 @@
     const proj = state.projects.find((p) => p.id === pid);
     if (proj && !proj.sessions.includes(id)) proj.sessions.unshift(id);
     state.sel = id; state.replayFor = null; persist(); render();
+    applySessionCwd(id);
     // FR-6（ADR-0009）：分叉落事件——子日志只写一条 fork-origin 血缘，不拷贝父事件。
     // 写失败不回滚分叉（sessions.json 仍是运行态事实源），只如实提示。
     bridge.appendForkEvent({ newId: id, from: sid, fromTitle: src.title || sid, atIndex: idx, at: (s.fork && s.fork.at) || Date.now() })
@@ -2408,7 +2433,10 @@
   }
 
   async function newTerminalSession() {
-    const r = await bridge.terminalCreate({});
+    // BUG-023：当前会话所属项目绑定了目录时，终端落在项目目录里（否则落到主进程 cwd）。
+    // 目录不存在时主进程会自行回落，不用这里兜底。
+    const projPath = projectPathOf(state.sel);
+    const r = await bridge.terminalCreate(projPath ? { cwd: projPath } : {});
     if (!r || r.ok === false) {
       toast(`创建终端失败：${(r && r.reason) || '未接入'}`, 'err');
       return;
@@ -2437,8 +2465,15 @@
     state.filePanelOpen = true;
     $('#fileRoot').classList.remove('hidden');
     ensureFileSkeleton();
-    if (!state.filePanel.root) renderFilePanel();
-    else renderFilePanel();
+    // BUG-023：会话所属项目绑定了目录时，文件面板缺省根 = 项目目录（不再空白待选）。
+    if (!state.filePanel.root) {
+      const projPath = projectPathOf(state.sel);
+      if (projPath) {
+        state.filePanel.root = projPath;
+        loadFileDir(projPath);
+      }
+    }
+    renderFilePanel();
   }
 
   function closeFilePanel() {
@@ -3114,6 +3149,10 @@
           if (existing) { state.sel = existing; }
           else if (p) { createSessionInProject(pid); }
         }
+        // BUG-023：重选项目（含重选同一个）后，会话工作区必须跟着项目绑定目录走。
+        if (state.sel && state.sessions[state.sel] && state.sessions[state.sel].pid === pid) {
+          applySessionCwd(state.sel);
+        }
         render();
         break;
       }
@@ -3141,7 +3180,8 @@
 
       /* 会话 */
       // 切换会话即退出回放视图（回放只对被点开的那个会话有效）
-      case 'sel': state.sel = id; state.replayFor = null; pushFloatingContext(); render(); break;
+      // BUG-023：打开会话时重放工作区（幂等）——覆盖「重启后主进程 Map 已空」的场景。
+      case 'sel': state.sel = id; state.replayFor = null; applySessionCwd(id); pushFloatingContext(); render(); break;
       case 'newconv': doNewConv(); break;
       case 'home-send': {
         const homeInp = $('#homeComposer');
@@ -3166,6 +3206,7 @@
           state.pExpanded.add(pid);
           state.sel = sid;
           persist(); render();
+          applySessionCwd(sid);
         }
         const c = $('#composer');
         if (c) {

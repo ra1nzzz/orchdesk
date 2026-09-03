@@ -119,6 +119,7 @@ import {
   isKnownTool,
   normalizeNativeToolCalls,
 } from './agent-runtime';
+import { isAbsoluteLike } from './common-tools';
 import {
   buildClickExpression,
   buildLinksExpression,
@@ -750,7 +751,10 @@ function allowedRoots(): string[] {
 /** 安全沙箱：限制可访问的目录 */
 function isPathAllowed(p: string): boolean {
   const resolved = path.resolve(p);
-  const roots = [...allowedRoots(), dataDir(), process.cwd()];
+  // BUG-023：会话工作区（用户在 GUI 里绑定的项目目录）也是白名单根——
+  // 否则 cwd 切到 D 盘项目后，file_*/set_cwd 全被沙箱拒绝，「工作区」名存实亡。
+  // sessionCwds 只能经 set-session-cwd（用户驱动）写入，Agent 无法借此扩权。
+  const roots = [...allowedRoots(), dataDir(), process.cwd(), ...sessionCwds.values()];
   return roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
 }
 
@@ -2651,8 +2655,17 @@ onTerminalExit((ev) => {
 
 /** 创建终端会话。via='pipe' 时渲染层必须显示「管道模式」提示（降级可见）。 */
 ipcMain.handle('orchdesk:terminal-create', async (_e, input: unknown) => {
+  const req = (input && typeof input === 'object' ? input : {}) as { cwd?: string; cols?: number | string; rows?: number | string };
+  // BUG-023：渲染层会把项目绑定目录作为终端 cwd 传入——目录可能已被删/移动，
+  // 此时回退宿主默认（删除该字段），不让整个终端创建失败；会话返回的 cwd
+  // 字段反映真实落点，降级可见。
+  if (typeof req.cwd === 'string' && req.cwd.trim()) {
+    let dirOk = false;
+    try { dirOk = fs.statSync(req.cwd.trim()).isDirectory(); } catch { /* 不存在 */ }
+    if (!dirOk) delete req.cwd;
+  }
   return createTerminal(
-    (input && typeof input === 'object' ? input : {}) as { cwd?: string; cols?: number | string; rows?: number | string },
+    req,
     {
       appDir: TERMINAL_APP_DIR,
       extraPtyDirs: terminalExtraPtyDirs(),
@@ -3233,6 +3246,35 @@ ipcMain.handle('orchdesk:open-log-dir', async () => {
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+});
+
+/**
+ * 设置会话工作区（BUG-023）：项目绑定目录 → 会话默认 cwd 的唯一贯通点。
+ * 渲染层在「创建会话 / 打开会话 / 重选项目 / 分叉」时调用；主进程 sessionCwds 是
+ * 进程内 Map（重启即失），所以渲染层每次重放，主进程不负责持久化。
+ *
+ * 口径：这是**用户在 GUI 里亲手绑定**的目录（原生对话框选择 / 手输），与 file Tab
+ * 「用户亲手操作不走授权门」同理，不做 isPathAllowed 预检——否则绑 D 盘项目永远
+ * 设不上（白名单只有 home/userData/temp）。但校验必须严格：绝对路径 + 存在 + 是目录；
+ * 通过后该目录成为此会话 file_* 与 set_cwd 的沙箱白名单根（见 isPathAllowed）。
+ * 失败如实返回 reason，渲染层 toast 可见——静默失败会让工作区悄悄回落 user home，
+ * Agent 又在 C:\\Users\\my 里找 git 仓库，正是本 BUG 的形态。
+ */
+ipcMain.handle('orchdesk:set-session-cwd', async (_e, sessionId: unknown, dir: unknown) => {
+  const sid = typeof sessionId === 'string' ? sessionId.trim() : '';
+  const raw = typeof dir === 'string' ? dir.trim() : '';
+  if (!sid) return { ok: false, reason: '缺少会话 ID' };
+  if (!raw || !isAbsoluteLike(raw)) return { ok: false, reason: '需要绝对路径的项目目录' };
+  const resolved = path.resolve(raw);
+  let isDir = false;
+  try { isDir = fs.statSync(resolved).isDirectory(); } catch { /* 不存在 */ }
+  if (!isDir) return { ok: false, reason: `目录不存在或不是文件夹：${resolved}` };
+  sessionCwds.set(sid, resolved);
+  recordSandbox({
+    tool: 'set_session_cwd', kind: 'path', target: resolved, decision: 'allowed',
+    reason: '用户绑定项目工作区（GUI 驱动，非 Agent 路径）', sessionId: sid,
+  });
+  return { ok: true, path: resolved };
 });
 
 /**

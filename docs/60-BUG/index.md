@@ -33,11 +33,17 @@ updated: 2026-09-03
 | BUG-W01 | pnpm 11 在 Git Bash / 沙箱下 safe-delete 失败，install 中止 exit 1，node_modules 未生成；需 `--config.safe-delete=false`。另：WorkBuddy CLI 沙箱对「一次删除 >50 文件」有 bulk-delete 守卫，整树 `rmSync` 会抛 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`——构建脚本须用「原地覆盖 + 逐个清陈旧」（见 `vendor-dsh.cjs` `syncDir`） | 高（阻塞 Windows 构建） | open | P0 / T-P0-1 |
 | BUG-W03 | **宿主环境网络间歇不可用**：代理（`HTTP_PROXY=127.0.0.1:7897`）时断时续，直连 TLS 亦间歇失败；electron-builder 打包在 packaging 阶段下载 electron zip 偶发 `Client network socket disconnected`。**对策已验证**：① 挂 `NODE_OPTIONS=--use-system-ca` 绕开 safe-delete shim（否则 CLI 注入的 shim 会把 electron-builder 的整树 rm 转为 trash 并失败）；② 失败重试（3-6 次，网络间歇性恢复）；③ 被杀进程遗留的 `release/win-unpacked.tmp.lock` 须先清（PowerShell `Remove-Item -Force` 可删，shim 的 trash 删不掉）；④ `@deepseek-ai/*` 不能走 `files`/`node_modules` glob（依赖收集器会忽略），须用 `extraFiles` 放包外（插件 ESM 解析已实测可穿透）。构建脚本整树删除须用「原地覆盖 + 逐个清陈旧」（见 `vendor-dsh.cjs` `syncDir`） | 高（本 agent 环境打包需重试；产物已验证） | open | P6 / T-P6-3 |
 
-## 已关闭 BUG（v0.13.1，pending）
+## 已关闭 BUG（v0.13.2，pending）
 
 | ID | 描述 | 级别 | 关闭版本 | 归属 |
 |---|---|---|---|---|
-| BUG-022 | **项目菜单「打开项目目录」恒开 C 盘数据目录**（v0.13.0 实机发现：新建项目绑定 D 盘目录后，··· 菜单 → 打开项目目录弹的是 `%APPDATA%/OrchDesk`）。根因：`orchdesk:open-project-dir` handler 恒 `shell.openPath(dataDir())`，注释「项目目录 = userData」是早期「项目 = 数据目录」概念混用的遗留；后来新增了项目绑定目录（项目对象 `path` 字段），handler 没跟着改——典型的「字段有写入方、无读取方」死挂点变体（渲染层早已用 `p.path` 区分图标，唯独行为没跟上）。修复：handler 接受可选 `projectPath`（有绑定 → 开绑定目录，无绑定 → `{ok:false, reason:'该项目未绑定本地文件夹…'}`）；渲染层传 `p.path` 且 toast 回显实际打开路径；顺手修同族问题 `open-log-dir` 吞掉 `shell.openPath` 失败返回值（失败也报 ok）。验证：e2e 新增 6 条断言（绑定项目传真实路径 / toast 回显 / 未绑定不调用 + 明确提示），verify 24 套件 820 项全绿 | 中 | v0.13.1（pending） | P1 / 项目管理 |
+| BUG-023 | **项目绑定目录 ≠ 会话工作区**（实机冒烟第二批反馈，用户：「指定了项目目录的新会话，默认不是以项目目录为工作区，git pull 提示当前目录 C:\Users\my 不是 Git 仓库；会话中重选项目也不切换」）。排查出**同一根因的三处断点**：① 主进程根本不知道项目的绑定路径——项目 `path` 只存在渲染层 sessions.json，主进程 `sessionCwds` Map 只由 `set_cwd` 工具写入，缺省回落 `resolveShellCwd()` = user home（正是「C:\Users\my 不是 Git 仓库」的来源）；② 即使 Agent 自己调 `set_cwd` 切到 D 盘项目也会被 `isPathAllowed` 沙箱拒——白名单只有 home/userData/temp/dataDir/cwd；③ 会话重选项目 / 打开会话 / 分叉均无任何 cwd 贯通。**修复**：新 IPC `orchdesk:set-session-cwd`（校验绝对路径 + 存在 + 是目录；用户 GUI 绑定与 file Tab 同理不走授权门，但 Agent 不能借此扩权——sessionCwds 只能经此 handler 写入）；`isPathAllowed` 把会话工作区纳入白名单根；渲染层 `applySessionCwd()` 在**创建会话 / 打开会话（幂等，覆盖重启后 Map 失忆）/ 重选项目 / home 发送 / 分叉**五个驱动点重放；文件面板缺省根与终端 Tab 缺省 cwd 同步落项目目录（目录已删时终端回退宿主默认，可见）。验证：model-loop B1–B5（handler 校验 / system prompt 注入 / file_list 相对路径 / 沙箱根扩展且白名单外仍拒）+ e2e 7 条（打开绑定会话传参 / 未绑定不误设 / 文件面板缺省根两态），verify 24 套件 **832 项**全绿。教训：BUG-020 修了「Agent 主动切目录」却没修「项目自动切目录」——**工具有了 ≠ 链路通了**，同类死挂点要把所有驱动点都走到 | 高 | v0.13.2（pending） | P1 / 会话工作区 |
+
+## 已关闭 BUG（v0.13.1，2026-09-03）
+
+| ID | 描述 | 级别 | 关闭版本 | 归属 |
+|---|---|---|---|---|
+| BUG-022 | **项目菜单「打开项目目录」恒开 C 盘数据目录**（v0.13.0 实机发现：新建项目绑定 D 盘目录后，··· 菜单 → 打开项目目录弹的是 `%APPDATA%/OrchDesk`）。根因：`orchdesk:open-project-dir` handler 恒 `shell.openPath(dataDir())`，注释「项目目录 = userData」是早期「项目 = 数据目录」概念混用的遗留；后来新增了项目绑定目录（项目对象 `path` 字段），handler 没跟着改——典型的「字段有写入方、无读取方」死挂点变体（渲染层早已用 `p.path` 区分图标，唯独行为没跟上）。修复：handler 接受可选 `projectPath`（有绑定 → 开绑定目录，无绑定 → `{ok:false, reason:'该项目未绑定本地文件夹…'}`）；渲染层传 `p.path` 且 toast 回显实际打开路径；顺手修同族问题 `open-log-dir` 吞掉 `shell.openPath` 失败返回值（失败也报 ok）。验证：e2e 新增 6 条断言（绑定项目传真实路径 / toast 回显 / 未绑定不调用 + 明确提示），verify 24 套件 820 项全绿 | 中 | v0.13.1（2026-09-03） | P1 / 项目管理 |
 
 ## 已关闭 BUG（v0.4.1 起）
 

@@ -449,6 +449,15 @@ async function run() {
         });
       },
       pickFolder: () => Promise.resolve({ ok: false, reason: 'cancelled' }),
+      // BUG-023：记录会话工作区调用（sid → dir）。返回 ok，避免失败告警 toast 干扰其他断言。
+      setSessionCwd: (sid, dir) => {
+        window.__cwdCalls = window.__cwdCalls || [];
+        window.__cwdCalls.push({ sid, dir });
+        return Promise.resolve({ ok: true, path: dir });
+      },
+      // BUG-023：文件面板缺省根依赖 fileTree 返回真实形状的条目（此前 mock 无此方法，
+      // 点开文件面板会直接 TypeError —— 渲染层只对「返回 bridgeMissing」有防御）。
+      fileTree: () => Promise.resolve({ ok: true, entries: [{ name: 'src', kind: 'dir' }, { name: 'README.md', kind: 'file', sizeLabel: '1 KB' }], truncated: false }),
       getModelConfig: () => Promise.resolve({ providers: [{ n: '本地', type: 'ollama', models: [{ n: 'qwen3:14b' }] }], selectedModels: ['qwen3:14b'], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' }),
       saveModelConfig: () => Promise.resolve({ ok: true }),
       testModel: () => Promise.resolve({ ok: false }),
@@ -669,6 +678,9 @@ async function run() {
   } catch (e) {
     await assert(false, `BUG-022 项目目录打开交互完成 (error: ${e.message.slice(0, 80)})`);
   }
+
+  // BUG-023 回归块移到「测试组 14」的 reload（种子态恢复）之后：前 13 组的
+  // 重命名/删除/分叉用例会真实删掉种子会话，放在这里会找不到 .sess 行。
 
   // 点击新会话按钮 → 回到 home-screen
   const newConvBtns = page.locator('[data-action="newconv"]');
@@ -1252,6 +1264,71 @@ async function run() {
     const wzSkip = page.locator('[data-action="wz-skip"]');
     if (await wzSkip.count() > 0) { await wzSkip.click({ force: true }); await page.waitForTimeout(300); }
   } catch (e) { /* ignore */ }
+
+  // ---- BUG-023 回归：项目绑定目录 → 会话工作区（打开会话 / 未绑定不误设 / 文件面板缺省根）----
+  // 放在 reload（种子态恢复）之后：前 13 组的删除/分叉用例会真实删掉种子会话。
+  try {
+    // 按需展开 p1 / p2（种子态默认折叠）。用完必须还原折叠 —— 组 14 后续用例
+    // 无条件 toggle p1，依赖「默认折叠」假设（见下方 FR-5 token 徽标段）。
+    const expandedHere = [];
+    const ensureSessVisible = async (pid, sid) => {
+      if (await page.locator(`.sess[data-action="sel"][data-id="${sid}"]`).count() > 0) return;
+      const t = page.locator(`.proj-head[data-action="proj-toggle"][data-id="${pid}"]`);
+      if (await t.count() > 0) {
+        await t.first().click();
+        expandedHere.push(pid);
+        await page.waitForTimeout(250);
+      }
+    };
+    await ensureSessVisible('p1', 's1');
+    await ensureSessVisible('p2', 's2');
+
+    // ① 点开 p1（绑定 D:/Code/Demo）下的会话 s1 → setSessionCwd('s1', 'D:/Code/Demo')
+    await page.evaluate(() => { window.__cwdCalls = []; });
+    const s1Row = page.locator('.sess[data-action="sel"][data-id="s1"]');
+    await assert(await s1Row.count() > 0, 'BUG-023 会话 s1 行存在');
+    await s1Row.first().click();
+    await page.waitForTimeout(350);
+    let cwdCalls = await page.evaluate(() => window.__cwdCalls || []);
+    const s1Call = cwdCalls.find((c) => c.sid === 's1');
+    await assert(!!s1Call && s1Call.dir === 'D:/Code/Demo', `BUG-023 打开绑定项目的会话应设工作区（实际=${JSON.stringify(s1Call)}）`);
+
+    // ② 打开 s2（p2 未绑定）→ 不得误设工作区（静默设错正是本 BUG 形态）
+    await page.evaluate(() => { window.__cwdCalls = []; });
+    const s2Row = page.locator('.sess[data-action="sel"][data-id="s2"]');
+    await assert(await s2Row.count() > 0, 'BUG-023 会话 s2 行存在');
+    await s2Row.first().click();
+    await page.waitForTimeout(350);
+    cwdCalls = await page.evaluate(() => window.__cwdCalls || []);
+    const s2Call = cwdCalls.find((c) => c.sid === 's2');
+    await assert(!s2Call, `BUG-023 未绑定项目不得设工作区（实际=${JSON.stringify(s2Call)}）`);
+
+    // ③ 文件面板缺省根跟随当前会话的项目目录。注意：文件面板是全屏覆盖层，
+    //    开着会挡住侧栏点击 —— 每次看完 .file-root 必须先关面板再切会话。
+    await page.locator('[data-action="file-panel"]').first().click();
+    await page.waitForTimeout(250);
+    const rootWhileS2 = await page.locator('.file-root').textContent().catch(() => '');
+    await assert(!/D:\/Code\/Demo/.test(rootWhileS2 || ''), `BUG-023 未绑定会话的文件面板不应落在项目目录（实际=${rootWhileS2}）`);
+    await page.locator('[data-action="file-close"]').first().click();
+    await page.waitForTimeout(200);
+    await s1Row.first().click();
+    await page.waitForTimeout(350);
+    await page.locator('[data-action="file-panel"]').first().click();
+    await page.waitForTimeout(250);
+    const rootWhileS1 = await page.locator('.file-root').textContent().catch(() => '');
+    await assert(/D:\/Code\/Demo/.test(rootWhileS1 || ''), `BUG-023 绑定会话的文件面板缺省根应为项目目录（实际=${rootWhileS1}）`);
+    // 关面板 + 还原折叠态（不干扰后续用例；失败必须暴露而不是吞掉）
+    const closeBtn = page.locator('[data-action="file-close"]');
+    await assert(await closeBtn.count() > 0, 'BUG-023 文件面板关闭按钮存在');
+    await closeBtn.first().click();
+    await page.waitForTimeout(200);
+    for (const pid of expandedHere) {
+      await page.locator(`.proj-head[data-action="proj-toggle"][data-id="${pid}"]`).first().click();
+    }
+    await page.waitForTimeout(200);
+  } catch (e) {
+    await assert(false, `BUG-023 会话工作区交互完成 (error: ${e.message.slice(0, 80)})`);
+  }
 
   // ---- FR-5 用量卡片 ----
   await page.locator('[data-action="nav"][data-id="settings"]').first().click();

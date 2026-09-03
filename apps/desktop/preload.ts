@@ -470,6 +470,16 @@ const orchdesk = {
   ): Promise<{ ok: boolean; path?: string; source?: 'bound' | 'data'; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:open-project-dir', boundPath),
 
+  /**
+   * 设置会话工作区（BUG-023）：把项目绑定目录设为该会话的默认 cwd。
+   * 渲染层在「创建会话 / 打开会话 / 重选项目 / 分叉」时驱动（主进程 Map 重启即失）。
+   */
+  setSessionCwd: (
+    sessionId: string,
+    dir: string,
+  ): Promise<{ ok: boolean; path?: string; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:set-session-cwd', sessionId, dir),
+
   /** 打开文件夹选择对话框 */
   pickFolder: (): Promise<{ ok: boolean; path?: string; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:pick-folder'),
