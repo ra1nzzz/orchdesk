@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-03
+
+### Added
+- **desktop**: 文件 Tab 编辑与 diff（Minke 对照 P3，ADR-0013）
+- **desktop**: PTY 终端 Tab + 只读文件 Tab（Minke 对照 P2-10/11，ADR-0012）
+- **browser**: 浏览器工具（Electron 自带 CDP，8 个工具）｜ADR-0011
+- **verify**: TS 直测 loader + 架构守护测试（ADR-0010）
+
+### Fixed
+- **desktop**: yt-dev-review 三方审阅交叉修复（终端/文件/编辑）
+- **browser**: CDP 挂起源三条全部留降级｜真机冒烟 11/11
+
+
 ## [0.12.0] - 2026-08-31
 
 ### Added
