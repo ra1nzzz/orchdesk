@@ -3249,8 +3249,21 @@
         { sep: 1, label: '归档项目', svg: ic('archive', 14), danger: 1, id: 'archive' }]);
         document.querySelector('.pop [data-id="open"]').onclick = async () => {
           $('#menuRoot').innerHTML = '';
-          const r = await bridge.openProjectDir();
-          toast(r && r.ok ? '已打开项目目录' : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
+          // BUG-022：必须把项目绑定的文件夹传给主进程。旧代码无参调用，主进程恒开数据目录，
+          // 于是「打开项目目录」弹出的永远是 C 盘 OrchDesk 数据目录。
+          const proj = state.projects.find((x) => x.id === id);
+          const bound = proj && String(proj.path || '').trim();
+          if (!bound) {
+            toast('该项目未绑定本地文件夹（新建项目时选择本地文件夹后可用）', 'warn');
+            return;
+          }
+          const r = await bridge.openProjectDir(bound);
+          toast(
+            r && r.ok
+              ? `已打开项目目录：${(r && r.path) || bound}`
+              : `打开失败：${(r && r.reason) || '未知错误'}`,
+            r && r.ok ? 'ok' : 'danger',
+          );
         };
         document.querySelector('.pop [data-id="archive"]').onclick = () => { $('#menuRoot').innerHTML = ''; confirmArchiveProject(id); };
         break;
@@ -3852,8 +3865,9 @@
 
       /* T-P6-3 数据快照 + 更新检查 */
       case 'open-project-dir': {
+        // 设置页语义 = 打开数据目录，故意不传项目路径（项目目录走项目的 `··` 菜单）。
         const r = await bridge.openProjectDir();
-        toast(r && r.ok ? '已打开项目目录' : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
+        toast(r && r.ok ? `已打开数据目录：${(r && r.path) || ''}` : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
         break;
       }
       /* 日志目录（模型调用 / 插件加载诊断留痕） */

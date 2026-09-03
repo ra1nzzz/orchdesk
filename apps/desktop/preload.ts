@@ -460,9 +460,15 @@ const orchdesk = {
     ipcRenderer.invoke('orchdesk:snapshot-data'),
   checkUpdates: (): Promise<{ snapshot: { ok: boolean; dir?: string }; update?: { available: boolean; version?: string; note?: string }; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:check-updates'),
-  /** 用系统默认文件管理器打开项目数据目录。 */
-  openProjectDir: (): Promise<{ ok: boolean; reason?: string }> =>
-    ipcRenderer.invoke('orchdesk:open-project-dir'),
+  /**
+   * 用系统默认文件管理器打开目录。
+   * 传 `boundPath` = 打开该项目绑定的本地文件夹（项目 `··` 菜单）；
+   * 不传 = 打开数据目录（设置页）。BUG-022：旧签名无参，项目绑定路径传不进来。
+   */
+  openProjectDir: (
+    boundPath?: string,
+  ): Promise<{ ok: boolean; path?: string; source?: 'bound' | 'data'; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:open-project-dir', boundPath),
 
   /** 打开文件夹选择对话框 */
   pickFolder: (): Promise<{ ok: boolean; path?: string; reason?: string }> =>

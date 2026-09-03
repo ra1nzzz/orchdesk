@@ -47,7 +47,9 @@ async function run() {
     // （.proj-seg / .sess / 用户消息）在空数据下永远不可能通过，套件实际是空转的。
     // 改为注入一组真实形状的种子数据（字段口径同 app.js createSessionInProject）。
     const seedProjects = [
-      { id: 'p1', n: 'OrchDesk', sessions: ['s1', 's3'], archived: 0 },
+      // BUG-022：p1 绑定 D 盘目录（复现用户场景），p2 故意不绑 —— 分别断言「传参正确」与「未绑定」两条分支。
+      // 此前种子数据一律不带 `path`，套件因此永远测不到「打开项目目录」到底传了什么。
+      { id: 'p1', n: 'OrchDesk', sessions: ['s1', 's3'], archived: 0, path: 'D:/Code/Demo' },
       { id: 'p2', n: '写作助手', sessions: ['s2'], archived: 0 },
       { id: 'p3', n: '已归档', sessions: [], archived: 1 },
     ];
@@ -436,7 +438,16 @@ async function run() {
       hubResult: () => Promise.resolve({ status: 'error', result: '未配对' }),
       snapshotData: () => Promise.resolve({ ok: false }),
       checkUpdates: () => Promise.resolve({ snapshot: { ok: false }, update: { available: false, note: '' } }),
-      openProjectDir: () => Promise.resolve({ ok: true }),
+      // BUG-022：记录调用参数。旧 mock 无条件返回 ok 且不接参数 —— 渲染层传什么都发现不了。
+      // __openedPath 用 null 表示「根本没调用」，用 undefined 之外的 null 与「传了空串」区分开。
+      openProjectDir: (boundPath) => {
+        window.__openedPath = boundPath === undefined ? null : boundPath;
+        return Promise.resolve({
+          ok: true,
+          path: boundPath || 'C:/Users/x/AppData/Roaming/OrchDesk',
+          source: boundPath ? 'bound' : 'data',
+        });
+      },
       pickFolder: () => Promise.resolve({ ok: false, reason: 'cancelled' }),
       getModelConfig: () => Promise.resolve({ providers: [{ n: '本地', type: 'ollama', models: [{ n: 'qwen3:14b' }] }], selectedModels: ['qwen3:14b'], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' }),
       saveModelConfig: () => Promise.resolve({ ok: true }),
@@ -606,6 +617,57 @@ async function run() {
     } catch (e) {
       await assert(false, '菜单交互完成 (error: ' + e.message.slice(0, 60) + ')');
     }
+  }
+
+  // ---- BUG-022 回归：「打开项目目录」必须打开项目绑定的文件夹，而不是数据目录 ----
+  // 旧实现 bridge.openProjectDir() 无参 → 主进程恒开 dataDir()，弹出的是 C 盘 OrchDesk 数据目录。
+  try {
+    const clearMenu = () => page.evaluate(() => {
+      const m = document.querySelector('#menuRoot');
+      if (m) m.innerHTML = '';
+      window.__openedPath = null;
+    });
+
+    // ① p1 已绑定 D:/Code/Demo —— 传参必须是该路径
+    await clearMenu();
+    await page.waitForTimeout(120);
+    const p1Btn = page.locator('.proj-head .opbtn[data-action="proj-menu"][data-id="p1"]');
+    await assert(await p1Btn.count() > 0, 'BUG-022 项目 p1 的 ··· 菜单按钮存在');
+    await p1Btn.first().click();
+    await page.waitForTimeout(250);
+    const p1Open = page.locator('.pop [data-id="open"]');
+    if (await p1Open.count() > 0) {
+      await p1Open.first().click();
+      await page.waitForTimeout(300);
+      const opened = await page.evaluate(() => window.__openedPath);
+      await assert(opened === 'D:/Code/Demo', `BUG-022 打开项目目录传入绑定路径（实际=${opened}）`);
+      const toastText = await page.locator('.toast').last().textContent().catch(() => '');
+      await assert(/D:\/Code\/Demo/.test(toastText || ''), `BUG-022 toast 回显实际打开的路径（实际=${toastText}）`);
+    } else {
+      await assert(false, 'BUG-022 项目菜单有「打开项目目录」项');
+    }
+
+    // ② p2 未绑定 —— 不得调用 bridge，且必须明确提示（静默回退数据目录正是本 BUG 的形态）
+    await clearMenu();
+    await page.waitForTimeout(150);
+    const p2Btn = page.locator('.proj-head .opbtn[data-action="proj-menu"][data-id="p2"]');
+    await assert(await p2Btn.count() > 0, 'BUG-022 未绑定项目 p2 的 ··· 菜单按钮存在');
+    await p2Btn.first().click();
+    await page.waitForTimeout(250);
+    const p2Open = page.locator('.pop [data-id="open"]');
+    if (await p2Open.count() > 0) {
+      await p2Open.first().click();
+      await page.waitForTimeout(300);
+      const opened2 = await page.evaluate(() => window.__openedPath);
+      await assert(opened2 === null, `BUG-022 未绑定项目不调用打开目录（实际=${opened2}）`);
+      const toast2 = await page.locator('.toast').last().textContent().catch(() => '');
+      await assert(/未绑定/.test(toast2 || ''), `BUG-022 未绑定时提示「未绑定本地文件夹」（实际=${toast2}）`);
+    } else {
+      await assert(false, 'BUG-022 未绑定项目的菜单项存在');
+    }
+    await clearMenu();
+  } catch (e) {
+    await assert(false, `BUG-022 项目目录打开交互完成 (error: ${e.message.slice(0, 80)})`);
   }
 
   // 点击新会话按钮 → 回到 home-screen

@@ -3190,13 +3190,35 @@ ipcMain.handle('orchdesk:desktop-floating-context', async (_e, ctx: { title?: st
   return { ok: true, context: { ...floatingContext } };
 });
 
-/** 用系统默认文件管理器打开数据目录（项目目录 = userData）。 */
-ipcMain.handle('orchdesk:open-project-dir', async () => {
+/**
+ * 打开项目绑定的本地文件夹（项目 `··` 菜单）或数据目录（设置页）。
+ * 传 `boundPath` → 打开该项目绑定的目录；不传 → 打开数据目录（语义由调用方决定）。
+ *
+ * BUG-022：此前恒打开 `dataDir()`，**绑定的项目目录形同虚设**——而创建项目弹窗还写着
+ * 「绑定后可通过『打开项目目录』快速访问」，等于用假承诺糊住一个死挂点。
+ *
+ * 关键口径：绑定路径不存在 / 不是目录时**明确报错**，绝不静默回退数据目录。
+ * 静默回退会让用户以为打开的是项目目录，与「降级必须可见」冲突，且掩盖数据错配。
+ */
+ipcMain.handle('orchdesk:open-project-dir', async (_e, boundPath?: string) => {
+  const raw = typeof boundPath === 'string' ? boundPath.trim() : '';
+  const source: 'bound' | 'data' = raw ? 'bound' : 'data';
   try {
-    await shell.openPath(dataDir());
-    return { ok: true };
+    const target = raw ? path.resolve(raw) : dataDir();
+    if (source === 'bound') {
+      // 目录可能已被删/移动过：渲染层只知道「当初绑的是什么」，真实性由主进程兜底
+      const st = fs.statSync(target);
+      if (!st.isDirectory()) return { ok: false, source, reason: `绑定的路径不是文件夹：${target}` };
+    }
+    const openErr = await shell.openPath(target); // 成功返回 ''，失败返回错误描述（旧代码忽略了它 → 失败也报 ok）
+    if (openErr) return { ok: false, source, reason: openErr };
+    return { ok: true, source, path: target };
   } catch (err) {
-    return { ok: false, reason: (err as Error).message };
+    return {
+      ok: false,
+      source,
+      reason: source === 'bound' ? `绑定的目录不可访问：${(err as Error).message}` : (err as Error).message,
+    };
   }
 });
 
@@ -3205,7 +3227,8 @@ ipcMain.handle('orchdesk:open-log-dir', async () => {
   try {
     const dir = path.join(dataDir(), 'logs');
     fs.mkdirSync(dir, { recursive: true });
-    await shell.openPath(dir);
+    const openErr = await shell.openPath(dir); // 与 BUG-022 同款：成功返回 ''，忽略返回值会让失败也报 ok
+    if (openErr) return { ok: false, reason: openErr };
     return { ok: true, file: logFilePath() ?? undefined };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
