@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-03
+
+### Fixed
+- BUG-022 项目菜单「打开项目目录」恒开数据目录（实机冒烟首批反馈）
+
+
 ## [0.13.0] - 2026-09-03
 
 ### Added
