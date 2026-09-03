@@ -1406,8 +1406,21 @@
       const skills = SKILLS_MARKET.map((s) => `<div class="ss-i"><span class="id"></span><span class="in mono" style="font-size:11.5px">${esc(s.n)}</span>${s.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>'}</div>`).join('');
       const experts = [...expertList().map((e) => `<div class="ss-i"><span class="id"></span><span class="in">${e}</span><span class="ib badge info">专家</span></div>`),
         ...teamList().map((t) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(t.n)}</span><button class="btn sm ghost" data-action="team-compose" data-tid="${esc(t.id || '')}" data-tn="${esc(t.n)}">派发任务</button><span class="ib badge ceo">团</span></div>`)].join('');
-      // 委派树结果（composeTeam 返回后渲染；CEO→Director→Worker 三层）
-      const deleg = (state.delegationLast?.nodes || []).map((n) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(String(n.label || n.id))}</span><span class="ib badge ${String(n.layer) === 'ceo' ? 'ceo' : 'info'}">${esc(String(n.layer || ''))}</span><span class="ib badge ${String(n.status) === 'done' ? 'ok' : 'warn'}">${esc(String(n.status || ''))}</span></div>`).join('');
+      // 委派树结果（composeTeam 返回后渲染；CEO→Director→Worker 三层）。
+      // ②半接线修复后 composeTeam 会把 task 真实喂给各 Director 经 agentRunner 执行，
+      // 节点携带 task/result/note —— 必须在树里可见，否则又落入「执行了却存而不显」。
+      const delRow = (n) => {
+        const line = `<div class="ss-i"><span class="id"></span><span class="in">${esc(String(n.label || n.id))}</span><span class="ib badge ${String(n.layer) === 'ceo' ? 'ceo' : 'info'}">${esc(String(n.layer || ''))}</span><span class="ib badge ${String(n.status) === 'done' ? 'ok' : 'warn'}">${esc(String(n.status || ''))}</span></div>`;
+        const cut = (s) => (s.length > 140 ? s.slice(0, 140) + '…' : s);
+        const bits = [];
+        const t = n.task; if (typeof t === 'string' && t) bits.push(`任务：${esc(cut(t))}`);
+        const st = String(n.status || '');
+        if (st === 'failed') bits.push(typeof n.note === 'string' && n.note ? `原因：${esc(cut(n.note))}` : '原因：执行失败');
+        else if (st === 'done') { const r = n.result; if (typeof r === 'string' && r) bits.push(`产出：${esc(cut(r))}`); }
+        if (st === 'running' || st === 'pending') bits.push(st === 'running' ? '执行中…' : '待执行');
+        return line + (bits.length ? `<div class="del-note">${bits.join('<br>')}</div>` : '');
+      };
+      const deleg = (state.delegationLast?.nodes || []).map(delRow).join('');
       const expertsHtml = experts + (deleg ? sec('delegation', '最近一次委派树', (state.delegationLast?.nodes || []).length, deleg) : '');
       // 连接器侧栏：真实后端状态。桥不可用（loaded=false）显「未接入」，
       // 与「已接入但都没配置」必须区分 —— 把 null 当空数组是本项目踩过三次的坑。

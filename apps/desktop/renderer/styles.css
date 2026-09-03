@@ -511,6 +511,9 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 .ssec .ss-i.on .id{background:var(--ok)}
 .ssec .ss-i .in{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 .ssec .ss-i .ib{font-size:9.5px;flex:none}
+/* 委派树节点的执行摘要（task/产出/失败原因）—— 与 .ss-i 文本起点对齐，弱化不抢主行 */
+.ssec .del-note{padding:0 8px 5px 27px;font-size:11px;line-height:1.5;color:var(--fg-faint);word-break:break-all}
+.ssec .del-note+.ss-i{margin-top:0}
 
 /* composer 模型/思维选择器 */
 .c-mp{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid var(--border-strong);border-radius:7px;font-size:11.5px;background:var(--bg);color:var(--fg-dim);cursor:pointer;transition:.15s;max-width:220px}

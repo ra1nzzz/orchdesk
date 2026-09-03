@@ -199,7 +199,7 @@ async function run() {
           rootId: 'ceo-e2e',
           nodes: [
             { id: 'ceo-e2e', label: 'CEO（主会话）', layer: 'ceo', status: 'done' },
-            { id: 'd1', label: '开发总监', layer: 'director', status: 'done' },
+            { id: 'd1', label: '开发总监', layer: 'director', status: 'done', task: '生成一份开发周报', result: '已汇总本周迭代进展与风险' },
             { id: 'w1', label: 'Worker-1', layer: 'worker', status: 'running' },
           ],
         });
@@ -1577,6 +1577,15 @@ async function run() {
     const delHead = await page.locator('.ss-h[data-action="pside-toggle"][data-id="delegation"]').innerText().catch(() => '');
     await assert(/最近一次委派树/.test(delHead) && /3/.test(delHead),
       `派发结果渲染委派树分组（3 节点，实际=${delHead.replace(/\n/g, ' | ').slice(0, 80)}）`);
+    // ②半接线后 composeTeam 把 task 喂给 Director 真执行并返回 result —— 委派树须渲染出
+    // 执行摘要（task/产出/执行中），否则「接成真执行」在产品里存而不显。
+    await page.locator('.ss-h[data-action="pside-toggle"][data-id="delegation"]').first().click();
+    await page.waitForTimeout(300);
+    const delNotes = (await page.locator('.ssec .del-note').allInnerTexts().catch(() => [])) || [];
+    const joined = delNotes.join('\n');
+    await assert(/任务：生成一份开发周报/.test(joined), `委派树应展示 Director 的 task，实际=${joined.slice(0, 120)}`);
+    await assert(/产出：已汇总本周迭代进展与风险/.test(joined), `委派树应展示 Director 执行产出，实际=${joined.slice(0, 120)}`);
+    await assert(/执行中…/.test(joined), `running 节点应标注「执行中…」，实际=${joined.slice(0, 120)}`);
   } catch (e) {
     await assert(false, `死挂点 ⑤ 专家团派发链路完成 (error: ${e.message.slice(0, 80)})`);
   }
