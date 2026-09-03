@@ -69,6 +69,12 @@ export interface DelegationNode {
   parentId?: string;
   sessionId?: SessionId;
   status: 'pending' | 'running' | 'done' | 'failed';
+  /** 下发给该节点的任务文案（真实执行 seam 后不为空）。 */
+  task?: string;
+  /** 该节点 subagent 的真实执行结果（agentRunner 单轮回复）。 */
+  result?: string;
+  /** 执行失败/未执行的原因（不静默伪造成功）。 */
+  note?: string;
 }
 
 export interface OrchestrationCatalog {
@@ -121,16 +127,23 @@ export function apply(ctx: Context, _config: MultiConfig): void {
   // seam：CEO→Director→Worker 三层任务闭环在后台执行（dsh 原生 ctx.agents.create）。
   async function composeTeam(
     teamId: string,
-    _task: string,
+    task: string,
   ): Promise<{ rootId: string; nodes: DelegationNode[] }> {
     const FALLBACK_TEAM: Team = { id: 'team-custom', name: '自定义 · 我的专家团', members: [] };
     const team = TEAMS.find((t) => t.id === teamId) ?? FALLBACK_TEAM;
     const rootId = `ceo-${++ROOT_SEQ}-${Date.now()}`;
-    const ceo: DelegationNode = { id: rootId, layer: 'ceo', label: 'CEO（主会话）', status: 'running' };
+    const cleanTask = String(task || '').trim();
+    const ceo: DelegationNode = {
+      id: rootId, layer: 'ceo', label: 'CEO（主会话）', status: 'running',
+      task: cleanTask || undefined,
+    };
     tree.set(rootId, ceo);
     const handles: Array<{ id: string; h: AgentHandle }> = [];
+    // 记录「派生后待执行」的 Director（派生全部成功后才统一执行，见阶段 2）。
+    const directorsToRun: Array<{ id: string; sessionId: SessionId }> = [];
     try {
-      // CEO 为顶层（本会话 agent，不另建）；Director 层 = 专家团成员作为 subagent（delegationDepth 1）。
+      // ---- 阶段 1：派生（CEO 为顶层不另建；Director/Worker 经 ctx.agents.create）----
+      // create 抛错（基础设施失败）→ 中断 → catch 全 failed，保持团队派生原子性。
       for (const memberId of team.members) {
         const expert = EXPERTS.find((e) => e.id === memberId);
         const dId = `${rootId}-d-${memberId}`;
@@ -143,6 +156,7 @@ export function apply(ctx: Context, _config: MultiConfig): void {
           parentId: rootId,
           sessionId: dSession,
           status: 'running',
+          task: cleanTask || undefined,
         };
         tree.set(dId, dNode);
         const dOpts: CreateAgentOptions = {
@@ -153,6 +167,8 @@ export function apply(ctx: Context, _config: MultiConfig): void {
         handles.push({ id: dId, h });
 
         // Worker 层 = Director 下属临时手（delegationDepth 2），即用即走。
+        // 语义：Director 代表本域执行 task；Worker 保留为「下属可再派」的结构锚点，
+        // 不单独再跑一轮（避免把同一 task 重复喂给多层造成 N 倍无谓调用）。
         const wId = `${dId}-w`;
         const wSession = brandSessionId(`orchdesk-wk-${wId}`);
         const wNode: DelegationNode = {
@@ -162,6 +178,7 @@ export function apply(ctx: Context, _config: MultiConfig): void {
           parentId: dId,
           sessionId: wSession,
           status: 'pending',
+          task: cleanTask || undefined,
         };
         tree.set(wId, wNode);
         const wOpts: CreateAgentOptions = {
@@ -170,9 +187,38 @@ export function apply(ctx: Context, _config: MultiConfig): void {
         };
         const wh = await ctx.agents.create(wOpts); // seam
         handles.push({ id: wId, h: wh });
+        directorsToRun.push({ id: dId, sessionId: dSession });
+      }
+
+      // ---- 阶段 2：真实执行（半接线修复：不再「建空壳即标 done」）----
+      // task 经 ctx.agents.followup 喂给每个 Director subagent 跑一轮（agentRunner 注入时
+      // 走 callModel，见 host-services ctx.agents.followup → main.ts setAgentRunner）。
+      // 派生已全部成功，此阶段单 Director 执行失败 → 保留 failed + note，不拖垮团队。
+      if (cleanTask) {
+        for (const d of directorsToRun) {
+          const node = tree.get(d.id);
+          if (!node) continue;
+          try {
+            const r = await subAgentTurn(d.sessionId, cleanTask);
+            node.result = r?.text || '';
+            node.status = 'done';
+          } catch (err) {
+            node.status = 'failed';
+            node.note = `exec-error:${err instanceof Error ? err.message : String(err)}`;
+          }
+        }
+      } else {
+        for (const d of directorsToRun) {
+          const node = tree.get(d.id);
+          if (node) { node.status = 'done'; node.note = '无任务文案，未执行（仅派生结构）'; }
+        }
       }
       // 置 done 只作用于本次 root 的子孙（不得洗白历史/其它 root 的节点）。
-      for (const n of getDelegationTree(rootId)) n.status = 'done';
+      // 不覆盖阶段 2 已显式 failed 的 Director（失败不被洗白纪律：一个专家失败
+      // 不拖垮团队也不伪造成功）。
+      for (const n of getDelegationTree(rootId)) {
+        if (n.status === 'pending' || n.status === 'running') n.status = 'done';
+      }
       return { rootId, nodes: getDelegationTree(rootId) };
     } catch (err) {
       // 失败节点显式置 failed：在树中可查询，且不得被后续任务洗白。
@@ -185,6 +231,28 @@ export function apply(ctx: Context, _config: MultiConfig): void {
       for (const { h } of handles) {
         try { await h.dispose(); } catch { /* 已处置 */ }
       }
+    }
+  }
+
+  /**
+   * 把一个任务喂给指定 subagent 会话跑一轮，返回其回复。
+   * 经 ctx.agents.followup（宿主注入的 agentRunner：单轮 callModel，无工具循环）。
+   * 未注入运行器 / session 不存在 → followup 返回明确错误文案而非伪造成功。
+   */
+  async function subAgentTurn(
+    sessionId: SessionId,
+    content: string,
+  ): Promise<{ text?: string } | null> {
+    // 类型收窄：dsh AgentRegistry 类型面没有 followup（那是宿主 custom service 加的）；
+    // 实际 ctx.agents 在桌面端是 host-services 的 agentsService（含 followup）。
+    const svc = (ctx as unknown as {
+      agents?: { followup?: (sid: string, msgs: Array<{ role: string; content: string }>) => Promise<{ text?: string }> };
+    }).agents;
+    if (!svc || typeof svc.followup !== 'function') return null;
+    try {
+      return await svc.followup(String(sessionId), [{ role: 'user', content }]);
+    } catch (err) {
+      throw new Error(`subagent-run:${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

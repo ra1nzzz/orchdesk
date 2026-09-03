@@ -251,7 +251,14 @@ function runProbe() {
       out.listIds = (l0 || []).map((e) => e.id);
       out.listBadDomain = await list('nope');
 
-      // --- 2. fail-closed：未注入 Director 过滤器 → 拒绝 ---
+      // brain 的 worker→director 过滤门 seam（FR-10）。产品路径（main.ts bootRuntime）
+      // 会注入「用户即 Director」恒放行门；本套件验证的是**调用链上的 fail-closed 语义**，
+      // 与 main 是否注入无关，故每一步显式 setDirectorFilter 设态，不依赖启动前提。
+      const brainEntry = path.join(APP_DIR, 'vendor', 'plugins', 'brain', 'index.js');
+      const brainMod = await import('file://' + brainEntry.replace(/\\\\/g, '/'));
+
+      // --- 2. fail-closed：显式复位过滤门为缺省（null → 拒绝）---
+      brainMod.setDirectorFilter(null);
       const r1 = await promote(out.listIds[0], 'worker', 'director');
       out.rejectedOk = r1.ok;
       out.rejectedReason = r1.reason;
@@ -260,8 +267,6 @@ function runProbe() {
       out.rejectedStats = s1.stats;
 
       // --- 3. 注入放行过滤器 → 晋升成功 ---
-      const brainEntry = path.join(APP_DIR, 'vendor', 'plugins', 'brain', 'index.js');
-      const brainMod = await import('file://' + brainEntry.replace(/\\\\/g, '/'));
       brainMod.setDirectorFilter(() => true);
       const r2 = await promote(out.listIds[0], 'worker', 'director');
       out.approveOk = r2.ok;

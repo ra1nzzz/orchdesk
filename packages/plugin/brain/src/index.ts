@@ -11,6 +11,12 @@
 //
 // 实现：Worker 生命周期映射到 dsh 原生 ctx.agents.create / AgentHandle.dispose（ADR-0004）。
 // 真实 spawn/dispose 在 dsh 运行时执行；本骨架在类型与结构上就绪，运行期验证受 BUG-W02 门控。
+//
+// 消费入口现状（②半接线梳理，2026-09）：桌面端「专家团编排」走 multi 插件的
+// composeTeam（同用 ctx.agents.create，task 真实经 ctx.agents.followup 下发执行）；
+// 本插件的 dispatchSubAgent / disposeSubAgent 是 T-P2-4 的脑手解耦 API seam，当前无
+// 独立 UI/编排调用它（语义被 composeTeam 覆盖），但被 orchestration verify 完整测试
+// （派生/状态机/即用即走/晋升门控）。保留作独立触发 SubAgent 的预留入口，勿当死代码删。
 
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent, PreStepDecision, CreateAgentOptions, AgentHandle } from '@deepseek-ai/dsh-agent';
@@ -136,6 +142,8 @@ export interface BrainHands {
   disposeSubAgent(id: string, result?: string): Promise<void>;
   /** Worker 输出晋升主会话记忆须经 Director 批准；fail-closed。 */
   promoteWorkerOutput(output: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; reason: string }>;
+  /** 注入 / 移除 Director 过滤回调（放行门）。传 null 恢复 fail-closed 默认拒绝。 */
+  setFilter(fn: DirectorFilter | null): void;
   listSubAgents(): SubAgentRecord[];
   /** 供桥/渲染层订阅 inline 芯片事件（不占独立区域/弹窗）。 */
   subscribe(cb: (e: SubAgentEvent) => void): () => void;
@@ -282,6 +290,9 @@ export function apply(ctx: Context, config: BrainConfig): void {
       dispatchSubAgent,
       disposeSubAgent,
       promoteWorkerOutput,
+      // 放行门注入 seam：运行时（main.ts）据产品语义注入（如「用户即 Director」时放行，
+      // 未来可换 LLM 裁决门）。不提供时保持模块级 fail-closed 默认拒绝。
+      setFilter: (fn) => { setDirectorFilter(fn); },
       listSubAgents: () => [...registry.values()].map((r) => ({ ...r })),
       subscribe: (cb) => {
         subscribers.add(cb);

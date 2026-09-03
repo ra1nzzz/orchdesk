@@ -89,7 +89,9 @@ function createAgentsMock() {
   const live = new Map();
   /** 人类可读的调用序（create:x → dispose:x）。 */
   const seqLog = [];
-  const hooks = { beforeCreate: null, duringCreate: null };
+  /** followup 调用序列（断言 composeTeam 真实下发 task 给 subagent）。 */
+  const followupCalls = [];
+  const hooks = { beforeCreate: null, duringCreate: null, failFollowup: null };
   let n = 0;
 
   const service = {
@@ -109,16 +111,28 @@ function createAgentsMock() {
           live.delete(sessionId);
           seqLog.push(`dispose:${sessionId}`);
         },
-        async followup() { return { text: '' }; },
       };
       live.set(sessionId, handle);
       if (hooks.duringCreate) hooks.duringCreate(opts, sessionId);
       return handle;
     },
+    // followup 对齐真实 host-services：{ sessionId, messages } → 运行器结果。
+    // 句柄形状与真实 AgentHandleLike 一致：handle 无 followup（followup 在 service 上）。
+    async followup(sessionId, messages) {
+      followupCalls.push({ sessionId, messages: (messages || []).map((m) => ({ role: m.role, content: m.content })) });
+      if (!live.has(sessionId)) return { text: `（SubAgent ${sessionId} 不存在或已销毁）` };
+      if (hooks.failFollowup) {
+        const e = hooks.failFollowup;
+        hooks.failFollowup = null;
+        throw (e instanceof Error ? e : new Error(String(e)));
+      }
+      const content = (messages || []).map((m) => String(m.content || '')).join(' ');
+      return { text: `（mock 执行）${content}`.slice(0, 120) };
+    },
     list() { return [...live.keys()]; },
   };
 
-  return { service, calls, live, seqLog, hooks };
+  return { service, calls, live, seqLog, hooks, followupCalls };
 }
 
 /** 所有 boot 出的 fiber：脚本结束（含异常路径）统一 dispose，不留存活 SubAgent。 */
@@ -367,6 +381,18 @@ async function disposeAllFibers() {
     const r = await brain.promoteWorkerOutput('x');
     assert(r.approved === false, '无回调时应默认拒绝：' + JSON.stringify(r));
   });
+  await check('brainHands.setFilter seam 注入放行（②半接线修复：main.ts 经此注入放行门）', async () => {
+    assert(typeof brain.setFilter === 'function', 'brainHands 应暴露 setFilter 方法');
+    brain.setFilter(() => true); // 用户即 Director：恒放行
+    try {
+      const ok = await brain.promoteWorkerOutput('任意 worker 结论');
+      assert(ok.approved === true, '恒放行门应放行：' + JSON.stringify(ok));
+    } finally {
+      brain.setFilter(null); // 恢复默认拒绝，不污染后续用例
+    }
+    const back = await brain.promoteWorkerOutput('x');
+    assert(back.approved === false, '移除 setFilter 后应回默认拒绝：' + JSON.stringify(back));
+  });
 
   current = 'brain·卸载';
   await check('插件卸载（逆效应）清空注册表并销毁全部存活句柄', async () => {
@@ -445,6 +471,39 @@ async function disposeAllFibers() {
     assert(depth1.length === 3, `delegationDepth=1 应有 3 个，实际 ${depth1.length}`);
     assert(depth2.length === 3, `delegationDepth=2 应有 3 个，实际 ${depth2.length}`);
     for (const c of seg) assert(c.meta.origin === 'subagent', '编排派生须带 origin=subagent');
+  });
+  await check('composeTeam 把 task 真实下发给每个 Director（followup 喂任务，非空转）', async () => {
+    // 上一次 composeTeam('team-fullstack','验证任务') 已结束：此刻 followupCalls 恰为该次新增。
+    // 半接线修复断言：Director 不应只 create+dispose 空转，必须经 ctx.agents.followup 拿到 task。
+    const dirSessions = mmock.calls.filter((c) => c.meta.delegationDepth === 1).map((c) => c.sessionId);
+    const onDir = mmock.followupCalls.filter((f) => dirSessions.includes(f.sessionId));
+    assert(onDir.length === 3, `3 个 Director 都应被 followup 下发 task，实际 ${onDir.length}`);
+    for (const f of onDir) {
+      const content = (f.messages || []).map((m) => String(m.content || '')).join(' ');
+      assert(content.includes('验证任务'), '下发给 Director 的内容应含原 task：' + JSON.stringify(content));
+    }
+  });
+  await check('composeTeam 成功路径返回节点带 task 且已收敛 done（执行结果可见）', async () => {
+    const t = await orch.composeTeam('team-writing', '写一篇文案');
+    const dirs = t.nodes.filter((n) => n.layer === 'director');
+    assert(dirs.length === 2, '写作团 2 成员 → 2 Director，实际 ' + dirs.length);
+    for (const d of dirs) {
+      assert(d.status === 'done', `${d.id} 执行成功后应收敛 done，实际 ${d.status}`);
+      assert(typeof d.result === 'string' && d.result.length > 0, `${d.id} 应带真实执行结果（mock 文本），实际 ${JSON.stringify(d.result)}`);
+    }
+    assert(!t.nodes.some((n) => n.status === 'pending' || n.status === 'running'), '不应有未收敛节点');
+  });
+  await check('单 Director 执行失败 → 保留 failed + note，不拖垮团队也不洗白', async () => {
+    const rt = await boot('multi', {});
+    const rtOrch = rt.ctx.orchestration;
+    rt.mock.hooks.failFollowup = new Error('模拟 Director 执行失败');
+    const t = await rtOrch.composeTeam('team-fullstack', '注定失败的任务');
+    const failed = t.nodes.filter((n) => n.layer === 'director' && n.status === 'failed');
+    // failFollowup 只触发第一个 followup（一次性），其余 Director 成功。
+    assert(failed.length === 1, `应有 1 个 Director 执行失败，实际 ${failed.length}`);
+    assert(failed[0].note && /exec-error/.test(failed[0].note), '失败节点应带 note 说明：' + JSON.stringify(failed[0].note));
+    const okDirs = t.nodes.filter((n) => n.layer === 'director' && n.status === 'done');
+    assert(okDirs.length === 2, `其余 2 个 Director 应成功（不拖垮），实际 ${okDirs.length}`);
   });
   await check('Director 与 Worker 的 sessionId 互不重复（每只手独立上下文）', () => {
     const sessions = mmock.calls.map((c) => c.sessionId);

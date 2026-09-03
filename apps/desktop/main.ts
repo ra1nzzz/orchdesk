@@ -2058,6 +2058,17 @@ async function bootRuntime(): Promise<void> {
     } else {
       console.warn('[orchdesk] memory 服务不可用，自动转储将全部走抽取式兜底');
     }
+
+    // 3b) Director 放行门（FR-10 / ②半接线修复）：brain 的 promoteWorkerOutput 默认
+    //    fail-closed 永拒（director-filter-pending）——此前 worker 记忆晋升永远不成功，
+    //    但 UI 文案表现得像「Director 认真裁决后驳回」。本桌面版的 worker→director 晋升
+    //    由**用户主动点击**触发（已做人工审查），用户即 Director，故注入恒放行门。
+    //    未来若引入 Worker 自动晋升通道，可在此换成 LLM 裁决门（保持 seam 不变）。
+    const brainApi = getService<{ setFilter?: (fn: ((o: string) => boolean) | null) => void }>('brainHands');
+    if (brainApi?.setFilter) {
+      brainApi.setFilter(() => true); // 用户即 Director：手动晋升直接放行
+      console.log('[orchdesk] Director 放行门已注入（用户即 Director：手动 worker 晋升直接放行）');
+    }
   } catch (err) {
     console.error('[orchdesk] dsh 运行时启动失败，插件能力不可用:', (err as Error).message);
   }
