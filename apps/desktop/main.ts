@@ -805,7 +805,13 @@ async function approvalGate(toolName: string, reason: string, sessionId?: string
  */
 async function outboundGate(text: string, sessionId?: string): Promise<string | null> {
   const svc = getService<CompensationServiceLike>('compensation');
-  if (!svc) return null;
+  if (!svc) {
+    // BUG（全盘死挂点扫描）：原实现无服务时直接放行且不落任何日志，与函数注释
+    // 「fail-open 放行但记 WARN、绝不静默」不符；与 approvalGate 的 fail-closed(795)
+    // 形成无理由双标。补偿层缺失=外发无预判门，必须可见。
+    log('WARN', 'compensation', '补偿层服务未接入，外发预判放行（fail-open，无确认门）');
+    return null;
+  }
   let verdict: { needsConfirm?: boolean; category?: string; reason?: string } | null = null;
   try {
     const raw = await svc.withhold(String(text || ''));
@@ -1249,17 +1255,34 @@ function sandboxTargetOf(toolName: string, args: Record<string, unknown> | undef
 
 // --- Agent Runtime：模型回合 + 工具调用循环 ---
 
+/** 取可下发 IPC 的渲染窗口：mainWindow 优先，回退首个未销毁窗。
+ * 桌面集成开启后悬浮窗先建排第 0，但无 preload 不订阅业务事件，不能当推送目标。
+ * 全库此前散落 4 份同款三元式（浏览器状态/终端数据/终端退出/工具步骤），统一收口。 */
+function rendererWindow(): BrowserWindow | null {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+    return BrowserWindow.getAllWindows().find((x) => !x.isDestroyed()) || null;
+  } catch { return null; }
+}
+
 /** 把一次工具执行同步给渲染层（步骤条 + 通知）。 */
 function notifyToolStep(sessionId: string, name: string, ph: 'running' | 'done' | 'error', result?: string): void {
   try {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('orchdesk:tool-step', { sessionId, name, ph, result: result || '' });
-    }
+    // BUG（全盘死挂点扫描）：原实现取 BrowserWindow.getAllWindows()[0] —— 桌面集成开启
+    // 悬浮窗后，悬浮窗先建排第 0（无 preload、不订阅 tool-step），工具步骤全发向死窗，
+    // 渲染层订阅方永远收不到。改走统一 helper rendererWindow()（mainWindow 优先）。
+    const w = rendererWindow();
+    if (w) w.webContents.send('orchdesk:tool-step', { sessionId, name, ph, result: result || '' });
   } catch { /* 忽略：窗口可能已关闭 */ }
 }
 
-async function runAgentTurn(sessionId: string, text: string, opts: { models?: string[]; thinkLevel?: string }): Promise<{ text: string; intent: string }> {
+async function runAgentTurn(sessionId: string, text: string, opts: { models?: string[]; thinkLevel?: string }): Promise<{
+  text: string;
+  intent: string;
+  /** 本回合工具轨迹（n/ph/result）。渲染层据此在 agent 消息下展示「N 步 · M 个动作」。 */
+  tools?: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }>;
+  steps?: number;
+}> {
   const modelCfg = loadModelConfig();
   if (!modelCfg.providers.length) return { text: '（未配置模型）请先在设置页「模型管理」中添加模型提供商。', intent: 'CONFIRM' };
 
@@ -1393,7 +1416,12 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     for (const tc of usable) {
       stepCount++;
       notifyToolStep(sessionId, tc.name, 'running');
-      const result = await executeTool(tc);
+      // BUG（全盘死挂点扫描）：文本兜底模式此前漏传 sessionId —— 对照同函数上文原生
+      // 路径的 executeTool 调用（不要用行号互指，编辑漂移会让注释失真）。
+      // 不传则 executeTool 内 sessionCtx?.sessionId 恒假：set_cwd 静默失效、cwd 回落
+      // home、session 级 grant 匹配不到、沙箱日志 sessionId 全空。会话工作区整链在该
+      // 模式断（用户「git pull 找不到仓库」的第三种形态）。
+      const result = await executeTool(tc, { sessionId });
       toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
       notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
       // 文本兜底模式下 assistant 消息里没有 tool_calls，
@@ -1461,7 +1489,10 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     }
   }
 
-  return { text: finalReply, intent: 'ACT' };
+  // BUG（全盘死挂点扫描）：此前返回值只有 { text, intent }，渲染层收不到本回合工具
+  // 轨迹 → doSend 从不写 m.tools，renderMsg 里「N 步 · M 个动作」的展示形态永远为空
+  // （工具实时推送 tool-step 虽有订阅，state.toolSteps 存了却无人读取 = 存而不显）。
+  return { text: finalReply, intent: 'ACT', tools: toolSteps, steps: stepCount };
 }
 
 // IPC
@@ -2574,9 +2605,7 @@ ipcMain.handle('orchdesk:open-external', async (_e, url: unknown) => {
 function pushBrowserState(st?: BrowserStateSnapshot): void {
   const snapshot = st || getBrowserState();
   try {
-    const w = (mainWindow && !mainWindow.isDestroyed())
-      ? mainWindow
-      : BrowserWindow.getAllWindows().find((x) => !x.isDestroyed());
+    const w = rendererWindow();
     if (w) w.webContents.send('orchdesk:browser-state', snapshot);
   } catch { /* 窗口已关闭 */ }
 }
@@ -2636,9 +2665,7 @@ function terminalExtraPtyDirs(): string[] {
 /** 终端数据推送：攒批后的输出块（节流在 terminal-pty.ts 内）。 */
 onTerminalData((ev) => {
   try {
-    const w = (mainWindow && !mainWindow.isDestroyed())
-      ? mainWindow
-      : BrowserWindow.getAllWindows().find((x) => !x.isDestroyed());
+    const w = rendererWindow();
     if (w) w.webContents.send('orchdesk:terminal-data', ev);
   } catch { /* 窗口已关闭 */ }
 });
@@ -2646,9 +2673,7 @@ onTerminalData((ev) => {
 /** 终端退出推送：Tab 栏把该会话标记为已退出（不自动关闭，保留回看）。 */
 onTerminalExit((ev) => {
   try {
-    const w = (mainWindow && !mainWindow.isDestroyed())
-      ? mainWindow
-      : BrowserWindow.getAllWindows().find((x) => !x.isDestroyed());
+    const w = rendererWindow();
     if (w) w.webContents.send('orchdesk:terminal-exit', ev);
   } catch { /* 窗口已关闭 */ }
 });
@@ -3035,7 +3060,14 @@ interface EvolutionServiceLike {
 ipcMain.handle('orchdesk:evol-create', async (_e, spec: unknown, opts: unknown) => {
   const svc = getService<EvolutionServiceLike>('evolution');
   if (!svc) return unavailable('自进化插件未接入');
-  return svc.createTempPlugin(spec, opts || {});
+  // BUG（全盘死挂点扫描）：原实现透传 opts（无 agent 字段）→ evolution 插件的
+  // requireConfirm=true 授权门（默认值）在「缺 agent 句柄」时恒返「授权门控未通过」，
+  // 设置页「新建临时插件」按钮恒失败，UI 却写着「创建后在此列出」。桌面宿主无 dsh
+  // Agent 句柄，但审批实际走 UI 弹窗（approval.request 不读 agent 字段，见 host-services
+  // 的 uiAnswerer 通道）——补最小占位即可让用户点击 → 真实审批弹窗 → 放行后创建。
+  const base = (opts && typeof opts === 'object' ? opts : {}) as Record<string, unknown>;
+  const merged = { ...base, agent: base.agent ?? { id: 'orchdesk-desktop', meta: { origin: 'ui' } } };
+  return svc.createTempPlugin(spec, merged);
 });
 ipcMain.handle('orchdesk:evol-list', () => {
   const svc = getService<EvolutionServiceLike>('evolution');

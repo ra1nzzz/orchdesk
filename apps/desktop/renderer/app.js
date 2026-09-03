@@ -45,8 +45,23 @@
     code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
     // 浏览器（ADR-0011）面板入口
     globe: '<circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18z"/>',
+    // 建议项图标（iconMap 引用，此前缺失 → ic() 渲染空 SVG）
+    barChart: '<line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/>',
+    grid: '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
   };
   const ic = (n, s = 20) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
+  /** 工具步骤行（live typing 与静态消息两处共用，杜绝双份模板漂移）。
+   * 色义：执行中=琥珀脉冲 / 出错=红 / 完成=绿；sm=true 为 typing 紧凑行。 */
+  function toolRow(t, sm) {
+    const ph = t.ph === 'running' ? 'running' : (t.ph === 'error' ? 'error' : 'done');
+    const dot = ph === 'running' ? 'var(--warn)' : (ph === 'error' ? 'var(--danger)' : 'var(--ok)');
+    const anim = ph === 'running' ? 'animation:pulse 1.6s infinite' : '';
+    const lbl = ph === 'running' ? '执行中' : (ph === 'error' ? '出错' : '完成');
+    const trowSt = sm ? 'style="margin-top:2px"' : '';
+    const monoSt = sm ? 'style="font-size:11px"' : '';
+    const faintSt = sm ? 'style="margin-left:auto;font-size:10.5px"' : 'style="margin-left:auto"';
+    return `<div class="trow" ${trowSt}><span class="tdot" style="background:${dot};${anim}"></span><span class="mono" ${monoSt}>${esc(t.n)}</span><span class="faint" ${faintSt}>${lbl}</span></div>`;
+  }
   // 专家 / 专家团：**回落到多 Agent 编排插件（multi）提供的真实目录**。
   // 编排插件可用时以 catalog 为准（8 专家 + 3 团），不可用时才用下面的兜底清单。
   const EXPERTS = ['Orchestrator（主会话）', '开发总监', '设计总监', '测试总监', '项目管理总监', '文档总监', '艺术总监', '风险控制总监'];
@@ -798,7 +813,7 @@
     const intentBadge = m.intent && m.intent !== 'ACT'
       ? (m.intent === 'CONFIRM' ? `<span class="badge warn">意图 · 待确认</span>` : `<span class="badge danger">意图 · 已拦截</span>`)
       : '';
-    const tools = (m.tools && m.tools.length) ? `<details class="tools"><summary>${ic('chev', 14)} ${m.steps} 步 · ${m.tools.length} 个动作</summary>${m.tools.map((t) => `<div class="trow"><span class="tdot" style="background:${t.ph === 'running' ? 'var(--warn)' : 'var(--ok)'};${t.ph === 'running' ? 'animation:pulse 1.6s infinite' : ''}"></span><span class="mono">${esc(t.n)}</span><span class="faint" style="margin-left:auto">${t.ph === 'running' ? '执行中' : '完成'}</span></div>`).join('')}</details>` : '';
+    const tools = (m.tools && m.tools.length) ? `<details class="tools"><summary>${ic('chev', 14)} ${m.steps} 步 · ${m.tools.length} 个动作</summary>${m.tools.map((t) => toolRow(t)).join('')}</details>` : '';
     const sub = m.sub ? `<div class="subagent"><span class="badge ${m.sub.state === 'running' ? 'warn' : 'info'}">SubAgent</span><span class="mono">${esc(m.sub.name)}</span><span class="phases faint">${m.sub.state === 'running' ? '执行中 · 即用即走' : '已回收并销毁'}</span></div>` : '';
     // FR-5：单回合 token 徽标（网关没上报 usage 的回合没有该字段，不显示假 0）
     const tok = (m.tok && Number.isFinite(m.tok.p) && Number.isFinite(m.tok.c))
@@ -808,7 +823,15 @@
     const raw = m.x || m.text || '';
     let txt;
     if (m.typing) {
-      txt = '<span class="faint">思考中…</span>';
+      // BUG（全盘死挂点扫描）：typing 期间实时读 state.toolSteps[sid]（onToolStep 订阅
+      // 写入、此前零读取）。主进程每步推送都会触发 render()，用户能看到工具正在跑，
+      // 而非永远只显示「思考中…」直到整回合结束。
+      const liveSteps = (sid && Array.isArray(state.toolSteps[sid]) && state.toolSteps[sid].length)
+        ? state.toolSteps[sid]
+        : null;
+      txt = liveSteps
+        ? `<span class="faint">思考中 · 正在执行工具…</span>` + liveSteps.map((st) => toolRow(st, true)).join('')
+        : '<span class="faint">思考中…</span>';
     } else if (isU) {
       txt = esc(raw);
     } else {
@@ -960,7 +983,7 @@
 
     const iconMap = {
       '报错修复': 'wrench', '文档报告': 'fileText', '项目重构': 'code',
-      '数据分析': 'bar-chart', 'PPT 制作': 'presentation', '闲时任务': 'clock',
+      '数据分析': 'barChart', 'PPT 制作': 'presentation', '闲时任务': 'clock',
       '创建项目': 'folder', '浏览技能': 'grid', '项目分析': 'search',
     };
     const actionMap = {
@@ -1296,6 +1319,7 @@
       // 现在以插件运行时真实装载状态为准——内置插件即本地能力来源；
       // 运行时不可用时全部标为「未接入」，不伪造已连接。
       const rt = state.pluginRuntime;
+      const rtReady = !!(rt && rt.ready);
       const rtOf = (n) => (rt && Array.isArray(rt.plugins) ? rt.plugins.find((x) => x.name === n) : null);
       const mcps = [
         { name: 'filesystem', desc: '文件系统', plugin: 'brain' },
@@ -1335,8 +1359,17 @@
         }
       } else if (tabId === 'skills') {
         bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">插件（默认启用）</div>' + usedSkills.map(sk => {
-          const isOn = builtinSkills.includes(sk);
-          return '<div class="ctx-skill"><span class="sk-icon builtin">' + sk[0].toUpperCase() + '</span><span class="sk-name">' + esc(sk) + '</span><span class="sk-status ' + (isOn ? 'on' : 'idle') + '">' + (isOn ? '已启用' : '可用') + '</span></div>';
+          // BUG（全盘死挂点扫描）：旧代码 isOn = builtinSkills.includes(sk) 恒 true →
+          // 四个内置插件恒标「已启用」，无视运行时真实装载（插件可被停用/未激活）；
+          // 与同区 MCP 连接按 pluginRuntime 取值的写法自相矛盾。改按真实状态标注。
+          const rec = rtOf(sk);
+          const active = rtReady && !!rec && rec.active === true;
+          // 停用逆回滚（主进程 setPluginEnabled）会把 error 置为「已停用（逆回滚完成）」——
+          // 若见 error 就标「异常」，主动停用的插件会被误标；按前缀区分停用与真异常。
+          const broken = !!rec && !!rec.error && !/^已停用/.test(rec.error);
+          const label = !rtReady ? '未接入'
+            : (rec ? (active ? '已启用' : (broken ? '异常' : '已停用')) : '可用');
+          return '<div class="ctx-skill"><span class="sk-icon builtin">' + sk[0].toUpperCase() + '</span><span class="sk-name">' + esc(sk) + '</span><span class="sk-status ' + (active ? 'on' : 'idle') + '">' + esc(label) + '</span></div>';
         }).join('') + '</div>';
         bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接</div>'
           + (mcps.length && mcps[0].unavailable ? '<div class="faint" style="font-size:10px;padding:2px 0 6px">运行时未接入 · 以下为待接入能力，非实时连接状态</div>' : '')
@@ -1550,12 +1583,17 @@
           .map((s) => `<div class="node" data-action="settings-nav" data-id="${s.id}" style="padding:6px 8px;border-radius:7px;cursor:pointer;display:flex;align-items:center;gap:8px"><span style="color:var(--fg-dim)">${ic(s.icon, 14)}</span><span style="font-size:12.5px">${s.n}</span></div>`).join('')}`;
     },
     main() {
+      // BUG（全盘死挂点扫描）：statbar 硬编码「%APPDATA%/OrchDesk」「dsh 99f6f02」——
+      // 渲染层拿不到真实数据目录与运行时版本，宁可显示真实状态也不伪造。
+      const ddOk = state.dataDirInventory && state.dataDirInventory.ok && state.dataDirInventory.dir;
+      const ddShort = ddOk ? String(state.dataDirInventory.dir).replace(/\\/g, '/').split('/').filter(Boolean).slice(-2).join('/') : '';
+      const rtOk = state.pluginRuntime && state.pluginRuntime.ready;
       return `<div class="main-inner"><h1 class="pg">设置</h1><div class="pg-sub">模型、沙箱、授权、桌面集成等能力均以插件形式挂载，在此统一管理。</div>
         <div class="statbar">
           <div class="stat"><div class="sk">授权模式</div><div class="sv"><span class="dot" style="background:var(--ok)"></span>${({ default: '默认安全', trusted: '信任模式', paranoid: '偏执模式' })[state.authMode] || '默认安全'}</div></div>
           <div class="stat"><div class="sk">沙箱</div><div class="sv"><span class="badge ok" style="font-weight:600">Windows ACL</span></div></div>
-          <div class="stat"><div class="sk">数据目录</div><div class="sv" style="font-size:12px;font-weight:500">%APPDATA%/OrchDesk</div></div>
-          <div class="stat"><div class="sk">运行时</div><div class="sv" style="font-size:12px;font-weight:500">dsh 99f6f02</div></div>
+          <div class="stat"><div class="sk">数据目录</div><div class="sv" style="font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px" title="${esc(ddOk ? state.dataDirInventory.dir : '')}">${ddOk ? '…/' + esc(ddShort) : '本地（未扫描）'}</div></div>
+          <div class="stat"><div class="sk">运行时</div><div class="sv" style="font-size:12px;font-weight:500">${rtOk ? `插件运行时就绪 · ${state.pluginRuntime.activeCount}/${state.pluginRuntime.total}` : '插件运行时未启动'}</div></div>
         </div>
         <div class="sec-title" id="settings-section-model"><span class="ico">${ic('bot', 14)}</span>模型管理</div>
         <div class="card" id="model-mgmt-card">
@@ -2038,14 +2076,27 @@
     const t = nowTime();
     s.msgs.push({ r: 'user', t, x: text }); touch(s);
     const typingIdx = s.msgs.push({ r: 'agent', t, x: '', typing: true }) - 1;
+    // BUG（全盘死挂点扫描）：toolSteps 此前「有写入（onToolStep 订阅）无读取」=存而不显。
+    // 新回合开始时清空本会话轨迹；回合中 renderMsg 的 typing 分支实时读它；回合结束把
+    // runAgentTurn 返回的 tools/steps 静态写入该条 agent 消息（renderMsg 的「N 步 · M 个
+    // 动作」展示形态随即生效）。
+    state.toolSteps[s.id] = [];
     render();
     try {
       const res = await bridge.runAgentTurn(s.id, text, { models: state.selectedModels, thinkLevel: state.thinkLevel });
-      s.msgs[typingIdx] = { r: 'agent', t: nowTime(), x: res.text, intent: res.intent || 'ACT', feedback: 1 };
+      const tsteps = (res && Array.isArray(res.tools) && res.tools.length) ? res.tools : undefined;
+      s.msgs[typingIdx] = {
+        r: 'agent', t: nowTime(), x: res.text, intent: res.intent || 'ACT', feedback: 1,
+        tools: tsteps,
+        steps: tsteps ? tsteps.length : (Number(res && res.steps) || undefined),
+      };
       touch(s); persist(); render();
+      // typing 消息已被静态消息替换（tools 已随消息落库展示），live 轨迹不再需要
+      delete state.toolSteps[s.id];
       toast(`已入会话日志 · ${state.selectedModels.length} 模型 · 思维 ${thinkLabel(state.thinkLevel)}`, 'ok');
     } catch (err) {
       s.msgs[typingIdx] = { r: 'agent', t: nowTime(), x: '（模型回合失败：' + (err && err.message ? err.message : err) + '）' };
+      delete state.toolSteps[s.id];
       render();
       toast('模型回合失败', 'danger');
     }
@@ -4131,20 +4182,24 @@
       case 'team-compose': {
         const tid = el.dataset.tid;
         const tn = el.dataset.tn || '专家团';
+        // BUG（全盘死挂点扫描）：原代码 askInput({...}).then(...)——askInput 不返回
+        // Promise（onOk 回调式），对 undefined 调 .then 必抛 TypeError，专家团「派发
+        // 任务」按钮一点就崩，composeTeam 从不被调用（UI 显示成功实为永不可达）。
         askInput({
           title: `派发任务 · ${tn}`,
           label: 'CEO（主会话）将拆解任务并派给 Director→Worker，经真实模型执行，耗时可能较长。',
           placeholder: '描述要派发的任务…',
-        }).then((task) => {
-          task = String(task || '').trim();
-          if (!task) return;
-          toast('编排中：CEO 拆解 → Director → Worker…', 'info');
-          bridge.composeTeam(tid, task).then((r) => {
-            if (r && r.error) { toast(r.error, 'err'); return; }
-            state.delegationLast = r;
-            render();
-            toast(`编排完成 · ${r.rootId || ''}`, 'ok');
-          }).catch((e) => toast('编排失败: ' + ((e && e.message) || e), 'err'));
+          onOk: (task) => {
+            task = String(task || '').trim();
+            if (!task) return;
+            toast('编排中：CEO 拆解 → Director → Worker…', 'info');
+            bridge.composeTeam(tid, task).then((r) => {
+              if (r && r.error) { toast(r.error, 'err'); return; }
+              state.delegationLast = r;
+              render();
+              toast(`编排完成 · ${r.rootId || ''}`, 'ok');
+            }).catch((e) => toast('编排失败: ' + ((e && e.message) || e), 'err'));
+          },
         });
         break;
       }
@@ -4343,6 +4398,14 @@
     // 订阅工具执行步骤（此前主进程发 orchdesk:tool-step 但无人订阅 → 步骤条永远为空）
     try {
       if (typeof bridge.onToolStep === 'function') {
+        // 渲染节流：文本兜底模式可一次解析多个工具连发 running/done，若每事件都全量
+        // render()，毫秒窗口内会触发 2N 次整页重建。合并到 ≤150ms 一次——工具步骤通常
+        // 秒级间隔不受影响，连发窗口期 typing 实时行仍平滑刷新。
+        let toolRenderTimer = null;
+        const scheduleRender = () => {
+          if (toolRenderTimer) return;
+          toolRenderTimer = setTimeout(() => { toolRenderTimer = null; render(); }, 150);
+        };
         bridge.onToolStep((step) => {
           const s = state.sessions[step.sessionId];
           if (!s || !step) return;
@@ -4355,7 +4418,7 @@
             if (rec) { rec.ph = step.ph; rec.result = step.result || ''; }
             else list.push({ n: step.name, ph: step.ph, result: step.result || '' });
           }
-          if (state.sel === step.sessionId) render();
+          if (state.sel === step.sessionId) scheduleRender();
         });
       }
     } catch (err) { console.warn('[init] 工具步骤订阅失败:', err); }
