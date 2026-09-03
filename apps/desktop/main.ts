@@ -174,8 +174,9 @@ import {
 //   orchdesk:run-agent-turn(id,text,opt) 模型回合 seam：真实 dsh ctx / Ollama 在此接入
 //
 // 设计：渲染进程持有 UI 会话状态；主进程负责「持久化」与「模型运行时」两层。
-// 真实 dsh runtime 是 P1-5 的设计 seam——当前 run-agent-turn 为本地占位，配置
-// API Key / Ollama 后将调用 dsh 的 ctx.agents.followup（见 runAgentTurn 注释）。
+// run-agent-turn 走主进程自实现的 OpenAI 兼容 HTTP 回合循环（runAgentTurn，
+// 工具经 executeTool 双模式：原生 function calling / 文本兜底），未走 dsh 的
+// ctx.agents.followup seam（后者留作未来切 dsh 原生于代理循环时的入口）。
 // ============================================================================
 
 let mainWindow: BrowserWindow | null = null;

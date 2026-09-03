@@ -3590,8 +3590,6 @@
         } catch { toast('卸载失败（运行时未接入）', 'warn'); }
         break;
       }
-      case 'sim-subagent': { const sc = $('#msgScroll'); const div = document.createElement('div'); div.className = 'msg agent'; div.innerHTML = `<div class="avatar" style="background:var(--ceo)">AI</div><div class="body"><div class="meta"><b>OrchDesk</b><span>刚刚</span></div><div>已派发 SubAgent 处理该任务。</div><div class="subagent"><span class="badge warn">SubAgent</span><span class="mono">W-108 临时任务</span><span class="faint">执行中…</span></div></div>`; sc.appendChild(div); sc.scrollTop = sc.scrollHeight;
-        setTimeout(() => { div.querySelector('.subagent').innerHTML = `<span class="badge info">SubAgent</span><span class="mono">W-108 临时任务</span><span class="faint">已回收并销毁（即用即走）</span>`; toast('脑手解耦：SubAgent 成果已回收，上下文已销毁', 'ok'); }, 2200); break; }
       case 'trace': {
         // key 必须与 renderMsg 的读取口径一致（sid|m.t）；此前硬编码 's1' 导致反馈永远显示不出来。
         const sid = state.sel || '';
