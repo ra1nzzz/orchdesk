@@ -72,10 +72,12 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
 - 打包踩坑：见上文「BUG-016 变体 · asar 句柄泄漏」。
 - **尚未实机冒烟**：GUI / PTY / CDP 类验收按 [实机冒烟清单](../40-质量/smoke-checklist.md) 在桌面会话执行后回勾。
 
-## v0.13.1（pending）
+## v0.13.1（2026-09-03）
 
-- 实机冒烟首批反馈修复：**BUG-022** —— 项目菜单「打开项目目录」恒开 C 盘数据目录（项目对象 `path` 有写入方、无读取方的死挂点变体；详见 [60-BUG](../60-BUG/index.md)）。修复 + e2e 6 条新断言（152→158），verify **24 套件 820 项全绿**。
-- 发版流程照旧：`changelog.mjs --version 0.13.1 --write` → bump → release commit → 打包 → tag（tag 必须在打包之后打）。
+- **已打包**：release commit `09784ba`，tag `v0.13.1`（打包之后打，遵守 `check-version.cjs` 顺序铁律）；GitHub Release 待推。
+- 修复：**BUG-022** —— 项目菜单「打开项目目录」恒开 C 盘数据目录（项目对象 `path` 有写入方、无读取方的死挂点变体；详见 [60-BUG](../60-BUG/index.md)）。e2e 6 条新断言（152→158），verify **24 套件 820 项全绿**。
+- 资产：`OrchDesk Setup 0.13.1.exe`（nsis，88,082,407 B）+ `OrchDesk 0.13.1.exe`（portable，87,737,276 B）+ blockmap + `latest.yml`；Setup sha512 `ItSWEaKXFiIAOjXzc0o8pz13YacF1/K6ZqosdXKJA6KetafYHOIS33pJ2Q2uAOSRDYUtWvzV58PN/vAm34pvVg==`（与 `latest.yml` 一致，已核对）。成功输出目录 `release-v0131-r1`（沿用「全新目录」规避 asar 句柄泄漏）。
+- 发版流程照旧：`changelog.mjs --version 0.13.1 --write` → bump → release commit → `tsc` + `vendor-dsh` → 打包 → tag。
 
 ## 版本策略
 
