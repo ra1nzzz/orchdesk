@@ -9,11 +9,11 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.12.0`（tag `v0.12.0` 已推送；Release 已发布） | SemVer，pre-1.0 阶段；`0.11.0` 为上一 Release |
-| **最新 Commit** | `2708489` | fix(desktop): yt-dev-review 三方审阅交叉修复（终端/文件/编辑） |
+| **当前版本** | `0.13.0`（tag `v0.13.0` 已打；Release 待推） | SemVer，pre-1.0 阶段；`0.12.0` 为上一 Release |
+| **最新 Commit** | `3186b21` | chore: release v0.13.0 |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
-| **最新 Release** | [v0.12.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.12.0) | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正（`gh release edit v0.12.0 --notes-file … --draft=false`）——CI 不会自动发布 |
+| **最新 Release** | [v0.12.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.12.0)（`v0.13.0` 已本地打包、待推） | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正（`gh release edit v0.12.0 --notes-file … --draft=false`）——CI 不会自动发布。v0.13.0 产物已出（Setup 88,081,451 B / portable 87,736,328 B，sha512 与 `latest.yml` 一致，asar 195 文件校验通过），**待桌面会话实机冒烟后再推 Release** |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
 | **验证套件** | 814/814 PASS | `npm run verify`（plugins 88 / orchestration 45 / trace-upload 36 / agent-runtime 38 / agent-loop 14 / model-loop 40 / dsh-runtime 31 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / browser-tools 43 / terminal-pty 29 / file-panel 20 / **file-edit 20** / arch-guard 15 / e2e 152）—— 24 套件；另设不进链的真机冒烟 `pnpm run smoke:browser`（11/11，需真 GPU/渲染进程） |
@@ -277,5 +277,7 @@ git push origin main --follow-tags  # 推送 + 触发 CI
 
 > **第十七批（yt-dev-review 三方并行审阅与交叉修复，2026-09-02）**：对 P2-10 终端 PTY、P2-11 文件 Tab、P3 编辑/diff 三块交付跑质量 / 效率 / 可复用三路并行审阅（子代理只读分析，修复回主会话）。**交叉共识 5 项**（≥2 方同时指出）：扩展名取全路径被带点目录击穿、洪峰单条 256KB 未真正封顶、`replayBuf` 泄漏、常量与工具重复实现、`describeTerminalState` 零调用方死挂点。**单点但复核确认为真**：`ptyAvailable` 在 `ptyCache === undefined`（未探测）时返回 true 与 `via='pipe'` 自相矛盾、shiki 对 2MB 文件高亮实测阻塞 10.5s、`readSync` 单次读的短读会产出「内容比磁盘短却声称完整」、文件面板用 `typeof bridge.fileTree !== 'function'` 判「未接入」对 stub 恒不命中（把「未接入」显示成「为空」）。修复清单见 ADR-0012 / ADR-0013 的「审阅后加固」章节，要点：新建 `common-tools.ts` 收敛 `clampInt` / `isAbsoluteLike` / `extOfName`（原 4 份 clamp + 4 份绝对路径正则）并登记 arch-guard；`encodingSuspicious` 改 `TextDecoder(fatal)` 严格校验（原「含 U+FFFD 即非 UTF-8」会把合法文本误判而禁编辑）；EOL 改多数派判定并补 CR-only 分支（混合行尾不被少数派全量改写）；shiki 加 200KB/3000 行门槛，超限回落 `<pre>` 并显式说明原因。验证：terminal-pty 26→29、file-panel 15→20、file-edit 19→20，全量 verify **805→814**（24 套件）全绿。
 
-*最后更新：2026-09-02（第十七批：yt-dev-review 审阅交叉修复｜verify 805→814，24 套件；common-tools 收敛、三态 ptyAvailable、EOL 多数派、shiki 门槛；真机 GUI 冒烟待用户桌面会话）*
+> **第十八批（OpenWorker 对照剖析 + v0.13.0 打包 + 实机冒烟清单，2026-09-03）**：① 拉取 `andrewyng/openworker`（@fb1bfc6，Tauri + Python 本地优先 coworker，623 文件）到临时目录对照，**代码不入库**（遵守「外部资料只引用不回拷」）。三路子代理分别深挖治理安全层 / Agent 内核能力层 / 前端工程化，产出 [openworker-对照-2026-09-03.md](./openworker-对照-2026-09-03.md)：A 档可借鉴 8 条（审批项幂等落盘、`human_only` 决策位、override 只能收紧、风险改工具声明属性、审批 provenance 三落点、流文本三态闸门、**verify 环境强制隔离**等），B 档 7 条进中期，明确不抄 5 条（reviewer 第二模型裁决 + 断路器 / Inbox 镜像 / 350 行 shell 只读分类器 / React+Vite 构建链 / 68 个 e2e spec 规模）。**最大欠账不是代码是勾选**：PLAN 107 项验收 **23 已勾 / 84 未勾**，而 BUG-W02 已于 09-01 收窄（用户桌面可实跑、browser smoke 11/11），故 P0–P4 的 83 项运行期验收是**待执行**而非被环境阻断 —— 文档里「受 BUG-W02 门控」的旧口径本身已过期。② 新建 [smoke-checklist.md](../40-质量/smoke-checklist.md)（id `orch-qag-002`）作桌面会话实跑清单，A–F 六组（启动 / 终端 PTY / 文件编辑 diff / 浏览器工具 / 会话编排 / 安全底座），附三条硬判定口径：**降级不算通过**（PTY 显示「管道」、浏览器 `via` 走兜底都要记 FAIL）、未接入 ≠ 为空、不为全绿放宽预期。③ v0.13.0 打包：verify **814/814 全绿** + `tsc` EXIT=0 → changelog → bump `0.13.0` → release commit `3186b21` → 打包 → tag `v0.13.0`（**tag 必须在打包之后打**：`check-version.cjs` 严格模式下 `version == 最新 tag` 会阻断 dist）。产物 Setup 88,081,451 B / portable 87,736,328 B，sha512 与 `latest.yml` 一致，asar **195 文件**校验通过，`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node` 就位（node-pty 1.2.0 走 prebuilds，别按 `build/Release` 找）。④ 顺手修 4 处文档漂移：current-state / roadmap / quality-gates 的 805→814，以及 quality-gates §6「canonical 计数方：本节」与「计数唯一归 CHECKPOINT」的责任冲突。打包踩坑（asar 句柄泄漏）已写进 [release.md](../50-发布/release.md)。
+
+*最后更新：2026-09-03（第十八批：OpenWorker 对照剖析｜v0.13.0 打包 + tag｜实机冒烟清单落地；verify 814 项 / 24 套件全绿；EBUSY 卡点定位为「electron-builder 报错后进程不退出」，换输出目录首次即通过）*
 *上游文档：[current-state.md](./current-state.md) | [VERSION-GOVERNANCE.md](./VERSION-GOVERNANCE.md) | [PRD差距补齐复盘](../99-归档/PRD差距补齐-2026-08-29.md) | 变更日志 `apps/desktop/CHANGELOG.md`（仓库根，docs 外）*

@@ -18,7 +18,7 @@ updated: 2026-09-02
 | 10-架构 | 系统边界与图示 | [总体架构](10-架构/architecture.md) |
 | 20-需求 | 产品合同 | [PRD](20-需求/PRD.md) · [UI/UX 规范](20-需求/ui-ux.md) |
 | 30-开发 | 协作与开发流程 | [分解 PLAN](30-开发/PLAN.md) · [工作流/SOP](30-开发/workflow.md) |
-| 40-质量 | 不变量与测试门禁 | [质量门禁](40-质量/quality-gates.md) |
+| 40-质量 | 不变量与测试门禁、实机验收 | [质量门禁](40-质量/quality-gates.md) · [实机冒烟清单](40-质量/smoke-checklist.md) |
 | 50-发布 | 发布操作 | [发布](50-发布/release.md) |
 | 60-BUG | 活跃 BUG 与缺口索引 | [BUG 索引](60-BUG/index.md) |
 | 70-决策 | ADR 与冲突裁决 | [ADR 列表](70-决策/) · [冲突裁决记录](70-决策/conflicts.md) |

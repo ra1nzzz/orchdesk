@@ -39,6 +39,11 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
 - 图标：`build/icon.ico`（16–256 多尺寸，ImageGen 生成 PNG 后 PIL 转换），electron-builder 自动使用 buildResources。
 - 签名：electron-builder 检测 `CSC_LINK`（证书路径）+ `CSC_KEY_PASSWORD` 环境变量自动签名；无证书时跳过（SmartScreen 提示未知发布者属正常）。
 - **BUG-016 EBUSY**：打包前必须结束运行中的 `OrchDesk.exe`，否则删除 `release/win-unpacked/` 时锁目录。已内置零依赖脚本 `kill-running.cjs`（`taskkill /F /IM ... /T` + 等待 1.5s 释放句柄），只依据退出码判定（taskkill 中文输出为 GBK，解析会乱码）。`dist` / `dist:win` / `dist:portable` 三个 script 已串联。
+- **BUG-016 变体 · asar 句柄泄漏（2026-09-03 实测）**：`kill-running.cjs` 报「无运行中的 OrchDesk 进程」，仍 `EBUSY: unlink ...\resources\app.asar`。根因是**上一轮 electron-builder 报错后进程不退出**（`npx electron-builder` 与 `cli.js` 两层 node 都挂着），持续持有刚写入的 asar 句柄 —— 此后每次重试都被同一个句柄拦住。
+  - **排查三步**：① `Get-CimInstance Win32_Process` 按**命令行**（不是进程名）找 `electron-builder`，`Stop-Process -Force` 清掉；② 用 `fs.unlinkSync` 直接试删确认是否真锁；③ 仍锁则**换全新输出目录**：`-c.directories.output=release-v0130-r1`。
+  - **关键结论**：**不要在锁住的目录上重试** —— 同目录重试 5 次全失败，换一次目录首次即通过。
+  - **别误判成沙箱拦截**：在同一目录里新建文件再删除，若成功说明目录无保护、是**特定文件**被锁；与文件后缀、大小、目录位置均无关（已逐一对照验证）。
+  - **下载阶段另需重试循环**：直连 GitHub 取 nsis / winCodeSign 资源约五成概率 `Client network socket disconnected ... before secure TLS`，用「最多 5 次 + 间隔 6s」循环兜住。
 
 ## 发布记录（2026-08-24）
 
@@ -55,6 +60,17 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
 - 验证：`npm run verify`（`agent-runtime-verify` 35 + `agent-loop-verify` 14 + `e2e-fix-verify` 29 = 78 项全绿）+ `tsc -p tsconfig.json` EXIT=0
 - 打包：`cd apps/desktop && npm run dist:win`（自动先 `node kill-running.cjs` 结束 OrchDesk.exe，再 `electron-builder --win --publish never`）
 - 本轮再次复现「代理对 84MB 大文件不稳」，**清空代理环境变量后直连**上传成功
+
+## v0.13.0（2026-09-03）
+
+- **已打包**：release commit `3186b21`，tag `v0.13.0`；GitHub Release 待推（产物 88MB，直连上传需重试循环）。
+- 资产：`OrchDesk Setup 0.13.0.exe`（nsis，88,081,451 B）+ `OrchDesk 0.13.0.exe`（portable，87,736,328 B）+ `OrchDesk Setup 0.13.0.exe.blockmap` + `latest.yml`。
+- Setup sha512：`OHBIBXMkMLufCVOjfrmocL7RM5Qg6ehoDziyPK/0PLjS+hauXxap9SlETqpFn26HwVGYl9VNKkKsOn1pZsk9bw==`（与 `latest.yml` 一致，已核对）。
+- 内容：终端 PTY Tab（ADR-0012）/ 文件 Tab 浏览·编辑·diff（ADR-0013）/ 浏览器工具 8 个（ADR-0011）/ TS 直测 loader + 架构守护（ADR-0010）/ 三方审阅交叉修复 14 项。
+- 验证：`npm run verify` **24 套件 814 项全绿**；`tsc -p tsconfig.json` EXIT=0；asar 内容校验 **195 文件**，`dist/main.js`、`dist/preload.js`、`renderer/app.js`、`renderer/file-edit.js`、`renderer/vendor/shiki-bundle.js`、`renderer/vendor/xterm/*` 均在包内。
+- **PTY 关键校验**：`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node`（291,328 B）已解包就位。node-pty **1.2.0 走 prebuilds 机制**（不是 `build/Release`），`asarUnpack` 覆盖 `vendor/node-pty/**` 即可，无需逐文件配置 —— 校验时别按旧路径 `build/Release/*.node` 去找（会误判缺失）。
+- 打包踩坑：见上文「BUG-016 变体 · asar 句柄泄漏」。
+- **尚未实机冒烟**：GUI / PTY / CDP 类验收按 [实机冒烟清单](../40-质量/smoke-checklist.md) 在桌面会话执行后回勾。
 
 ## 版本策略
 

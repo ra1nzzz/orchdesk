@@ -156,6 +156,7 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 
 ## 下一步
 
+- **[2026-09-03] v0.13.0 已打包，卡在实跑回勾**：产物已出（Setup 88,081,451 B / portable 87,736,328 B，asar 195 文件校验通过，tag `v0.13.0` 已打），verify 24 套件 814 项全绿。**下一步是人在桌面会话跑 [实机冒烟清单](../40-质量/smoke-checklist.md)**（A 启动 / B 终端 PTY / C 文件编辑 diff / D 浏览器 / E 会话编排 / F 安全底座），勾完回勾 [PLAN](../30-开发/PLAN.md) 再推 Release。清单三条硬口径：降级不算通过、未接入 ≠ 为空、不为全绿放宽预期。
 - **[2026-08-29 补齐] dsh/Cordis 运行时已真实接入**：此前 [差距盘点](../99-归档/PRD差距盘点-2026-08-29.md) 指出 2515 行插件是「写完了没接线」的死代码（单点根因 = 运行时缺席）。现 `apps/desktop/dsh-runtime.ts` 在主进程 `new Context()` 装载全部 9 插件（9/9 ACTIVE，`getService()` 可取）、`main.ts` 用 `bootRuntime()` 替换 `initAuthzBridge({get:()=>undefined})`、11 个 `dshBridgeStub` 改为真实 `ctx.get(...)`、7 插件 `provide(name,value,true)` 第三参误传修复；凭据升级 AES-256-GCM（`credentials.ts`）、沙箱子进程隔离、6 处渲染层缺陷修复；插件测试 2/9 → 9/9（`scripts/verify-plugins.mjs`），验证套件扩至 158 项全绿。**PRD 完成度从 ≈ 30% 升至 ≈ 75%**。完整复盘见 [归档/PRD差距补齐-2026-08-29](../99-归档/PRD差距补齐-2026-08-29.md)。三笔提交（`e820e33`/`2d988c5`/`91ae26b`）已落 `main`，未打 tag / 未发布（预期 v0.4.0）。
 
 - **P1–P6 全部代码与配置已就绪**：六阶段（底座/桌面壳/内置插件/安全底座/智能层/补偿自进化/生态发布）的插件、桥接、渲染 UI、打包配置均落地并通过 tsc 编译（EXIT=0）+ app.js 语法检查 + 插件真实逻辑 node 直驱验证（verify-p5 23/23，现扩至 verify-plugins 9/9）+ 知识库审计 0 issues。**打包已产出**：electron-builder 成功生成 nsis Setup（`release/OrchDesk-Setup-0.3.1.exe`，84MB）+ portable（`release/OrchDesk-0.3.1.exe`）+ `latest.yml` + `win-unpacked/`（asar 结构校验完整）。剩余动作是**运行期验证**（与 P1 同源门控）：① 本 agent 环境 Electron 阻断（BUG-W02 open：binding 未链接 + `ELECTRON_RUN_AS_NODE=1`），GUI 实跑须在**正常 Windows 桌面**直接双击产物 exe 或执行 `pnpm --filter @orchdesk/desktop start`；② 真实模型闭环需在 `main.ts:runAgentTurn` 接入 `dsh ctx.agents.followup` 或本地 Ollama（配置 API Key / `ORCHDESK_MODEL_PROVIDER`）；③ 观雅集真实列表/安装/发布需用户配置 TOKEN + 网络；④ OrchClaw Hub 端到端联调需可达远程 Hub；⑤ 正式发布分发需补 `publish`/`repository` 真实仓库信息后走 GitHub Releases。
@@ -222,4 +223,15 @@ P5 收口后，按 PLAN 路线图启动 P6（生态与发布）。收敛发现�
 
 **验证规模**：`npm run verify` 11 套件 313 项（BUG-018 批次）→ 24 套件 805 项（P3 文件编辑批次）→ **24 套件 814 项**（第十七批三方审阅交叉修复后，2026-09-02；计数以 [CHECKPOINT](CHECKPOINT.md) 为准）。提交链：`81d804e`/`d0ab400`（P1）→ `bc07239`/`3661ef9`（P2）→ feat 文件编辑/`9444d61`（P3 文档）。需求侧落点为 [PRD FR-14](../20-需求/PRD.md)；分层与降级口径见 [架构 §10](../10-架构/architecture.md)。
 
-**遗留**：终端/文件面板真机 GUI 冒烟待用户桌面会话（BUG-W02 门控口径不变）；CodeMirror merge 级 diff 已列路线图中期。
+### v0.13.0 打包与实跑（2026-09-03）
+
+| 项 | 事实 |
+|---|---|
+| 版本 | `0.13.0`，release commit `3186b21`，tag `v0.13.0` 已打；**Release 待推**（待实机冒烟后转正） |
+| 产物 | `OrchDesk Setup 0.13.0.exe`（nsis，88,081,451 B）+ `OrchDesk 0.13.0.exe`（portable，87,736,328 B）+ blockmap + `latest.yml` |
+| 校验 | verify **24 套件 814 项全绿**；`tsc` EXIT=0；asar **195 文件**齐全；`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node` 就位 |
+| 打包卡点 | EBUSY（asar 句柄泄漏）—— 根因是 **electron-builder 报错后进程不退出**、持续持有刚写入的 asar 句柄；**换全新输出目录一次通过**。详见 [release.md](../50-发布/release.md) |
+
+**遗留**：终端 / 文件 / 浏览器三类新增能力的真机 GUI 冒烟待用户桌面会话执行。
+
+> **口径修正（重要，2026-09-03）**：BUG-W02 已于 2026-09-01 **收窄** —— 仅剩「本 agent 宿主无显示器 / 无用户会话」这一条限制，Electron 本体在用户桌面可正常运行（browser smoke 11/11 已由用户在桌面跑通）。因此 P0–P4 的 83 项运行期验收**不是被环境阻断，是待执行**；本文档与其他文档中残留的「BUG-W02 open / 受 BUG-W02 门控」为过期口径，以 [60-BUG](../60-BUG/index.md) 为准。执行清单见 [实机冒烟清单](../40-质量/smoke-checklist.md)，勾完同步回勾 [PLAN](../30-开发/PLAN.md)。CodeMirror merge 级 diff 已列路线图中期。
