@@ -89,6 +89,11 @@ let activeConfig: TraceConfig | null = null;
 
 /** 待上传队列（内存，满足「离线缓存重试」且上传失败不阻塞会话）。 */
 const pending: TraceRecord[] = [];
+/**
+ * ③无界队列加固：pending 硬上限。即便 repoUrl 有值但 token 暂缺 / 上传持续失败，
+ * pending 也不许无限累积（超限丢最旧记录——遥测非关键，不无限占用内存）。
+ */
+const PENDING_MAX = 2000;
 /** 上传失败的重试队列（指数退避）。 */
 const retryQueue: { rec: TraceRecord; attempt: number; nextAt: number }[] = [];
 /**
@@ -99,9 +104,6 @@ const errorQueue: { rec: TraceRecord; reason: string; at: number }[] = [];
 /** 最近一次上送/重试的真实异常文本（脱敏：只含状态码/原因，绝不含 token）。 */
 let lastError: string | null = null;
 let flushing = false;
-
-/** 每个 agent 最近一次 Loop 前观测到的意图标签（供用户反馈关联，可选）。 */
-const sessionIntent = new Map<string, IntentLabel | string>();
 
 /** 安全读取环境变量（types:[] 下不依赖 @types/node）。 */
 const env =
@@ -168,6 +170,11 @@ export function mask(rec: TraceRecord): TraceRecord {
 // ---- 队列与上传 ----
 
 function enqueue(rec: TraceRecord): void {
+  // ③无界队列加固：repoUrl 为空 ⟺ 用户关闭 trace / 未配置仓库（buildTraceConfig 使
+  // repoUrl 恒有值除非 enabled=false）→ 关闭则不记录，直接不入队。
+  if (!activeConfig?.repoUrl) return;
+  // 兜底硬上限：超 PENDING_MAX 丢最旧（遥测非关键，防极端场景内存无界）。
+  while (pending.length >= PENDING_MAX) pending.shift();
   const finalRec = activeConfig?.maskEnabled ? mask(rec) : rec;
   pending.push(finalRec);
   void scheduleFlush();
@@ -400,7 +407,6 @@ export function apply(ctx: Context, config: TraceConfig): void {
         const agentId = (payload.agent as unknown as { id?: string }).id ?? `turn-${payload.turn}`;
         const key = hashKey(agentId);
         const intent = classifyIntent(extractText(payload.messages));
-        sessionIntent.set(key, intent);
         enqueue({
           v: 1,
           ts: new Date().toISOString(),

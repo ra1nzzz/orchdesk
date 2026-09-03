@@ -89,7 +89,14 @@ async function boot() {
   for (const n of PLUGIN_NAMES) {
     const mod = await import(pathToFileURL(require.resolve(`../packages/plugin/${n}/lib/index.js`)).href);
     const plugin = normalizeInject(mod);
-    const config = typeof plugin.Config === 'function' ? plugin.Config({}) : undefined;
+    let config = typeof plugin.Config === 'function' ? plugin.Config({}) : undefined;
+    // ③无界队列加固后，trace 的 repoUrl 空 ⟺ 关闭则不记录（不入队）。为保留
+    // 「ctx.trace.recordFeedback 真入队」这条死挂点接线验证，此处给 trace 注入一个
+    // 伪仓库（与生产 buildTraceConfig 在 enabled 时注入 repoUrl 的口径一致），
+    // 否则验证的是「关闭时不记录」而非「服务真接通队列」。
+    if (n === 'trace' && config && typeof config === 'object') {
+      config = plugin.Config({ ...config, repoUrl: 'https://github.com/verify/plugs' });
+    }
     fibers[n] = ctx.plugin(plugin, config);
     await tick();
   }

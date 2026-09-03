@@ -23,10 +23,13 @@ export const inject = ['agents'];
 export interface MultiConfig {
   /** 预置专家团名称（用户在设置页可增删）。 */
   presets: string[];
+  /** ③无界队列加固：委派树节点硬上限——超出后整棵 evict 最旧的终态 root 子树。 */
+  maxTreeNodes: number;
 }
 
 export const Config: z<MultiConfig> = z.object({
   presets: z.array(z.string()).default(['全栈开发团', '写作团']),
+  maxTreeNodes: z.number().default(3_000),
 });
 
 export interface Expert {
@@ -99,6 +102,36 @@ export function apply(ctx: Context, _config: MultiConfig): void {
 
   function getCatalog(): OrchestrationCatalog {
     return { experts: EXPERTS, teams: TEAMS };
+  }
+
+  /**
+   * ③无界队列加固：委派树节点硬上限。Map 迭代序 = 插入序 = root 批次序，
+   * 故「首个 ceo 节点」即最旧的 root。整棵 evict 一个终态 root 子树
+   * （root + 全部子孙），保留进行中/未完成的编排，避免 UI 展示被撕裂。
+   */
+  function trimTree(): void {
+    while (tree.size > _config.maxTreeNodes) {
+      // 找最旧的、整棵均终态（done/failed）的 root
+      const roots = [...tree.values()].filter((n) => n.layer === 'ceo');
+      let evicted = false;
+      for (const root of roots) {
+        const subtree = getDelegationTree(root.id);
+        const terminal = subtree.every((n) => n.status === 'done' || n.status === 'failed');
+        if (terminal) {
+          for (const n of subtree) tree.delete(n.id);
+          evicted = true;
+          break;
+        }
+      }
+      // 全是进行中（不可能因并发 root 未收尾）→ 退化为丢最旧单个终态节点兜底，
+      // 保证死循环不会发生；常态下 roots 必含终态者，此分支仅在极端竞态出现。
+      if (!evicted) {
+        for (const n of [...tree.values()]) {
+          if (n.status === 'done' || n.status === 'failed') { tree.delete(n.id); evicted = true; break; }
+        }
+      }
+      if (!evicted) break; // 全在进行中：不可 evict，停止（数量由进行中编排个数自然约束）
+    }
   }
 
   function getDelegationTree(rootId?: string): DelegationNode[] {
@@ -231,6 +264,8 @@ export function apply(ctx: Context, _config: MultiConfig): void {
       for (const { h } of handles) {
         try { await h.dispose(); } catch { /* 已处置 */ }
       }
+      // ③环形回收：node 状态已定（终态/failed），按需整棵 evict 最旧终态 root。
+      trimTree();
     }
   }
 

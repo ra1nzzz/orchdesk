@@ -77,6 +77,8 @@ export interface MemoryConfig {
   chunkChars: number;
   /** 每域最大条目数（环形回收）。 */
   maxEntriesPerDomain: number;
+  /** ③无界队列加固：转储记录（DumpRecord）环形上限——只保留最近 maxDumps 条。 */
+  maxDumps: number;
   /** host 持久化根目录（插件产出序列化快照，host 落盘为四独立文件）。 */
   dataRoot: string;
 }
@@ -88,6 +90,7 @@ export const Config: z<MemoryConfig> = z.object({
   keepRecent: z.number().default(6),
   chunkChars: z.number().default(1_200),
   maxEntriesPerDomain: z.number().default(200),
+  maxDumps: z.number().default(1_000),
   dataRoot: z.string().default('.orchdesk/memory'),
 });
 
@@ -304,6 +307,12 @@ export function apply(ctx: Context, config: MemoryConfig): void {
     }
   };
 
+  /** ③无界队列加固：dumps 环形回收（与 prune 对称），只保留最近 maxDumps 条。 */
+  const trimDumps = (): void => {
+    if (dumps.length <= config.maxDumps) return;
+    dumps.splice(0, dumps.length - config.maxDumps);
+  };
+
   function vectorizeCorpus(): Record<string, number> {
     const docs: string[][] = [];
     for (const d of DOMAINS) for (const e of stores[d].values()) docs.push(tokenize(e.text));
@@ -389,6 +398,7 @@ export function apply(ctx: Context, config: MemoryConfig): void {
       createdAt: Date.now(),
     };
     dumps.push(rec);
+    trimDumps(); // ③环形上限：dumps 不许无界累积
     lastDumpAt = rec.createdAt;
     return rec;
   }

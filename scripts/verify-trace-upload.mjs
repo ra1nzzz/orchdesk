@@ -573,19 +573,23 @@ function allRawBodies() {
   // 队列保留 / 合并上送 / 非 github 端点 / 定时器兜底
   // =========================================================================
   current = '队列兜底';
-  await check('无 repoUrl：flush 后记录仍在队列（不静默丢单）且给出未上送原因', async () => {
+  await check('无 repoUrl（trace 关闭/未配置）：记录不入队（关闭则不记录）', async () => {
     const rt = await bootTrace({
       repoUrl: '', maskEnabled: true, cacheDir: CACHE_DIR, token: FAKE_TOKEN, batchSize: 5,
     });
     try {
       resetReceived();
       const pendingBefore = rt.mod.queueSize().pending;
-      rt.mod.recordFeedback('read', 'positive', 'no-repo-keep');
+      rt.mod.recordFeedback('read', 'positive', 'no-repo-drop');
+      await settle();
+      // ③加固：repoUrl 空 = 用户关闭 trace → 关闭则不记录，不入队也不占内存
+      assert(rt.mod.queueSize().pending === pendingBefore,
+        `repoUrl 空时记录不应入队（${pendingBefore} → ${rt.mod.queueSize().pending}）`);
+      // 无滞留记录 → flush 无事可做（skippedReason 为 null 属正常，非「配置缺失滞留」）
       const r = await rt.mod.flush();
-      assert(rt.mod.queueSize().pending === pendingBefore + 1,
-        `记录应保留在队列（${pendingBefore} → ${rt.mod.queueSize().pending}）`);
       assert(received.length === 0, `不应发起请求，实际 ${received.length}`);
-      assert(r.skippedReason === 'repo-url-not-configured', '未上送原因不符：' + r.skippedReason);
+      assert(r.skippedReason === null,
+        'repoUrl 空且无滞留时 flush 应无事可做（skippedReason=null），实际 ' + r.skippedReason);
     } finally {
       await Promise.resolve(rt.fiber.dispose());
       await settle();
@@ -614,7 +618,8 @@ function allRawBodies() {
     });
     try {
       setStatus(201);
-      // 先清掉前两个用例滞留的记录（顺带验证滞留记录在配置齐全后最终落网）
+      // 清掉上游「无 token」用例滞留的记录（顺带验证滞留记录在配置齐全后最终落网；
+      // 「无 repoUrl」用例因③加固关闭则不记录，已不入队，无滞留）
       await rt.mod.flush();
       await waitFor(() => rt.mod.queueSize().pending === 0, '滞留记录清空');
       resetReceived();
@@ -671,6 +676,43 @@ function allRawBodies() {
       await waitFor(() => received.length === 1, '定时器兜底上送');
       assert(rt.mod.queueSize().pending === 0, '兜底上送后队列应清空');
     } finally {
+      await Promise.resolve(rt.fiber.dispose());
+      await settle();
+    }
+  });
+
+  await check('③PENDING_MAX 硬上限：极端滞留下 pending 不无界增长（丢最旧）', async () => {
+    // repoUrl 有值但 token 缺（dev 常驻滞留场景）：recordFeedback 成功入队但 flush 不发送，
+    // 以此制造远超上限的滞留量，验证 enqueue 的 while-shift 兜底截断。
+    const cap = 2000; // 与源码 PENDING_MAX 常量保持一致（改动需同改两处）
+    const rt = await bootTrace({
+      repoUrl: FAKE_REPO, maskEnabled: true, cacheDir: CACHE_DIR, token: '', batchSize: 5,
+    });
+    try {
+      setStatus(201); // 即便意外发送也返回成功，避免测试挂起
+      const fill = cap + 75;
+      for (let i = 0; i < fill; i++) rt.mod.recordFeedback('read', 'neutral', `cap-${i}`);
+      await settle();
+      const size = rt.mod.queueSize().pending;
+      assert(size === cap,
+        `滞留量应被截断到 PENDING_MAX(${cap})，实际 ${size}`);
+      // 稳定性：再多塞也不超过上限
+      for (let i = 0; i < 10; i++) rt.mod.recordFeedback('read', 'neutral', `cap-extra-${i}`);
+      await settle();
+      assert(rt.mod.queueSize().pending === cap, '超上限后不应继续增长');
+    } finally {
+      // 排空共享模块级 pending，避免污染后续用例（卸载用例 dispose 会用 token 兜底发送）
+      const drain = await bootTrace({
+        repoUrl: FAKE_REPO, maskEnabled: true, cacheDir: CACHE_DIR, token: FAKE_TOKEN, batchSize: 200,
+      });
+      try {
+        setStatus(201);
+        await drain.mod.flush();
+        await waitFor(() => drain.mod.queueSize().pending === 0, 'PENDING_MAX 用例滞留记录排空');
+      } finally {
+        await Promise.resolve(drain.fiber.dispose());
+        await settle();
+      }
       await Promise.resolve(rt.fiber.dispose());
       await settle();
     }

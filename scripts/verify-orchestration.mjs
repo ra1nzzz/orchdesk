@@ -649,6 +649,29 @@ async function disposeAllFibers() {
     assert(stale.length === 0, '仍有未收敛节点：' + stale.map((n) => `${n.id}:${n.status}`).join(', '));
   });
 
+  current = 'multi·委派树回收';
+  await check('③maxTreeNodes：超出上限整棵 evict 最旧终态 root（保最新、不撕裂 UI）', async () => {
+    // 独立小容量运行时：每 fullstack 团 7 节点，maxTreeNodes=8 → 第 2 团结束后触发回收。
+    const capRt = await boot('multi', { maxTreeNodes: 8 });
+    const capOrch = capRt.ctx.orchestration;
+    try {
+      const t1 = await capOrch.composeTeam('team-fullstack', '回收前任务1');
+      const t2 = await capOrch.composeTeam('team-fullstack', '回收前任务2');
+      // 2 × 7 = 14 节点，超 8 → 最旧的终态 root（t1 整棵）被 evict
+      const left = capOrch.getDelegationTree();
+      assert(left.length <= 8, `委派树应被回收到 ≤${8}，实际 ${left.length}`);
+      const leftRoots = new Set(left.filter((n) => n.layer === 'ceo').map((n) => n.id));
+      assert(!leftRoots.has(t1.rootId), `最旧的终态 root ${t1.rootId} 应被 evict`);
+      assert(leftRoots.has(t2.rootId), `最新的 root ${t2.rootId} 应保留`);
+      // 树结构完整：残余 CEO/Director/Worker 各层级齐（未被切半撕裂）
+      const layers = new Set(left.map((n) => n.layer));
+      for (const l of ['ceo', 'director', 'worker']) assert(layers.has(l), '回收后缺层级 ' + l);
+    } finally {
+      await Promise.resolve(capRt.fiber.dispose());
+      await settle();
+    }
+  });
+
   current = 'multi·卸载';
   await check('插件卸载清空委派树（无残留）', async () => {
     await Promise.resolve(mfiber.dispose());
