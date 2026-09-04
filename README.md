@@ -10,7 +10,8 @@
 - **Agent Runtime 引擎**：模型循环调用工具，支持 function-calling，默认最大 200 步迭代
 - **5 个内置工具**：`file_read`、`file_write`、`file_list`、`shell_command`、`web_fetch`
 - **模型管理**：多提供商配置（Ollama / OpenAI 兼容），选择持久化（localStorage），settings UI 滑块调节迭代上限
-- **会话管理**：项目/任务分组、会话归档/分叉/删除、右侧面板（待办/产物/技能与MCP）
+- **会话管理**：项目/任务分组、会话归档/分叉/删除、右侧面板（待办/产物/文件/能力）
+  - 「能力」= 使用中的插件（`pluginRuntime` 真实装载）+ 技能（数据目录 `skills/*.skill` 真实扫描）+ MCP 连接
 - **版本治理**：conventional-changelog + bumpp + electron-updater（GitHub Releases）
 
 ### 安装

@@ -3268,6 +3268,10 @@ ipcMain.handle('orchdesk:guanji-install', async (_e, skill: { slug: string; name
 ipcMain.handle('orchdesk:guanji-publish', async (_e, input: { slug: string; alias?: string; filePath: string }) => {
   return guanjiClient.publishSkill(input);
 });
+// 本地已安装技能：真实扫描数据目录/skills（此前只存渲染层内存，重启即显示 0 个）。
+// ok=false = 扫描失败，与「已扫描但没装」区分，UI 分别标注「未接入」与「暂无」。
+ipcMain.handle('orchdesk:skills-installed', () => guanjiClient.listInstalledSkills());
+ipcMain.handle('orchdesk:skill-uninstall', async (_e, slug: string) => guanjiClient.uninstallSkill(String(slug || '')));
 
 // ---------------------------------------------------------------------------
 // T-P6-2 OrchClaw Hub 联调桥（配对凭据经 safeStorage 加密存储）

@@ -159,6 +159,7 @@ async function run() {
     // 死挂点修复 e2e（#48）：专家团派发链路 —— composeTeam 调用留痕，
     // 供断言「askInput 回调真的把任务派发出去」（旧代码 .then 崩溃 → 永不可达）。
     window.__composeCalls = [];
+    window.__uninstallCalls = [];
     window.orchdesk = {
       // 启动路径要求 loadSessions 返回数组（remote.length 判断）。默认返回对象
       // （走 wizard「首次运行」路径，前 13 组依赖该行为）；组 14 reload 前设置
@@ -191,6 +192,19 @@ async function run() {
             }
           : { ready: false, activeCount: 0, total: 0, plugins: [] }),
       setPluginEnabled: () => Promise.resolve({ ok: false, reason: 'E2E mock' }),
+      // 本地已安装技能（真实形状：主进程扫描数据目录/skills 的产物）。
+      // 「能力」TAB 的技能分组必须读它——此前读的是渲染层内存数组，重启即清零。
+      listInstalledSkills: () => Promise.resolve({
+        ok: true,
+        items: [
+          { slug: 'guanji', bytes: 20480, installedAt: Date.now() - 86400000 },
+          { slug: 'aihot', bytes: 5120, installedAt: Date.now() - 3600000 },
+        ],
+      }),
+      uninstallSkill: (slug) => {
+        try { window.__uninstallCalls.push(String(slug || '')); } catch (e) { /* ignore */ }
+        return Promise.resolve({ ok: true });
+      },
       // 死挂点修复 e2e（#48）：composeTeam 记录调用（tid+task）并返回一张 3 节点委派树。
       // 旧渲染代码对 askInput 返回值调 .then 必抛 TypeError，这里必须真的被派发到。
       composeTeam: (tid, task) => {
@@ -731,7 +745,7 @@ async function run() {
   }
 
   // ================================================================
-  // 测试组 5：右侧面板 — 任务监控卡片（待办/产物/技能与MCP）
+  // 测试组 5：右侧面板 — 任务监控卡片（待办/产物/文件/能力）
   // ================================================================
   console.log('📋 测试组 5：右侧面板');
   // Click on the session we just created in sidebar
@@ -757,7 +771,8 @@ async function run() {
     console.log('    Tab labels:', tabLabels.join(', '));
     await assert(tabText.includes('待办'), 'Tab 有"待办"');
     await assert(tabText.includes('产物'), 'Tab 有"产物"');
-    await assert(tabText.includes('技能'), 'Tab 有"技能与MCP"');
+    await assert(tabText.includes('文件'), 'Tab 有"文件"');
+    await assert(tabText.includes('能力'), 'Tab 有"能力"（原「技能与MCP」改名并扩为插件+技能+MCP）');
 
     // Switch to 产物 tab and verify
     // 需求3 之后 TAB 变成 4 个（插入「文件」）—— 用 data-id 定位而不是 nth 索引，
@@ -765,11 +780,17 @@ async function run() {
     await page.locator('[data-action="ctx-tab"][data-id="products"]').first().click();
     await page.waitForTimeout(200);
 
-    // Switch to 技能与MCP tab
-    await page.locator('[data-action="ctx-tab"][data-id="skills"]').first().click();
+    // Switch to 能力 tab
+    await page.locator('[data-action="ctx-tab"][data-id="caps"]').first().click();
     await page.waitForTimeout(200);
     const mcpDots = page.locator('.mcp-dot');
     await assert(await mcpDots.count() > 0, 'MCP 连接状态指示器存在 (count=' + await mcpDots.count() + ')');
+    // 「能力」= 插件 + 技能 + MCP 三组，缺一组就是名不副实
+    const capTitles = await page.locator('.ctx-section-title').allTextContents();
+    const capText = capTitles.join(' | ');
+    await assert(/插件/.test(capText), '能力 TAB 有「插件」分组');
+    await assert(/技能/.test(capText), '能力 TAB 有「技能」分组');
+    await assert(/MCP/.test(capText), '能力 TAB 有「MCP 连接」分组');
   }
 
   // 验证 renderMsg 兼容两种消息格式（m.r/m.x 旧版 + m.role/m.text 新版）
@@ -1529,14 +1550,14 @@ async function run() {
     await assert(false, `死挂点 ①② 工具步骤链路交互完成 (error: ${e.message.slice(0, 80)})`);
   }
 
-  // ---- ④ 任务监控「技能与MCP」：插件状态按运行时真实装载标注 ----
+  // ---- ④ 任务监控「能力」：插件状态按运行时真实装载标注 + 技能取磁盘真实扫描 ----
   try {
     if (await page.locator('.ctx-tab').count() === 0) {
       const tg = page.locator('[data-action="toggle-ctx"]').first();
       if (await tg.count() > 0) { await tg.click(); await page.waitForTimeout(250); }
     }
-    const skillTab = page.locator('.ctx-tab[data-action="ctx-tab"][data-id="skills"]');
-    await assert(await skillTab.count() > 0, '右侧面板有「技能与MCP」tab');
+    const skillTab = page.locator('.ctx-tab[data-action="ctx-tab"][data-id="caps"]');
+    await assert(await skillTab.count() > 0, '右侧面板有「能力」tab');
     await skillTab.first().click();
     await page.waitForTimeout(350);
     const pluginStates = await page.evaluate(() => {
@@ -1552,8 +1573,13 @@ async function run() {
     await assert(pluginStates.multi === '已启用', `multi 运行时 active → 已启用（实际=${pluginStates.multi}）`);
     await assert(pluginStates.trace === '已停用', `trace 主动停用（error 前缀「已停用」）→ 已停用而非异常（实际=${pluginStates.trace}）`);
     await assert(pluginStates.brain === '异常', `brain 装载失败（非停用前缀 error）→ 异常（实际=${pluginStates.brain}）`);
+    // 技能分组：slug + 真实体积来自 listInstalledSkills（不是渲染层内存数组）
+    const capBody = await page.locator('.ctx-body').innerText();
+    await assert(/技能 · 使用中 2\/2/.test(capBody), `技能分组显示真实计数 2/2（实际=${capBody.split('\n').filter((l) => /技能/.test(l)).join(' / ')}）`);
+    await assert(/20\.0KB/.test(capBody), '技能行显示磁盘真实体积（20480B → 20.0KB）');
+    await assert(!/技能目录未接入/.test(capBody), '桥已接入时技能分组不显示「未接入」占位');
   } catch (e) {
-    await assert(false, `死挂点 ④ 技能状态真实标注完成 (error: ${e.message.slice(0, 80)})`);
+    await assert(false, `死挂点 ④ 能力状态真实标注完成 (error: ${e.message.slice(0, 80)})`);
   }
 
   // ---- ③ 设置页 statbar：真实数据目录 + 运行时就绪（去掉硬编码 %APPDATA%/dsh）----

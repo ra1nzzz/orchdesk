@@ -94,7 +94,11 @@ button:focus-visible,.navbtn:focus-visible,.t-btn:focus-visible,.iconbtn:focus-v
 .ctx-skill .sk-icon{width:18px;height:18px;display:grid;place-items:center;border-radius:4px;flex:none;font-size:11px;font-weight:700}
 .ctx-skill .sk-icon.builtin{background:var(--accent-soft);color:var(--accent-fg)}
 .ctx-skill .sk-icon.temp{background:var(--warn-soft);color:var(--warn)}
+.ctx-skill .sk-icon.skill{background:var(--ceo-soft);color:var(--ceo)}
 .ctx-skill .sk-name{flex:1}
+/* 体积等次要信息：用 --fg-dim 而不是 --fg-faint —— 后者浅色主题对比度仅 2.33:1，
+   不过 WCAG AA（审查报告 P1）；新增样式不往这个坑里再添一笔。 */
+.ctx-skill .sk-meta{font-size:10px;color:var(--fg-dim);flex:none}
 .ctx-skill .sk-status{font-size:10px;padding:1px 6px;border-radius:4px}
 .ctx-skill .sk-status.on{background:var(--ok-soft);color:var(--ok)}
 .ctx-skill .sk-status.idle{background:var(--bg-hover);color:var(--fg-faint)}

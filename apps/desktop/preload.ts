@@ -465,6 +465,14 @@ const orchdesk = {
   guanjiPublish: (input: { slug: string; alias?: string; filePath: string }): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:guanji-publish', input),
 
+  /** 本地已安装技能（真实扫描数据目录/skills；ok=false = 扫描失败，不等于「没装」）。 */
+  listInstalledSkills: (): Promise<{ ok: boolean; items: Array<{ slug: string; bytes: number; installedAt: number }>; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:skills-installed'),
+
+  /** 卸载本地技能包（真删文件；slug 走目录名白名单，防路径穿越）。 */
+  uninstallSkill: (slug: string): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:skill-uninstall', slug),
+
   // ---- T-P6-2 OrchClaw Hub 联调（配对凭据经 safeStorage 加密存储） ----
   /** 当前配对状态。 */
   hubStatus: (): Promise<{ paired: boolean; url?: string; agentName?: string }> =>

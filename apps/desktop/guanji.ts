@@ -75,6 +75,21 @@ export interface PublishResult {
   reason?: string;
 }
 
+/** 本地已安装技能包（数据目录/skills/<slug>.skill）。 */
+export interface InstalledSkill {
+  slug: string;
+  /** 包体积（字节）。 */
+  bytes: number;
+  /** 落盘时间（ms，取自 mtime）。 */
+  installedAt: number;
+}
+
+export interface InstalledSkillList {
+  ok: boolean;
+  items: InstalledSkill[];
+  reason?: string;
+}
+
 // L3（网络）/ L4（Shell/进程）/ 系统级能力 → 安装前必须授权。
 // 默认 deny：未列入白名单的能力一律视为高危，需用户显式授权。
 const LOW_RISK_CAPS = new Set<string>([
@@ -232,6 +247,49 @@ export class GuanjiClient {
       return { ok: true, review, path: out };
     } catch (err) {
       return { ok: false, review, reason: `下载异常：${(err as Error).message}` };
+    }
+  }
+
+  /**
+   * 列出本地已安装技能（真实扫描 数据目录/skills/*.skill）。
+   *
+   * 此前「已安装」只存在渲染层内存（installedSkills 数组），重启即清零 ——
+   * 磁盘上明明有包，UI 却显示 0 个。按本项目纪律，「读不到」与「没装」必须分开：
+   * ok=false 表示扫描失败（UI 标注未接入），ok=true 且 items=[] 才是真没装。
+   */
+  listInstalledSkills(): InstalledSkillList {
+    const dir = path.join(getDataDir(), SKILLS_DIR_NAME);
+    try {
+      if (!fs.existsSync(dir)) return { ok: true, items: [] };
+      const items: InstalledSkill[] = [];
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith('.skill')) continue;
+        const slug = f.slice(0, -'.skill'.length);
+        // slug 落盘时已过白名单；扫描侧再过一次，脏文件名不得进 UI。
+        if (!isMarketDirName(slug)) continue;
+        const st = fs.statSync(path.join(dir, f));
+        if (st.isFile()) items.push({ slug, bytes: st.size, installedAt: st.mtimeMs });
+      }
+      items.sort((a, b) => a.slug.localeCompare(b.slug));
+      return { ok: true, items };
+    } catch (err) {
+      return { ok: false, items: [], reason: `扫描技能目录失败：${(err as Error).message}` };
+    }
+  }
+
+  /** 卸载本地技能包（真删文件）。此前只从渲染层数组里移除，磁盘上的包还在。 */
+  uninstallSkill(slug: string): PublishResult {
+    // slug 来自渲染层，属不可信输入：先过目录名白名单，防 `../../x` 穿越删任意文件。
+    if (!isMarketDirName(slug)) {
+      return { ok: false, reason: `技能标识「${String(slug).slice(0, 64)}」非法，拒绝操作` };
+    }
+    const target = path.join(getDataDir(), SKILLS_DIR_NAME, `${slug}.skill`);
+    try {
+      if (!fs.existsSync(target)) return { ok: false, reason: '本地不存在该技能包' };
+      fs.unlinkSync(target);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: `删除失败：${(err as Error).message}` };
     }
   }
 

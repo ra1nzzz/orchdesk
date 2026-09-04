@@ -275,6 +275,9 @@
       guanjiList: () => Promise.resolve(SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }))),
       guanjiInstall: (skill) => skill && skill.auth ? Promise.resolve({ ok: false, review: 'needs-auth', reason: '需配置观雅集 TOKEN' }) : Promise.resolve({ ok: true, review: 'allowed' }),
       guanjiPublish: () => Promise.resolve({ ok: false, reason: '需配置观雅集 TOKEN' }),
+      // 本地已安装技能：无桥 → ok:false（UI 标注「未接入」），不能用空数组冒充「已扫描但没装」
+      listInstalledSkills: () => Promise.resolve({ ok: false, items: [], reason: '主进程未接入' }),
+      uninstallSkill: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
       hubStatus: () => Promise.resolve({ paired: false }),
       hubPair: () => Promise.resolve({ ok: false, reason: '未配对' }),
       hubSend: () => Promise.resolve({ ok: false, reason: '未配对' }),
@@ -327,7 +330,7 @@
     grants: [],
     promptDocs: [], promptConflicts: [],
     compAudit: [], tempPlugins: [],
-    guanjiSkills: [], guanjiTokenSet: false, installedSkills: [], askInputCb: null,
+    guanjiSkills: [], guanjiTokenSet: false, installedSkills: [], installedSkillsLoaded: false, askInputCb: null,
     hubStatus: { paired: false }, hubUrl: '', hubTaskText: '', hubResultText: '',
     memoryStats: null,
     pExpanded: new Set(),
@@ -652,6 +655,35 @@
       if (state.page === 'plugins') render();
     });
     refreshConnectorAudit();
+  }
+
+  /* ---------- 本地已安装技能 ---------- */
+  /**
+   * 重拉本地技能清单（主进程真实扫描 数据目录/skills/*.skill）。
+   * 此前 installedSkills 只在安装时往内存数组里 push，重启即清零 —— 磁盘上有包
+   * 却显示 0 个。合并时保留内存中的启用/停用开关（该开关暂未持久化，默认启用）。
+   * ok=false（扫描失败）与 ok=true + 空数组（真没装）分开存，UI 分别标注。
+   */
+  function refreshInstalledSkills() {
+    if (typeof bridge.listInstalledSkills !== 'function') {
+      state.installedSkillsLoaded = false;
+      return Promise.resolve();
+    }
+    return bridge.listInstalledSkills().then((r) => {
+      if (!r || typeof r !== 'object') return;
+      state.installedSkillsLoaded = r.ok === true;
+      if (r.ok !== true || !Array.isArray(r.items)) return;
+      state.installedSkills = r.items.map((it) => {
+        const prev = state.installedSkills.find((x) => x.slug === it.slug);
+        return {
+          slug: String(it.slug),
+          bytes: Number(it.bytes) || 0,
+          installedAt: Number(it.installedAt) || 0,
+          // 启用状态仅本次运行有效：未见过的按启用计，见过的沿用用户选择。
+          enabled: prev ? prev.enabled !== false : true,
+        };
+      });
+    }).catch(() => { state.installedSkillsLoaded = false; });
   }
 
   function refreshConnectorAudit() {
@@ -1366,7 +1398,8 @@
         // 需求3：文件从标题栏按钮 + 全屏面板，改为右栏 TAB。
         // 与「产物」不同源：产物是本会话 Agent 生成的内容，文件是工作目录的全部文件。
         { id: 'files', label: '文件', badge: '' },
-        { id: 'skills', label: '技能与MCP', badge: '' },
+        // 「能力」= 插件 + 技能 + MCP（原「技能与MCP」名不副实：里面列的是插件）
+        { id: 'caps', label: '能力', badge: '' },
       ];
       const tabsHTML = tabs.map(t => `<button class="ctx-tab ${tabId === t.id ? 'active' : ''}" data-action="ctx-tab" data-id="${t.id}">${t.label}</button>`).join('');
 
@@ -1428,21 +1461,13 @@
         }
       });
 
-      // ---- 技能 ----
-      const usedSkills = [];
-      const seen = new Set();
-      msgs.forEach(m => {
-        if ((m.r === 'agent' || m.role === 'assistant') && (m.x || m.text)) {
-          const content = m.x || m.text || '';
-          const re = /\{skill:(\w+)\}/g;
-          let sm;
-          while ((sm = re.exec(content)) !== null) {
-            if (!seen.has(sm[1])) { seen.add(sm[1]); usedSkills.push(sm[1]); }
-          }
-        }
-      });
-      const builtinSkills = ['intent', 'trace', 'brain', 'multi'];
-      builtinSkills.forEach(sk => { if (!seen.has(sk)) usedSkills.unshift(sk); });
+      // ---- 能力（插件 / 技能 / MCP）----
+      // 旧代码从 Agent 消息里正则抓 {skill:xxx} 当「已用技能」，再 unshift 四个内置
+      // 插件名当「插件」——两处都不是真数据源：
+      //   · {skill:xxx} 是**提示词模板**的引用语法（prompt 插件消费），Agent 回复里
+      //     根本不会原样出现，解析结果恒为空（死挂点）；
+      //   · 内置插件名写死成常量数组，与运行时真实装载无关。
+      // 改为：插件取 pluginRuntime 真实装载，技能取本地磁盘真实扫描。
 
       // MCP 连接状态：此前是硬编码常量（含假的 connected:true）。
       // 现在以插件运行时真实装载状态为准——内置插件即本地能力来源；
@@ -1505,20 +1530,55 @@
         // 需求3：工作目录的全部文件（不是会话产物）。首次进入时按项目目录自动装载。
         if (!state.fileTab.inited) ensureFileTabRoot();
         bodyHTML = '<div class="ctx-section">' + fileTabBodyHTML() + '</div>';
-      } else if (tabId === 'skills') {
-        bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">插件（默认启用）</div>' + usedSkills.map(sk => {
-          // BUG（全盘死挂点扫描）：旧代码 isOn = builtinSkills.includes(sk) 恒 true →
-          // 四个内置插件恒标「已启用」，无视运行时真实装载（插件可被停用/未激活）；
-          // 与同区 MCP 连接按 pluginRuntime 取值的写法自相矛盾。改按真实状态标注。
-          const rec = rtOf(sk);
+      } else if (tabId === 'caps') {
+        // 「能力」= 使用中的插件 + 技能 + MCP 三类（原「技能与MCP」只列了后两类，
+        // 且「插件」一项取的是写死的常量数组，与运行时无关）。
+        // ① 插件：pluginRuntime 真实装载；运行时未接入时回落声明清单并标注「未接入」，
+        //    不用空列表冒充「没有插件」（「未接入」≠「为空」是本项目踩过三次的坑）。
+        const rtList = rtReady && Array.isArray(rt.plugins) && rt.plugins.length ? rt.plugins : null;
+        const declaredList = rtList ? null : PLUGINS.map((p) => ({ name: p.id }));
+        const plugRows = (rtList || declaredList || []).map((p) => {
+          const name = String(p.name);
+          const rec = rtList ? p : null;
           const active = rtReady && !!rec && rec.active === true;
           // 停用逆回滚（主进程 setPluginEnabled）会把 error 置为「已停用（逆回滚完成）」——
           // 若见 error 就标「异常」，主动停用的插件会被误标；按前缀区分停用与真异常。
           const broken = !!rec && !!rec.error && !/^已停用/.test(rec.error);
           const label = !rtReady ? '未接入'
-            : (rec ? (active ? '已启用' : (broken ? '异常' : '已停用')) : '可用');
-          return '<div class="ctx-skill"><span class="sk-icon builtin">' + sk[0].toUpperCase() + '</span><span class="sk-name">' + esc(sk) + '</span><span class="sk-status ' + (active ? 'on' : 'idle') + '">' + esc(label) + '</span></div>';
-        }).join('') + '</div>';
+            : (rec ? (active ? '已启用' : (broken ? '异常' : '已停用')) : '未接入');
+          const title = rec && rec.error ? esc(rec.error) : '';
+          return '<div class="ctx-skill"><span class="sk-icon builtin">' + esc(name[0].toUpperCase()) + '</span>'
+            + '<span class="sk-name">' + esc(name) + '</span>'
+            + '<span class="sk-status ' + (active ? 'on' : 'idle') + '"' + (title ? ' title="' + title + '"' : '') + '>' + esc(label) + '</span></div>';
+        }).join('');
+        const plugActive = rtList ? rtList.filter((p) => p.active === true).length : 0;
+        bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">插件'
+          + (rtList ? ' · 使用中 ' + plugActive + '/' + rtList.length : ' · 运行时未接入')
+          + '</div>'
+          + (rtList ? '' : '<div class="faint" style="font-size:10px;padding:2px 0 6px">插件运行时未接入 · 以下为声明清单，非实时装载状态</div>')
+          + plugRows + '</div>';
+        // ② 技能：本地磁盘真实扫描（数据目录/skills/*.skill）。
+        //    未接入（扫描失败）与「已扫描但没装」分别标注，不混为一谈。
+        const skills = state.installedSkills || [];
+        const skRows = skills.map((sk) => {
+          const on = sk.enabled !== false;
+          const size = sk.bytes ? (sk.bytes > 1024 ? (sk.bytes / 1024).toFixed(1) + 'KB' : sk.bytes + 'B') : '';
+          return '<div class="ctx-skill"><span class="sk-icon skill">' + esc(String(sk.slug)[0].toUpperCase()) + '</span>'
+            + '<span class="sk-name mono">' + esc(sk.slug) + '</span>'
+            + (size ? '<span class="sk-meta">' + size + '</span>' : '')
+            + '<span class="sk-status ' + (on ? 'on' : 'idle') + '">' + (on ? '已启用' : '已停用') + '</span></div>';
+        }).join('');
+        bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">技能'
+          // 未接入时不显示「0/0」——那是把「没读到」说成了「读到了 0 个」。
+          + (state.installedSkillsLoaded
+            ? ' · 使用中 ' + skills.filter((sk) => sk.enabled !== false).length + '/' + skills.length
+            : ' · 未接入')
+          + '</div>'
+          + (state.installedSkillsLoaded
+            ? (skills.length ? skRows : '<div class="faint" style="font-size:10px;padding:2px 0 6px">暂无已安装技能 · 插件页 → 技能市场（观雅集）可安装</div>')
+            : '<div class="faint" style="font-size:10px;padding:2px 0 6px">技能目录未接入（主进程桥不可用）· 非「没有技能」</div>')
+          + '</div>';
+        // ③ MCP 连接
         bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接</div>'
           + (mcps.length && mcps[0].unavailable ? '<div class="faint" style="font-size:10px;padding:2px 0 6px">运行时未接入 · 以下为待接入能力，非实时连接状态</div>' : '')
           + mcps.map(m => '<div class="ctx-mcp"><span class="mcp-dot ' + (m.connected ? 'connected' : 'disconnected') + '"></span><span style="flex:1">' + esc(m.name) + '</span><span style="font-size:10px;color:var(--fg-faint)">' + esc(m.desc) + ' · ' + (m.unavailable ? '未接入' : (m.connected ? '已连接' : '待连接')) + '</span></div>').join('') + '</div>';
@@ -3211,7 +3271,9 @@
     try {
       const r = await bridge.guanjiInstall(skill, authorized);
       if (r && r.ok) {
-        if (!state.installedSkills.find((x) => x.slug === skill.slug)) state.installedSkills.push({ slug: skill.slug, enabled: true });
+        // 不再手动 push 一条内存记录：以磁盘真实扫描为准（含体积/落盘时间），
+        // 否则装完 UI 显示的是只有 slug 的假条目，且重启后来源不一致。
+        await refreshInstalledSkills();
         toast(`已从观雅集安装「${skill.slug}」（能力审查：${r.review}）`, 'ok');
       } else if (r && r.review === 'needs-auth') {
         toast(`「${skill.slug}」需授权：请先在弹窗中确认高危能力`, 'danger');
@@ -4212,7 +4274,25 @@
         break;
       }
       case 'skill-toggle': { const s = state.installedSkills.find((x) => x.slug === el.dataset.n); if (s) { s.enabled = !s.enabled; render(); } break; }
-      case 'skill-uninstall': { state.installedSkills = state.installedSkills.filter((x) => x.slug !== el.dataset.n); toast(`已卸载「${el.dataset.n}」`, 'warn'); render(); break; }
+      case 'skill-uninstall': {
+        // 真删磁盘包。此前只从渲染层数组移除，文件还在 —— 下次启动又冒出来。
+        const slug = el.dataset.n;
+        try {
+          const r = typeof bridge.uninstallSkill === 'function'
+            ? await bridge.uninstallSkill(slug)
+            : { ok: false, reason: '主进程未接入' };
+          if (r && r.ok) {
+            state.installedSkills = state.installedSkills.filter((x) => x.slug !== slug);
+            toast(`已卸载「${slug}」`, 'warn');
+          } else {
+            toast(`卸载失败：${(r && r.reason) || '未知错误'}`, 'danger');
+          }
+        } catch (err) {
+          toast(`卸载异常：${(err && err.message) || err}`, 'danger');
+        }
+        render();
+        break;
+      }
 
       /* T-P6-2 OrchClaw Hub 联调 */
       case 'hub-pair': {
@@ -4920,6 +5000,8 @@
       // 观雅集
       bridge.guanjiTokenStatus().then(r => { state.guanjiTokenSet = !!(r && r.configured); }).catch(() => {}),
       bridge.guanjiList().then(r => { if (Array.isArray(r) && r.length) state.guanjiSkills = r; }).catch(() => {}),
+      // 本地已安装技能（磁盘真实扫描；此前只存内存，重启即显示 0 个）
+      refreshInstalledSkills(),
       // Hub
       bridge.hubStatus().then(r => { if (r) state.hubStatus = r; }).catch(() => {}),
     ]);
