@@ -33,6 +33,25 @@
 - 渲染双环境：preload 无 require、app.js 是 IIFE → 共用纯逻辑写 **UMD-lite 单文件**（`module.exports`+`window.OrchDeskXxx`），挂 app.js 前，零构建。
 - ADR-0008：主会话回合=直连工具循环+`firePreStep()`；别再提「接入 ctx.agents.followup」（P7 须新 ADR）。
 
+## UI 布局（2026-09-05 重构后；改动前先看这里）
+- 标题栏**只有**品牌/会话信息/时钟。浏览器·终端·文件三个文字按钮已移除：
+  文件→右栏 TAB，浏览器/终端→**状态栏右下角图标区 `#sbActions`**（未激活灰/激活点亮/点击切换）。
+- **浏览器侧栏与任务监控共用第 4 列**：`.app.browser-mode` 下 context 隐藏、browserSide 显示。
+  Agent 首次调用浏览器自动展开（只在 `open` 跃迁上自动，否则用户收起后会被状态推送弹回来）。
+- 浏览器「多TAB」= **页面快照卡**，不是真多页：`browser-cdp.ts` 是单隐藏 CDP 窗口
+  （`let win: BrowserWindow`），登记簿上限 `BROWSER_PAGES_MAX=12`，截图回填缩略图。别冒充多标签并存。
+- **终端是文档流抽屉**（`.term-drawer`，不是 fixed 覆盖层）：展开即挤压上方主区（app 是 flex:1），
+  全屏档 `calc(100vh - 66px)`。高度变化后 xterm 必须重新 fit。文件面板仍是 fixed 全屏（预览要宽）。
+- 待办数据源=语义化任务分拆（`extractPlanSteps`：结构化 plan 块 → markdown 列表回退），
+  **完成度只用显式标记（[x]/✅）判定，不拿工具数猜**；工具调用是折叠的「执行明细」不是待办。
+- **e2e 定位一律用 `data-id`，禁止 `nth(N)` 索引**：插入/重排 TAB 会静默切错页，
+  表象是后续元素超时，排查极贵。文件 TAB 三个分支（正常/未绑定/读取失败）都必须有全屏入口按钮。
+
+## 工具与 skill（本机）
+- `impeccable`（UI/UX 审查）：不在 `~/.workbuddy/skills/` 但在 **`~/.workbuddy/skills-marketplace/skills/` 缓存**
+  （31 个纯 md、零脚本）→ `cp -r` 装上即可，不用去观雅集/GitHub 搜。审查方法见其 `references/audit.md`。
+- 审查结论见 `docs/40-质量/ui-ux-audit.md`（11/20；P1=对比度+键盘可达性）。
+
 ## 数据目录 / 模型层
 - `dataDir()`=`ORCHDESK_HOME`>便携> `%APPDATA%/OrchDesk`；`migrateLegacyData()` 按 key 合并只补齐不覆盖。
 - 工具双模式：优先 function calling；不支持走 `<tool:name>json</tool>` 文本兜底，结果 `role:'user'` 回传（`role:'tool'` 被网关拒）。
