@@ -103,6 +103,9 @@ export interface OrchDeskRuntime {
 }
 
 let runtime: OrchDeskRuntime | null = null;
+/** ⑤ 竞态修复：装载中的 in-flight Promise。并发二次 startRuntime 复用它，
+ *  不再各建一份 Context（首装完成前 runtime 仍为 null，仅靠 `if (runtime)` 挡不住）。 */
+let runtimePromise: Promise<OrchDeskRuntime> | null = null;
 
 /**
  * 解析插件产物路径。
@@ -168,10 +171,22 @@ async function loadContext(): Promise<new () => Context> {
   return contextCtor;
 }
 
-/** 启动运行时。幂等：重复调用返回同一实例。 */
-export async function startRuntime(): Promise<OrchDeskRuntime> {
-  if (runtime) return runtime;
+/** 启动运行时。幂等：重复调用返回同一实例。⑤ 竞态修复：并发调用复用同一 in-flight Promise。 */
+export function startRuntime(): Promise<OrchDeskRuntime> {
+  if (runtime) return Promise.resolve(runtime);
+  if (runtimePromise) return runtimePromise;
+  runtimePromise = buildRuntime()
+    .then((rt) => { runtime = rt; return rt; })
+    .catch((err) => {
+      // 失败清空 in-flight，允许后续重试（runtime 仍为 null）。
+      runtimePromise = null;
+      throw err;
+    });
+  return runtimePromise;
+}
 
+/** 实际装载（幂等守卫与竞态去重由 startRuntime 负责，本函数每次真实执行一次）。 */
+async function buildRuntime(): Promise<OrchDeskRuntime> {
   const Context = await loadContext();
   const ctx = new Context();
   const plugins: PluginLoadResult[] = [];
@@ -188,21 +203,14 @@ export async function startRuntime(): Promise<OrchDeskRuntime> {
       continue;
     }
     try {
-      const mod = (await dynamicImport(pathToFileUrl(entry))) as Record<string, unknown>;
-      const plugin = normalizeInject(mod);
-      let config = typeof plugin.Config === 'function'
-        ? (plugin.Config as (c: unknown) => unknown)({})
-        : undefined;
-      // TRACE：装载时注入内置 TOKEN + 上报目标 + 用户开关（见 buildTraceConfig）。
-      if (name === 'trace' && config && typeof config === 'object') {
-        config = buildTraceConfig(config as Record<string, unknown>) as never;
-      }
-      // 插件产物经动态 import 载入，形状由运行时保证；此处做一次收窄以通过 strict 检查。
-      type CordisPlugin = Parameters<Context['plugin']>[0];
-      const fiber = ctx.plugin(plugin as unknown as CordisPlugin, config as never);
+      // TRACE 差异：仅**启动装载**注入内置 TOKEN + 上报目标 + 用户开关（buildTraceConfig）；
+      // 热插拔（setPluginEnabled）不注入 —— 见 loadPluginFiber.transformConfig 注释。
+      const { fiber, state: st } = await loadPluginFiber({
+        ctx,
+        entry,
+        transformConfig: name === 'trace' ? buildTraceConfig : undefined,
+      });
       fibers.set(name, fiber);
-      await settle();
-      const st = (fiber as unknown as { state?: number }).state;
       const active = st === 2;
       plugins.push({ name, ok: true, active, error: active ? undefined : `fiber.state=${st}（依赖未满足）` });
       if (!active) console.warn(`[orchdesk] 插件 ${name} 未激活：fiber.state=${st}`);
@@ -232,8 +240,8 @@ export async function startRuntime(): Promise<OrchDeskRuntime> {
     if (n > 0) console.log(`[orchdesk] 授权白名单已回灌：${n} 条（${grantsFile()}）`);
   }
 
-  runtime = { ctx, host: getHostServices(), plugins, activeCount };
-  return runtime;
+  // runtime 赋值由 startRuntime 的 .then 统一收口（竞态去重 + 失败清空）。
+  return { ctx, host: getHostServices(), plugins, activeCount };
 }
 
 /** 取已启动的运行时（未启动时返回 null）。 */
@@ -399,16 +407,10 @@ export async function setPluginEnabled(name: string, enabled: boolean): Promise<
   const isActive = !!record?.active;
 
   if (enabled && !isActive) {
-    const mod = (await dynamicImport(pathToFileUrl(entry))) as Record<string, unknown>;
-    const plugin = normalizeInject(mod);
-    const config = typeof plugin.Config === 'function'
-      ? (plugin.Config as (c: unknown) => unknown)({})
-      : undefined;
-    type CordisPlugin = Parameters<Context['plugin']>[0];
-    const f = runtime.ctx.plugin(plugin as unknown as CordisPlugin, config as never) as unknown as FiberLike;
+    // ⑤ 收敛：与启动装载共用 loadPluginFiber（entry 已由 pluginEntry(name) 解析）。
+    // 热插拔不注入 trace transformConfig —— 见 loadPluginFiber 注释。
+    const { fiber: f, state: st } = await loadPluginFiber({ ctx: runtime.ctx, entry });
     fibers.set(name, f);
-    await settle();
-    const st = f.state;
     if (record) {
       record.active = st === 2;
       record.ok = true;
@@ -533,17 +535,11 @@ export async function setMarketPluginEnabled(dir: string, enabled: boolean): Pro
       fibers.delete(key);
     }
     const entryPath = path.join(marketDir(), dir, 'index.js');
-    const mod = (await dynamicImport(pathToFileUrl(entryPath))) as Record<string, unknown>;
-    const raw = (mod.default && typeof mod.default === 'object' ? mod.default : mod) as Record<string, unknown>;
-    const plugin = normalizeInject(raw);
-    const config = typeof plugin.Config === 'function'
-      ? (plugin.Config as (c: unknown) => unknown)({})
-      : undefined;
-    type CordisPlugin = Parameters<Context['plugin']>[0];
-    const f = runtime.ctx.plugin(plugin as unknown as CordisPlugin, config as never) as unknown as FiberLike;
+    // ⑤ 收敛：与内置插件共用 loadPluginFiber。市场产物多为 CJS（index.js）→ unwrapDefault。
+    // 市场语义：st!==2 = 用户显式启用却未激活 → 视为失败（清 fiber + 报错），
+    // 与内置插件「保留 fiber 仅记 inactive」不同 —— 由调用方按 st 自行区分。
+    const { fiber: f, state: st } = await loadPluginFiber({ ctx: runtime.ctx, entry: entryPath, unwrapDefault: true });
     fibers.set(key, f);
-    await settle();
-    const st = f.state;
     if (st !== 2) {
       fibers.delete(key);
       console.warn(`[orchdesk] 市场插件 ${dir} 未激活：fiber.state=${st}`);
@@ -640,6 +636,7 @@ export async function stopRuntime(): Promise<void> {
     console.warn('[orchdesk] 运行时关闭异常:', (err as Error).message);
   }
   runtime = null;
+  runtimePromise = null; // ⑤ 竞态修复配套：stop 后允许再次 startRuntime
 }
 
 // ---- helpers ----
@@ -657,6 +654,45 @@ function settle(times = 3): Promise<void> {
   let p: Promise<void> = Promise.resolve();
   for (let i = 0; i < times; i++) p = p.then(() => new Promise<void>((r) => setTimeout(r, 0)));
   return p;
+}
+
+/**
+ * ⑤ 插件装载统一 helper —— 收敛 startRuntime / setPluginEnabled / setMarketPluginEnabled
+ * 三处重复的「dynamicImport → (unwrapDefault) → normalizeInject → Config → ctx.plugin →
+ * settle → state」样板。改一处不再漏两处。
+ * 差异点用参数表达，不靠复制：
+ * - `unwrapDefault`：市场插件常是 CJS（index.js），装载产物在 `mod.default`；内置插件
+ *   vendored 成 ESM，命名导出在顶层 → 无需解开。
+ * - `transformConfig`：仅内置 trace 在**装载时**注入内置 TOKEN + 用户开关（见
+ *   buildTraceConfig）；热插拔（setPluginEnabled）刻意不注入 —— trace 的 TOKEN 只在
+ *   首次启动装载时有意义，运行时开关由用户后续显式控制。
+ * @returns settle 后的 fiber 句柄 + 激活状态（state===2）。
+ */
+async function loadPluginFiber(opts: {
+  ctx: Context;
+  /** 产物绝对路径（内置 = pluginEntry(name)，市场 = marketDir()/dir/index.js）。 */
+  entry: string;
+  /** 是否解开 CJS default 壳（市场插件产物在 mod.default）。 */
+  unwrapDefault?: boolean;
+  /** 装载时对 config 的追加变换（仅内置 trace 用）。 */
+  transformConfig?: (cfg: Record<string, unknown>) => Record<string, unknown>;
+}): Promise<{ fiber: FiberLike; state: number }> {
+  const mod = (await dynamicImport(pathToFileUrl(opts.entry))) as Record<string, unknown>;
+  const raw = (opts.unwrapDefault && mod.default && typeof mod.default === 'object'
+    ? mod.default
+    : mod) as Record<string, unknown>;
+  const plugin = normalizeInject(raw);
+  let config = typeof plugin.Config === 'function'
+    ? (plugin.Config as (c: unknown) => unknown)({})
+    : undefined;
+  if (config && typeof config === 'object' && opts.transformConfig) {
+    config = opts.transformConfig(config as Record<string, unknown>) as never;
+  }
+  type CordisPlugin = Parameters<Context['plugin']>[0];
+  const fiber = opts.ctx.plugin(plugin as unknown as CordisPlugin, config as never) as unknown as FiberLike;
+  await settle();
+  const state = (fiber as unknown as { state?: number }).state ?? 0;
+  return { fiber, state };
 }
 
 /** 把绝对路径转成 file:// URL（Windows 盘符需三斜杠）。 */
