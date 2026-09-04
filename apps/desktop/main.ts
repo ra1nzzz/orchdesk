@@ -136,7 +136,9 @@ import {
 } from './browser-tools';
 import {
   browserShotDir,
+  clearBrowserPages,
   closeBrowser as cdpCloseBrowser,
+  closeBrowserPage,
   evalInPage,
   getBrowserState,
   onBrowserStateChange,
@@ -2737,6 +2739,38 @@ ipcMain.handle('orchdesk:browser-toggle-visible', async (_e, visible: unknown) =
 ipcMain.handle('orchdesk:browser-close', async () => {
   const closed = cdpCloseBrowser();
   return { ok: true, closed, state: getBrowserState() };
+});
+
+/**
+ * 关闭单个页面快照 TAB（侧栏卡片「×」）。
+ * 注意关的是**卡片**不是窗口：底层只有一个隐藏窗口，关活跃卡才会连带收起窗口，
+ * 关非活跃卡只是把它从登记簿里移除。
+ */
+ipcMain.handle('orchdesk:browser-close-page', async (_e, id: unknown) => {
+  if (typeof id !== 'string' || !id) return { ok: false, reason: '缺少页面 id', state: getBrowserState() };
+  return { ok: true, state: closeBrowserPage(id) };
+});
+
+/** 关闭全部页面快照 TAB（侧栏「全部关闭」）：清空登记簿并收起窗口。 */
+ipcMain.handle('orchdesk:browser-clear-pages', async () => {
+  return { ok: true, state: clearBrowserPages() };
+});
+
+/**
+ * 用户亲手把窗口切到某个已访问过的页面（侧栏点 TAB 卡片）。
+ * 这是**用户操作**不是 Agent 工具调用，按 ADR-0011「文件 Tab 用户亲手操作不走授权门」
+ * 的同一口径不过授权门；且目标 URL 本来就是 Agent 已经访问过的。
+ */
+ipcMain.handle('orchdesk:browser-goto', async (_e, url: unknown) => {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+    return { ok: false, reason: 'URL 不合法（仅支持 http/https）', state: getBrowserState() };
+  }
+  try {
+    await cdpOpenBrowser(url, { timeoutMs: 20_000 });
+    return { ok: true, state: getBrowserState() };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message, state: getBrowserState() };
+  }
 });
 
 /** 在系统文件管理器中打开截图目录。 */

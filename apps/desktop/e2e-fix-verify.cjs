@@ -539,8 +539,16 @@ async function run() {
   const trayHint = page.locator('.tray-hint');
   await assert(await trayHint.count() > 0, 'tray-hint 状态提示显示');
 
+  // 需求2：主题切换只保留在左下角导航底部，标题栏不再重复摆文字按钮。
   const toggleThemeBtn = page.locator('.titlebar [data-action="toggle-theme"]');
-  await assert(await toggleThemeBtn.count() > 0, '主题切换按钮在标题栏中');
+  await assert(await toggleThemeBtn.count() === 0, '标题栏不再重复摆主题切换按钮（左下角已有）');
+  const themeInNav = page.locator('[data-action="toggle-theme"]');
+  await assert(await themeInNav.count() > 0, '主题切换仍有入口（左下角导航底部）');
+
+  // 需求3：浏览器 / 终端 的文字按钮已从标题栏下移为状态栏右下角图标。
+  await page.waitForTimeout(600);   // 等 init 的 Promise.allSettled 建完图标区
+  const sbIcons = page.locator('#sbActions .sb-icon');
+  await assert(await sbIcons.count() === 2, '状态栏右下角有浏览器 / 终端两个图标');
 
   // ================================================================
   // 测试组 2：主区渲染 — 欢迎页/新对话（home-screen）
@@ -752,11 +760,13 @@ async function run() {
     await assert(tabText.includes('技能'), 'Tab 有"技能与MCP"');
 
     // Switch to 产物 tab and verify
-    await ctxTabs.nth(1).click();
+    // 需求3 之后 TAB 变成 4 个（插入「文件」）—— 用 data-id 定位而不是 nth 索引，
+    // 否则插入/重排 TAB 就会静默切错页。
+    await page.locator('[data-action="ctx-tab"][data-id="products"]').first().click();
     await page.waitForTimeout(200);
 
     // Switch to 技能与MCP tab
-    await ctxTabs.nth(2).click();
+    await page.locator('[data-action="ctx-tab"][data-id="skills"]').first().click();
     await page.waitForTimeout(200);
     const mcpDots = page.locator('.mcp-dot');
     await assert(await mcpDots.count() > 0, 'MCP 连接状态指示器存在 (count=' + await mcpDots.count() + ')');
@@ -1336,16 +1346,21 @@ async function run() {
 
     // ③ 文件面板缺省根跟随当前会话的项目目录。注意：文件面板是全屏覆盖层，
     //    开着会挡住侧栏点击 —— 每次看完 .file-root 必须先关面板再切会话。
-    await page.locator('[data-action="file-panel"]').first().click();
-    await page.waitForTimeout(250);
+    //    需求3 之后入口从标题栏按钮改为：右栏「文件」TAB → 头部「全屏」按钮。
+    const openFileFull = async () => {
+      await page.locator('[data-action="ctx-tab"][data-id="files"]').first().click();
+      await page.waitForTimeout(250);
+      await page.locator('[data-action="file-panel"]').first().click();
+      await page.waitForTimeout(250);
+    };
+    await openFileFull();
     const rootWhileS2 = await page.locator('.file-root').textContent().catch(() => '');
     await assert(!/D:\/Code\/Demo/.test(rootWhileS2 || ''), `BUG-023 未绑定会话的文件面板不应落在项目目录（实际=${rootWhileS2}）`);
     await page.locator('[data-action="file-close"]').first().click();
     await page.waitForTimeout(200);
     await s1Row.first().click();
     await page.waitForTimeout(350);
-    await page.locator('[data-action="file-panel"]').first().click();
-    await page.waitForTimeout(250);
+    await openFileFull();
     const rootWhileS1 = await page.locator('.file-root').textContent().catch(() => '');
     await assert(/D:\/Code\/Demo/.test(rootWhileS1 || ''), `BUG-023 绑定会话的文件面板缺省根应为项目目录（实际=${rootWhileS1}）`);
     // 关面板 + 还原折叠态（不干扰后续用例；失败必须暴露而不是吞掉）
@@ -1483,7 +1498,9 @@ async function run() {
     });
     await page.waitForTimeout(400);
     let live = await page.locator('#msgScroll').innerText();
-    await assert(/正在执行工具/.test(live), 'typing 期间显示「正在执行工具」（live 轨迹被读，不再存而不显）');
+    // 需求4：思考链默认折叠 + 头部带工具计数（「正在执行 N 个工具…」），
+    // 断言放宽为「正在执行…工具」——核心是 live 轨迹被真实读取，不是固定文案。
+    await assert(/正在执行.*工具/.test(live), 'typing 期间显示「正在执行…工具」（live 轨迹被读，不再存而不显）');
     await assert(/file_list/.test(live) && /执行中/.test(live), 'running 步骤行实时出现（file_list · 执行中）');
 
     // running → done：同一行翻转为完成（onToolStep 归一化 done 事件）
@@ -1591,7 +1608,13 @@ async function run() {
   }
 
   // ---- ⑥ 文件面板：打开/关闭可见性真实切换 ----
+  // 需求3 之后入口改为右栏「文件」TAB 头部的全屏按钮（不再有标题栏文字按钮）。
   try {
+    // 前一用例停在插件页（右栏不是会话的任务监控，没有 ctx-tab）→ 先回会话页
+    await page.locator('[data-action="nav"][data-id="session"]').first().click();
+    await page.waitForTimeout(500);
+    await page.locator('[data-action="ctx-tab"][data-id="files"]').first().click();
+    await page.waitForTimeout(250);
     await page.locator('[data-action="file-panel"]').first().click();
     await page.waitForTimeout(350);
     const openState = await page.evaluate(() => {

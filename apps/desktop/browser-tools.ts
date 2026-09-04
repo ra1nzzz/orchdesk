@@ -516,6 +516,27 @@ export function clipBrowserText(text: string, maxChars: number): string {
   return `${s.slice(0, lim)}\n…（已截断，页面共 ${s.length} 字符）`;
 }
 
+/**
+ * 页面快照（UI 重构：侧栏浏览器 TAB 的数据源）。
+ * 底层是**单个隐藏 CDP 窗口**——同一时刻只有一个活跃页面，但 Agent 会先后访问多个
+ * URL。每次导航登记一张卡片（标题/URL/缩略图），侧栏据此渲染可单关/全关的 TAB 列表。
+ * 这里如实表达「访问过的页面快照」，绝不冒充「多个页面同时存在」。
+ */
+export interface BrowserPageSnapshot {
+  id: string;
+  url: string;
+  title: string;
+  /** 缩略图 data URL（该页面截过图才有）。 */
+  shot?: string;
+  /** 首次访问时间戳（ms）。 */
+  at: number;
+  /** 是否为窗口当前停留的页面。 */
+  active: boolean;
+}
+
+/** 页面快照上限：只保留最近访问的若干张，避免长时间会话无界累积。 */
+export const BROWSER_PAGES_MAX = 12;
+
 export interface BrowserStateSnapshot {
   open: boolean;
   url?: string;
@@ -524,6 +545,8 @@ export interface BrowserStateSnapshot {
   /** 最近一次截图（绝对路径 + 缩略图 data URL，供 UI 展示）。 */
   lastShot?: { path: string; dataUrl?: string } | null;
   lastError?: string;
+  /** 页面快照 TAB（按访问先后登记，最新的在前）。未打开浏览器时为 []。 */
+  pages?: BrowserPageSnapshot[];
 }
 
 /** 浏览器状态 → 给模型看的一句话（工具结果 / 状态查询共用同一口径）。 */

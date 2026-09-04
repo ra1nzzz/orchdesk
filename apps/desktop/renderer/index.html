@@ -14,15 +14,10 @@
   <span class="app-name">OrchDesk</span>
   <span class="win-title" id="winTitle">会话 — 本地 Agent 工作台</span>
   <div class="tray-hint"><span class="tray-dot"></span><span id="trayText">本地运行 · 1 专家在线</span></div>
+  <!-- 标题栏只留品牌/会话信息/时钟：浏览器·终端·文件的入口已下移到状态栏图标（右下角）
+       与右栏 TAB（文件），主题切换在左下角导航底部，此处不再重复摆按钮。 -->
   <span style="margin-left:auto" class="row">
-    <!-- 浏览器（ADR-0011）：Agent 默认在后台窗口操作网页，这里是用户的观察与制动入口 -->
-    <button class="btn ghost sm" data-action="browser-panel" id="browserBtn" title="内置浏览器">浏览器</button>
-    <!-- 终端（P2-10）：用户亲手操作的交互式终端（非 Agent 工具，不过授权门） -->
-    <button class="btn ghost sm" data-action="terminal-panel" id="terminalBtn" title="终端">终端</button>
-    <!-- 文件（P2-11）：本地文件浏览与高亮预览（只读优先） -->
-    <button class="btn ghost sm" data-action="file-panel" id="fileBtn" title="文件">文件</button>
     <span style="color:var(--fg-faint)" id="clock"></span>
-    <button class="btn ghost sm" data-action="toggle-theme">深色</button>
   </span>
 </header>
 
@@ -31,10 +26,20 @@
   <aside class="side" id="side"></aside>
   <main class="main" id="main"></main>
   <aside class="context" id="context"></aside>
+  <!-- 浏览器侧栏（需求3）：与任务监控共用第 4 列。Agent 调用浏览器时自动展开并顶替
+       任务监控（两个侧栏同时展开会把主区挤没）；收起后任务监控自动回来。 -->
+  <aside class="browser-side" id="browserSide"></aside>
 </div>
+
+<!-- 终端（需求3）：底部抽屉，位于状态栏之上、主区之下。
+     在文档流里而不是 fixed 覆盖层 —— 展开时主区（flex:1）自动收缩，
+     全屏档位同样靠挤压上方空间实现，不遮挡任何内容。 -->
+<div id="terminalRoot" class="term-drawer hidden"></div>
 
 <div class="statusbar">
     <span class="mut" id="statusText" style="color:var(--fg-dim)">OrchDesk Core</span>
+    <!-- 右下角图标区：浏览器（激活点亮）/ 终端（展开点亮）。文字按钮已从标题栏移除。 -->
+    <span class="sb-actions" id="sbActions"></span>
 </div>
 
 <div class="wizard hidden" id="wizard">
@@ -50,8 +55,8 @@
 <div id="modalRoot"></div>
 <div id="menuRoot"></div>
 <div id="toastRoot"></div>
-<!-- 终端 / 文件：全屏覆盖层（不用 modal 体系 —— xterm 实例与滚动位置不能随推送重绘） -->
-<div id="terminalRoot" class="fullscreen-panel hidden"></div>
+<!-- 文件（P2-11）保持全屏覆盖层：预览/编辑/diff 需要宽幅，窄抽屉放不下。
+     它的入口已从标题栏按钮改为右栏「文件」TAB。 -->
 <div id="fileRoot" class="fullscreen-panel hidden"></div>
 
 <script src="vendor/marked.min.js"></script>

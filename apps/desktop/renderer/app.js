@@ -48,6 +48,17 @@
     // 建议项图标（iconMap 引用，此前缺失 → ic() 渲染空 SVG）
     barChart: '<line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/>',
     grid: '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
+    // ---- 本轮 UI 重构新增 ----
+    // 终端（状态栏右下角图标；此前只有文字按钮，无图标）
+    terminal: '<rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="6 9 9 12 6 15"/><line x1="12" y1="15" x2="17" y2="15"/>',
+    // 下拉箭头（思考链展开 / 终端抽屉）
+    chevDown: '<polyline points="6 9 12 15 18 9"/>',
+    // 关闭叉（浏览器 TAB 单关）
+    x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+    // 图片占位（浏览器页面快照无缩略图时）
+    image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><polyline points="21 16 16 11 5 20"/>',
+    // 双箭头全关（浏览器「全部关闭」）
+    xAll: '<polyline points="4 8 8 12 4 16"/><line x1="13" y1="8" x2="20" y2="16"/><line x1="20" y1="8" x2="13" y2="16"/>',
   };
   const ic = (n, s = 20) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
   /** 工具步骤行（live typing 与静态消息两处共用，杜绝双份模板漂移）。
@@ -307,6 +318,8 @@
     selProjForComposer: null, projDropdownOpen: false, composerMoreOpen: false,
     newConvMode: true,
     feedback: new Set(), authMode: 'default',
+    // 思考链展开态（本轮 UI 重构）：key = `${sid}|${msg.t}`，存已展开「思考中」详情的消息。
+    thinkExpanded: new Set(),
     authLevels: [], authAudit: [],
     // ④M-1：授权模式卡 / 白名单工具下拉数据化（canonical = authz 插件 AUTHZ_MODES / GRANT_TOOLS）
     authModes: [], grantTools: [],
@@ -371,15 +384,28 @@
     // 浏览器（ADR-0011）：内置 CDP 浏览器窗口。loaded=false = 桥未接入；
     // open=false = 窗口没开（面板显示「未打开」，不显示空白页或假地址）。
     // Agent 默认在后台隐藏窗口操作网页，这个面板是用户唯一的观察与制动入口。
-    browser: { loaded: false, open: false, url: '', title: '', visible: false, lastShot: null, lastError: '', shotsDir: '' },
+    browser: { loaded: false, open: false, url: '', title: '', visible: false, lastShot: null, lastError: '', shotsDir: '',
+      // 页面快照 TAB（本轮 UI 重构）：底层是单个隐藏 CDP 窗口，同一时刻只有一个活跃页面，
+      // 但 Agent 会先后访问多个 URL —— 每次 navigate 登记一张卡片（标题/URL/缩略图），
+      // 侧栏里就是可单关/全关的 TAB 列表。绝不用「多个页面同时存在」的假象冒充多标签。
+      pages: [], activePageId: null },
     // 浏览器面板是否打开（状态推送时据此决定是否重绘）
     browserPanelOpen: false,
+    // 浏览器侧栏显隐（多 TAB 容器）。Agent 首次调用浏览器时自动置 true，
+    // 同时默认收起任务监控侧栏——两个侧栏同时展开会把主区挤没。
+    browserSideOpen: false,
     // 终端（P2-10）：ptyAvailable=false = 管道模式降级（必须显式展示，不冒充 PTY）。
     // loaded=false = 桥未接入；sessions=[] = 没有打开的终端（两者不是一回事）。
     terminal: { loaded: false, ptyAvailable: false, via: 'pipe', sessions: [], activeId: null },
     terminalPanelOpen: false,
+    // 终端抽屉全屏档位（需求3）：全屏时抽屉占满除标题栏/状态栏外的高度，
+    // 主区（flex:1）自动收缩——不是盖住主区。
+    termFull: false,
     // 文件（P2-11）：root='' = 尚未选择目录。children 是目录懒加载缓存。
     filePanelOpen: false,
+    // 右栏「文件」TAB（本轮 UI 重构）：与「产物」不同——产物是本会话 Agent 生成的内容，
+    // 文件是当前工作目录的全部文件。root 自动跟随会话所绑定项目的本地目录。
+    fileTab: { root: '', inited: false, loading: false, expanded: new Set(), children: new Map(), error: '' },
     filePanel: { loaded: false, bridgeMissing: false, root: '', truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false,
       // P3 编辑/diff：view = preview | edit | diff；diffRows/diffTooLarge 是最近一次计算结果
       view: 'preview', editBuf: '', editBase: '', eol: 'lf', dirty: false, saving: false, discardArmed: false,
@@ -841,9 +867,20 @@
       const liveSteps = (sid && Array.isArray(state.toolSteps[sid]) && state.toolSteps[sid].length)
         ? state.toolSteps[sid]
         : null;
-      txt = liveSteps
-        ? `<span class="faint">思考中 · 正在执行工具…</span>` + liveSteps.map((st) => toolRow(st, true)).join('')
-        : '<span class="faint">思考中…</span>';
+      if (!liveSteps) {
+        txt = '<span class="faint">思考中…</span>';
+      } else {
+        // 本轮 UI 重构：思考链默认折叠（只显示最近一步，不让工具流刷屏），
+        // 右侧箭头可展开/收起完整明细。key 用 sid|t 唯一定位这条 typing 消息。
+        const key = `${sid}|${m.t}`;
+        const open = state.thinkExpanded.has(key);
+        txt = `<div class="think-head"><span class="faint">思考中 · 正在执行 ${liveSteps.length} 个工具…</span>`
+          + `<button class="think-toggle${open ? ' open' : ''}" data-action="think-toggle" data-k="${esc(key)}"`
+          + ` title="${open ? '收起' : '展开'}思考链详情" aria-expanded="${open}">${ic('chevDown', 13)}</button></div>`
+          + (open
+            ? `<div class="think-detail">${liveSteps.map((st) => toolRow(st, true)).join('')}</div>`
+            : toolRow(liveSteps[liveSteps.length - 1], true));
+      }
     } else if (isU) {
       txt = esc(raw);
     } else {
@@ -860,6 +897,72 @@
       <div class="avatar">${isU ? '我' : 'AI'}</div>
       <div class="body"><div class="meta"><b>${isU ? '你' : 'OrchDesk'}</b><span>${m.t}</span>${intentBadge}${tok}</div>
       <div class="md-body">${txt}</div>${sub}${tools}${fb}</div></div>`;
+  }
+
+  /* ---------- 需求1：语义化的大任务步骤（待办数据源） ---------- */
+  // 旧实现把 m.tools 的工具名（file_read / shell_command…）直接当待办条目，于是侧栏
+  // 里清一色是命令执行。真正有用的待办是 Agent 对「用户这个请求」做的任务分拆
+  // （调研可行性 / 多子代理审阅 / 头脑风暴 / UI 重构 / 提交推送 …）。
+  // 用户裁决「两者结合」，故两级来源：
+  //   ① 结构化 plan 块：```orch-plan / ```plan 围栏 或 <plan>…</plan>，支持 - [x] 完成标记
+  //   ② 回退：Agent 正文里的 markdown 列表（checkbox 任务清单优先，其次「计划/步骤」小节下的列表）
+  // 工具调用不再是待办，降为折叠的「执行明细」——那是手段，不是任务本身。
+  function parseStepLine(line) {
+    let s = (line || '').trim();
+    if (!s) return null;
+    let done = false;
+    let m = s.match(/^[-*+]\s*\[([ xX])\]\s*(.+)$/);
+    if (!m) m = s.match(/^\d+[.)]\s*\[([ xX])\]\s*(.+)$/);
+    if (m) { done = m[1].toLowerCase() === 'x'; s = m[2].trim(); }
+    else {
+      const p = s.match(/^(?:[-*+]\s+|\d+[.)]\s+)(.+)$/);
+      if (!p) return null;   // 不是列表行 → 不是步骤
+      s = p[1].trim();
+    }
+    // 行内状态标记（模型常用 emoji 而不是 checkbox）
+    if (/^(?:✅|☑|✔)/.test(s) || /（已完成）|\(done\)/i.test(s)) done = true;
+    s = s.replace(/^(?:✅|☑|✔|⏳|🔄|▶)\s*/, '').trim();
+    if (!s || s.length > 120) return null;   // 过长的是正文而非步骤标题
+    return { text: s, done };
+  }
+
+  function extractPlanSteps(msgs) {
+    const isAgent = (m) => { const r = m.r || m.role; return r === 'agent' || r === 'assistant'; };
+    const steps = [];
+    // ① 结构化 plan 块
+    (msgs || []).forEach((m) => {
+      if (!isAgent(m)) return;
+      const raw = m.x || m.text || '';
+      const blocks = [];
+      const fenceRe = /```(?:orch-plan|plan)\s*\n([\s\S]*?)```/gi;
+      const tagRe = /<plan>([\s\S]*?)<\/plan>/gi;
+      let mt;
+      while ((mt = fenceRe.exec(raw))) blocks.push(mt[1]);
+      while ((mt = tagRe.exec(raw))) blocks.push(mt[1]);
+      blocks.forEach((b) => b.split(/\r?\n/).forEach((ln) => {
+        const st = parseStepLine(ln);
+        if (st) steps.push(st);
+      }));
+    });
+    if (steps.length) return { steps, source: 'plan' };
+
+    // ② 回退：正文 markdown 列表（先剔除代码块，避免把代码注释/数组当步骤）
+    (msgs || []).forEach((m) => {
+      if (!isAgent(m)) return;
+      const raw = m.x || m.text || '';
+      const lines = raw.split(/```/).filter((_, i) => i % 2 === 0).join('\n').split(/\r?\n/);
+      let inPlanSection = false;
+      lines.forEach((ln) => {
+        if (/^\s{0,3}#{1,6}\s+/.test(ln) || /^[^`]{0,40}[：:]\s*$/.test(ln)) {
+          inPlanSection = /(计划|步骤|安排|任务|方案|路线|待办|plan|step|todo|checklist)/i.test(ln);
+          return;
+        }
+        const isCheckbox = /^\s*[-*+]\s*\[[ xX]\]/.test(ln);
+        const st = parseStepLine(ln);
+        if (st && (isCheckbox || inPlanSection)) steps.push(st);
+      });
+    });
+    return { steps, source: steps.length ? 'list' : 'none' };
   }
 
   /* ---------- 渲染：侧栏（ZCode 风格：分组/项目切换 + 文件夹图标） ---------- */
@@ -1260,6 +1363,9 @@
       const tabs = [
         { id: 'todo', label: '待办', badge: '' },
         { id: 'products', label: '产物', badge: '' },
+        // 需求3：文件从标题栏按钮 + 全屏面板，改为右栏 TAB。
+        // 与「产物」不同源：产物是本会话 Agent 生成的内容，文件是工作目录的全部文件。
+        { id: 'files', label: '文件', badge: '' },
         { id: 'skills', label: '技能与MCP', badge: '' },
       ];
       const tabsHTML = tabs.map(t => `<button class="ctx-tab ${tabId === t.id ? 'active' : ''}" data-action="ctx-tab" data-id="${t.id}">${t.label}</button>`).join('');
@@ -1277,20 +1383,32 @@
       }
 
       const msgs = s.msgs || [];
-      // ---- 提取步骤 ----
-      const steps = [];
-      msgs.forEach((m, i) => {
+      // ---- 需求1：语义化的大任务步骤 ----
+      // 主列表来自 Agent 对请求的任务分拆（结构化 plan 块 → markdown 列表回退），
+      // 工具调用降为下面的「执行明细」——file_read / shell_command 是手段不是任务。
+      const plan = extractPlanSteps(msgs);
+      const steps = plan.steps.map((p) => ({ text: p.text, status: p.done ? 'done' : 'pending', time: '' }));
+      // 完成度只用显式标记（[x] / ✅）判定，不拿工具数去猜进度；
+      // 唯一例外：Agent 正在跑（typing 中）时把第一条未完成的标为进行中。
+      const runningNow = msgs.some((m) => m.typing);
+      if (runningNow) {
+        const first = steps.find((st) => st.status !== 'done');
+        if (first) first.status = 'running';
+      }
+      const doneSteps = steps.filter(st => st.status === 'done').length;
+      const runningSteps = steps.filter(st => st.status === 'running').length;
+      // ---- 执行明细（工具调用 / SubAgent）：折叠在待办下方，不占主列表 ----
+      const toolActions = [];
+      msgs.forEach((m) => {
         if (m.tools && m.tools.length) {
           m.tools.forEach((t) => {
-            steps.push({ text: t.n, status: t.ph === 'done' ? 'done' : t.ph === 'running' ? 'running' : 'pending', time: m.t || '' });
+            toolActions.push({ text: t.n, status: t.ph === 'done' ? 'done' : t.ph === 'running' ? 'running' : 'pending', time: m.t || '' });
           });
         }
         if (m.sub) {
-          steps.push({ text: 'SubAgent: ' + (m.sub.name || ''), status: m.sub.state === 'disposed' ? 'done' : 'running', time: m.t || '' });
+          toolActions.push({ text: 'SubAgent: ' + (m.sub.name || ''), status: m.sub.state === 'disposed' ? 'done' : 'running', time: m.t || '' });
         }
       });
-      const doneSteps = steps.filter(st => st.status === 'done').length;
-      const runningSteps = steps.filter(st => st.status === 'running').length;
 
       // ---- 提取产物 ----
       const products = [];
@@ -1350,13 +1468,28 @@
       // ---- Tab 内容 ----
       let bodyHTML = '';
       if (tabId === 'todo') {
+        const stepRow = (st, mini) => {
+          const dot = st.status === 'done' ? ic('check', mini ? 11 : 12) : st.status === 'running' ? ic('refresh', mini ? 11 : 12) : ic('circle', mini ? 11 : 12);
+          return '<div class="ctx-step' + (mini ? ' mini' : '') + '"><span class="step-dot ' + st.status + '">' + dot + '</span>'
+            + '<span class="step-text">' + esc(st.text) + '</span>'
+            + (mini ? '<span class="step-time">' + esc(st.time) + '</span>' : '') + '</div>';
+        };
         if (steps.length === 0) {
-          bodyHTML = '<div class="ctx-empty"><div class="empty-icon">' + ic('check', 28) + '</div>暂无执行步骤<br><span style="font-size:10px">发送消息后将跟踪 Agent 操作</span></div>';
+          // 没有语义步骤时，至少把执行明细摆出来（旧版就是从这里取的），并说明待办的语义来源
+          bodyHTML = toolActions.length
+            ? '<div class="ctx-empty" style="padding-top:14px"><div class="empty-icon">' + ic('clipboard', 24) + '</div>'
+              + '尚未识别到任务分拆<br><span style="font-size:10px">让 Agent 先输出计划清单（markdown 列表或 ```orch-plan 块）即可在此跟踪</span></div>'
+              + '<div class="ctx-section"><div class="ctx-section-title">执行明细 · ' + toolActions.length + ' 个动作</div>' + toolActions.map((st) => stepRow(st, true)).join('') + '</div>'
+            : '<div class="ctx-empty"><div class="empty-icon">' + ic('check', 28) + '</div>暂无任务步骤<br><span style="font-size:10px">发送消息后将跟踪 Agent 的任务分拆与操作</span></div>';
         } else {
-          bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">执行步骤</div>' + steps.map(st => {
-            const dot = st.status === 'done' ? ic('check', 12) : st.status === 'running' ? ic('refresh', 12) : ic('circle', 12);
-            return '<div class="ctx-step"><span class="step-dot ' + st.status + '">' + dot + '</span><span class="step-text">' + esc(st.text) + '</span><span class="step-time">' + esc(st.time) + '</span></div>';
-          }).join('') + '</div>';
+          const srcLabel = plan.source === 'plan' ? '任务分拆' : '任务分拆（解析自回复列表）';
+          bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">' + srcLabel
+            + ' · ' + doneSteps + '/' + steps.length + '</div>'
+            + steps.map((st) => stepRow(st, false)).join('') + '</div>';
+          if (toolActions.length) {
+            bodyHTML += '<details class="ctx-fold"><summary>' + ic('chev', 12) + ' 执行明细 · ' + toolActions.length + ' 个动作</summary>'
+              + toolActions.map((st) => stepRow(st, true)).join('') + '</details>';
+          }
         }
       } else if (tabId === 'products') {
         if (products.length === 0) {
@@ -1368,6 +1501,10 @@
             return '<div class="ctx-product" data-action="preview-product" data-pid="' + p.id + '" data-content="' + esc(p.content).replace(/"/g, '&quot;') + '" data-name="' + esc(p.name) + '" data-lang="' + esc(p.lang || '') + '"><span class="prod-icon ' + iconCls + '">' + iconChar + '</span><span class="prod-name">' + esc(p.name) + '</span><span class="prod-size">' + (p.size > 1024 ? (p.size/1024).toFixed(1) + 'KB' : p.size + 'B') + '</span></div>';
           }).join('') + '</div>';
         }
+      } else if (tabId === 'files') {
+        // 需求3：工作目录的全部文件（不是会话产物）。首次进入时按项目目录自动装载。
+        if (!state.fileTab.inited) ensureFileTabRoot();
+        bodyHTML = '<div class="ctx-section">' + fileTabBodyHTML() + '</div>';
       } else if (tabId === 'skills') {
         bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">插件（默认启用）</div>' + usedSkills.map(sk => {
           // BUG（全盘死挂点扫描）：旧代码 isOn = builtinSkills.includes(sk) 恒 true →
@@ -2270,20 +2407,100 @@
       lastShot: st.lastShot || null,
       lastError: st.lastError || '',
       shotsDir: st.shotsDir || prev.shotsDir || '',
+      pages: Array.isArray(st.pages) ? st.pages.slice() : (prev.pages || []),
+      activePageId: st.pages && st.pages.find((p) => p.active) ? st.pages.find((p) => p.active).id : (prev.activePageId || null),
     };
-    renderBrowserBadge();
+    // 需求3：Agent 一调用浏览器就自动展开侧栏（并顶替任务监控），用户不必去找开关。
+    // 只在「从未打开 → 打开」这个跃迁上自动展开，避免用户手动收起后被每次状态推送弹回来。
+    if (state.browser.open && !prev.open) state.browserSideOpen = true;
+    // 浏览器关了（窗口收起/全关）→ 侧栏也跟着收起，任务监控自动回来
+    if (!state.browser.open && prev.open) state.browserSideOpen = false;
+    renderStatusBarActions();
+    renderBrowserSide();
   }
 
-  /** 标题栏入口的状态点：打开=实心，未打开=空心，未接入=不显示点。 */
-  function renderBrowserBadge() {
-    const btn = $('#browserBtn');
-    if (!btn) return;
+  /**
+   * 浏览器侧栏（需求3）：与任务监控共用第 4 列，展开时顶替任务监控。
+   * 内容 = 页面快照 TAB 列表（底层是单隐藏 CDP 窗口，同一时刻只有一个活跃页面，
+   * 卡片表达的是「Agent 先后访问过哪些页面」，不是多标签浏览器）。
+   */
+  function renderBrowserSide() {
+    const host = $('#browserSide');
+    if (!host) return;
+    const app = $('#appGrid');
+    if (app) app.classList.toggle('browser-mode', !!state.browserSideOpen);
+    if (!state.browserSideOpen) { host.innerHTML = ''; return; }
     const b = state.browser;
-    btn.innerHTML = `浏览器${b.loaded ? `<span class="bw-dot ${b.open ? 'on' : ''}"></span>` : ''}`;
-    btn.title = !b.loaded ? '内置浏览器（未接入主进程）'
-      : b.open ? `内置浏览器：${b.title || b.url || '已打开'}${b.visible ? '' : '（后台运行）'}`
-        : '内置浏览器（未打开）· 点击查看详情';
+    const pages = b.pages || [];
+    const closeBtn = '<button class="bw-side-x" data-action="bw-side-close" title="收起侧栏（回到任务监控）">' + ic('x', 13) + '</button>';
+    if (!b.loaded) {
+      host.innerHTML = `<div class="bw-head">${ic('globe', 14)}<b>浏览器</b>${closeBtn}</div>`
+        + '<div class="bw-empty">未接入主进程，浏览器状态不可用。</div>';
+      return;
+    }
+    if (!pages.length) {
+      host.innerHTML = `<div class="bw-head">${ic('globe', 14)}<b>浏览器</b>${closeBtn}</div>`
+        + '<div class="bw-empty">浏览器未打开。<br><span style="font-size:10.5px">让 Agent 访问网页时会自动打开并在此登记页面</span></div>';
+      return;
+    }
+    const tabsHTML = pages.map((p) => {
+      const host2 = (() => { try { return new URL(p.url).hostname; } catch { return p.url; } })();
+      return `<div class="bw-tab${p.active ? ' active' : ''}" data-action="bw-tab-focus" data-id="${esc(p.id)}" title="${esc(p.url)}">
+        ${p.shot ? `<img class="bw-tab-shot" src="${esc(p.shot)}" alt="">` : `<div class="bw-tab-shot ph">${ic('image', 18)}</div>`}
+        <div class="bw-tab-meta">
+          <div class="bw-tab-title">${esc(p.title || host2 || '(无标题)')}</div>
+          <div class="bw-tab-url">${esc(host2)}</div>
+        </div>
+        <button class="bw-tab-x" data-action="bw-tab-close" data-id="${esc(p.id)}" title="关闭这个页面">${ic('x', 12)}</button>
+      </div>`;
+    }).join('');
+    host.innerHTML = `<div class="bw-head">${ic('globe', 14)}<b>浏览器</b>`
+      + `<span class="badge${b.visible ? ' ok' : ''}">${b.visible ? '窗口已显示' : '后台运行'}</span>`
+      + `<button class="btn sm ghost" data-action="${b.visible ? 'browser-hide' : 'browser-show'}">${b.visible ? '收回' : '显示'}</button>`
+      + `<button class="btn sm ghost" data-action="bw-tab-clear" title="关闭全部页面">${ic('xAll', 12)}</button>`
+      + closeBtn + `</div>`
+      + `<div class="bw-tabs">${tabsHTML}</div>`
+      + `<div class="bw-foot faint">单窗口模型：同一时刻只有一个活跃页面，卡片是 Agent 访问过的页面快照。点击卡片＝显示该页。</div>`;
   }
+
+  /**
+   * 状态栏右下角图标区：浏览器 / 终端。
+   * 标题栏的三个文字按钮（浏览器/终端/文件）已下移：文件进右栏 TAB，
+   * 浏览器与终端改为这里的图标——未激活灰、激活点亮，点击切换开关。
+   * 只在首次建 DOM，之后仅改 class/title，避免频繁重绘丢焦点。
+   */
+  function renderStatusBarActions() {
+    const host = $('#sbActions');
+    if (!host) return;
+    const b = state.browser;
+    const t = state.terminal;
+    if (host.childElementCount !== 2) {
+      host.innerHTML = `<button class="sb-icon" data-action="browser-panel" id="browserBtn"></button>`
+        + `<button class="sb-icon" data-action="terminal-panel" id="terminalBtn"></button>`;
+    }
+    const bBtn = $('#browserBtn');
+    const tBtn = $('#terminalBtn');
+    if (bBtn) {
+      const on = !!b.open;
+      bBtn.innerHTML = ic('globe', 15);
+      bBtn.classList.toggle('on', on);
+      bBtn.classList.toggle('unavailable', !b.loaded);
+      bBtn.title = !b.loaded ? '内置浏览器（未接入主进程）'
+        : on ? `内置浏览器：${b.title || b.url || '已打开'}${b.visible ? '' : '（后台运行）'} · 点击${state.browserSideOpen ? '收起' : '展开'}侧栏`
+          : '内置浏览器（未打开）· Agent 访问网页时自动显示';
+    }
+    if (tBtn) {
+      const on = !!state.terminalPanelOpen;
+      tBtn.innerHTML = ic('terminal', 15);
+      tBtn.classList.toggle('on', on);
+      tBtn.classList.toggle('unavailable', !(t && t.loaded));
+      tBtn.title = !(t && t.loaded) ? '终端（未接入主进程）'
+        : `${on ? '收起' : '展开'}终端${t.ptyAvailable ? '' : '（node-pty 不可用，管道模式降级）'}`;
+    }
+  }
+
+  /** 兼容旧调用点：浏览器状态变化后刷新状态栏图标。 */
+  function renderBrowserBadge() { renderStatusBarActions(); }
 
   function loadBrowserStatus() {
     if (typeof bridge.getBrowserStatus !== 'function') return Promise.resolve();
@@ -2373,11 +2590,25 @@
     $('#terminalRoot').classList.remove('hidden');
     ensureTermSkeleton();
     refreshTerminal();
+    renderStatusBarActions();   // 右下角终端图标点亮
   }
 
   function closeTerminalPanel() {
     state.terminalPanelOpen = false;
-    $('#terminalRoot').classList.add('hidden');
+    state.termFull = false;
+    const root = $('#terminalRoot');
+    root.classList.add('hidden');
+    root.classList.remove('full');
+    renderStatusBarActions();
+  }
+
+  /** 抽屉全屏 / 还原（需求3）：全屏时主区自动收缩，不遮挡任何内容。 */
+  function toggleTermFull() {
+    state.termFull = !state.termFull;
+    $('#terminalRoot').classList.toggle('full', state.termFull);
+    renderTerminalPanel();
+    // 高度变了，xterm 必须重新 fit，否则内容被裁或留白
+    for (const [, h] of termHandles) { if (h.fit) { try { h.fit.fit(); } catch { /* 隐藏中 */ } } }
   }
 
   function terminalShortcutLabel() {
@@ -2482,8 +2713,10 @@
     const t = state.terminal;
     const head = $('#termHead');
     const closeBtn = '<button class="btn ghost sm" data-action="term-close">关闭</button>';
+    // 需求3：抽屉全屏档位。全屏时上方主区（flex:1）自动收缩，不是盖住它。
+    const fullBtn = `<button class="btn ghost sm" data-action="term-full" title="${state.termFull ? '还原高度' : '展开到全屏（上方空间自动收缩）'}">${state.termFull ? '还原' : '全屏'}</button>`;
     if (!t.loaded) {
-      head.innerHTML = `<b>终端</b><span class="faint">未接入主进程</span><span style="margin-left:auto"></span>${closeBtn}`;
+      head.innerHTML = `<b>终端</b><span class="faint">未接入主进程</span><span style="margin-left:auto"></span>${fullBtn}${closeBtn}`;
       showTermEmpty('<div class="faint">主进程未接入终端服务（桥不可用）。</div>');
       return;
     }
@@ -2495,7 +2728,7 @@
       <span class="badge${t.ptyAvailable ? '' : ' warn'}" title="${t.ptyAvailable ? 'node-pty 已加载（真 PTY）' : 'node-pty 不可用：已降级为管道模式（交互式程序受限）'}">${terminalShortcutLabel()}</span>
       <span class="row" style="margin-left:10px">${tabs}</span>
       <button class="btn sm ghost" data-action="term-new" ${t.sessions.length >= 6 ? 'disabled title="已达会话上限（6）"' : ''}>+ 新建</button>
-      <span style="margin-left:auto"></span>${closeBtn}`;
+      <span style="margin-left:auto"></span>${fullBtn}${closeBtn}`;
     if (!t.sessions.length) {
       showTermEmpty('<div class="faint">没有打开的终端。点「+ 新建」开一个。</div>');
       return;
@@ -2601,6 +2834,77 @@
     const active = state.filePanel.previewPath === e.path ? ' active' : '';
     const ico = e.binary ? ic('fileText', 14) : ic(e.ext === 'md' ? 'fileText' : 'code', 14);
     return `<div class="file-row file${active}" style="${pad}" data-action="file-open" data-path="${esc(e.path)}" data-name="${esc(e.name)}"><span class="file-caret"></span>${ico}${esc(e.name)}<span class="file-size">${esc(e.sizeLabel || '')}</span></div>`;
+  }
+
+  /* ---------- 需求3：右栏「文件」TAB ----------
+     与全屏文件面板（state.filePanel，含预览/编辑/diff）分开维护自己的根与展开态：
+     TAB 的根自动跟随当前会话所绑定项目的本地目录（用户裁决），全屏面板仍可自选目录。 */
+  function fileTabTreeHTML(dir, depth) {
+    const ft = state.fileTab;
+    const cached = ft.children.get(dir);
+    if (!cached) return '';
+    let html = (cached.entries || []).map((e) => {
+      const full = e.path || (dir.replace(/[\\/]+$/, '') + '/' + e.name);
+      e.path = full;
+      const isDir = e.kind === 'dir';
+      const open = ft.expanded.has(full);
+      let out = `<div class="ftab-row${isDir ? ' dir' : ''}" data-action="${isDir ? 'ftab-toggle' : 'ftab-open'}" data-p="${esc(full)}" title="${esc(full)}" style="padding-left:${6 + depth * 13}px">`
+        + `<span class="ftab-ico">${isDir ? ic(open ? 'folderOpen' : 'folder', 13) : ic(e.ext === 'md' ? 'fileText' : 'code', 13)}</span>`
+        + `<span class="ftab-name">${esc(e.name)}</span></div>`;
+      if (isDir && open) out += fileTabTreeHTML(full, depth + 1);
+      return out;
+    }).join('');
+    if (cached.truncated) html += `<div class="ftab-row faint" style="padding-left:${6 + depth * 13}px">（条目超上限，已截断）</div>`;
+    return html;
+  }
+
+  function fileTabBodyHTML() {
+    const ft = state.fileTab;
+    // 侧栏太窄放不下预览/编辑/diff，也放不下完整的目录选择流程：
+    // 三个分支**都要**有进全屏面板的入口 —— 目录读不到时用户恰恰最需要它。
+    const fullBtn = `<button class="btn sm ghost" data-action="file-panel" title="在全屏面板中打开（可预览 / 编辑 / diff / 选目录）">${ic('plus', 12)}</button>`;
+    if (ft.error) {
+      return `<div class="ctx-empty"><div class="empty-icon">${ic('warn', 24)}</div>目录读取失败<br><span style="font-size:10px">${esc(ft.error)}</span></div>`
+        + `<div class="ftab-acts">${fullBtn}<button class="btn sm ghost" data-action="ftab-pick">选择目录</button></div>`;
+    }
+    if (!ft.root) {
+      // 没有绑定目录时不冒充「空目录」：明确区分「未绑定」与「绑定了但空」
+      return `<div class="ctx-empty"><div class="empty-icon">${ic('folder', 24)}</div>当前会话的项目未绑定本地目录<br>`
+        + `<span style="font-size:10px">绑定后自动显示该目录的文件，也可手动选择</span></div>`
+        + `<div class="ftab-acts"><button class="btn sm ghost" data-action="ftab-pick">选择目录</button>${fullBtn}</div>`;
+    }
+    const base = ft.root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || ft.root;
+    return `<div class="ftab-head" title="${esc(ft.root)}">${ic('folderOpen', 13)}<span class="ftab-root">${esc(base)}</span>`
+      + `<button class="btn sm ghost" data-action="ftab-refresh" title="刷新">${ic('refresh', 12)}</button>`
+      + `<button class="btn sm ghost" data-action="ftab-pick" title="更换目录">${ic('folder', 12)}</button>`
+      + fullBtn + `</div>`
+      + `<div class="ftab-tree">${fileTabTreeHTML(ft.root, 0) || '<div class="faint" style="padding:8px">（空目录）</div>'}</div>`
+      + `<div class="ftab-tip faint">点击文件在全屏面板中预览</div>`;
+  }
+
+  /** 首次进入文件 TAB 时按项目目录自动装载（用户裁决：自动跟随项目目录）。 */
+  async function ensureFileTabRoot() {
+    const ft = state.fileTab;
+    if (ft.inited || ft.loading) return;
+    const dir = projectPathOf(state.sel) || '';
+    if (!dir) { ft.inited = true; return; }
+    ft.loading = true;
+    try {
+      const r = await bridge.fileTree(dir);
+      if (r && r.bridgeMissing) { ft.error = '主进程未接入文件服务'; }
+      else if (!r || r.ok === false) { ft.error = (r && r.reason) || '目录读取失败'; }
+      else { ft.root = dir; ft.children.set(dir, { entries: r.entries || [], truncated: !!r.truncated }); ft.error = ''; }
+    } catch (e) { ft.error = (e && e.message) || '目录读取失败'; }
+    ft.loading = false;
+    ft.inited = true;
+    render();
+  }
+
+  async function fileTabLoadDir(dir) {
+    const ft = state.fileTab;
+    const r = await bridge.fileTree(dir);
+    if (!r || r.ok === false) { toast(`读取目录失败：${(r && r.reason) || '未接入'}`, 'err'); ft.expanded.delete(dir); return; }
+    ft.children.set(dir, { entries: r.entries || [], truncated: !!r.truncated });
   }
 
   function renderTreeLevel(dir, depth) {
@@ -3206,6 +3510,55 @@
       case 'toggle-theme': { state.theme = state.theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = state.theme; break; }
       case 'toggle-ctx': state.ctxOpen = !state.ctxOpen; render(); break;
       case 'ctx-tab': state.ctxTab = el.dataset.id; render(); break;
+      // 思考链展开/收起（本轮 UI 重构）：只切这份消息的展开态，工具明细随之显示或收起。
+      case 'think-toggle': {
+        const k = el.dataset.k;
+        if (!k) break;
+        if (state.thinkExpanded.has(k)) state.thinkExpanded.delete(k); else state.thinkExpanded.add(k);
+        render();
+        break;
+      }
+      // ---- 需求3：右栏「文件」TAB ----
+      case 'ftab-toggle': {
+        const p = el.dataset.p;
+        if (!p) break;
+        const ft = state.fileTab;
+        if (ft.expanded.has(p)) { ft.expanded.delete(p); render(); }
+        else {
+          ft.expanded.add(p);
+          if (ft.children.has(p)) render();
+          else fileTabLoadDir(p).then(() => render()).catch(() => render());
+        }
+        break;
+      }
+      case 'ftab-open': {
+        // 侧栏只做浏览（很窄），点文件交给全屏面板预览——复用既有预览/编辑/diff 链路
+        const p = el.dataset.p;
+        if (!p) break;
+        openFilePanel();
+        openFilePreview(p, p.split(/[\\/]/).pop());
+        break;
+      }
+      case 'ftab-pick': {
+        const r = await bridge.pickFolder();
+        if (r && r.ok && r.path) {
+          const ft = state.fileTab;
+          ft.root = r.path; ft.expanded = new Set(); ft.children = new Map(); ft.error = ''; ft.inited = true;
+          await fileTabLoadDir(r.path);
+        } else if (r && r.ok === false) {
+          toast(`选择目录失败：${(r && r.reason) || '未接入'}`, 'err');
+        }
+        render();
+        break;
+      }
+      case 'ftab-refresh': {
+        const ft = state.fileTab;
+        if (!ft.root) break;
+        ft.children = new Map();
+        await fileTabLoadDir(ft.root);
+        render();
+        break;
+      }
       case 'preview-product': {
         const content = el.dataset.content;
         const name = el.dataset.name;
@@ -4052,14 +4405,58 @@
       case 'modal-bg': if (e.target === el) { state.askInputCb = null; state.browserPanelOpen = false; closeModal(); } break;
       case 'modal-cancel': state.askInputCb = null; state.browserPanelOpen = false; closeModal(); break;
 
-      /* 浏览器面板（ADR-0011） */
-      case 'browser-panel': openBrowserPanel(); break;
+      /* 浏览器面板（ADR-0011）+ 侧栏（需求3） */
+      case 'browser-panel': {
+        // 右下角图标：浏览器已打开 → 切换侧栏；未打开 → 打开详情弹窗（里面说明了触发方式）
+        if (state.browser.open) {
+          state.browserSideOpen = !state.browserSideOpen;
+          renderBrowserSide();
+          renderStatusBarActions();
+        } else {
+          openBrowserPanel();
+        }
+        break;
+      }
+      case 'bw-side-close': {
+        state.browserSideOpen = false;
+        renderBrowserSide();
+        renderStatusBarActions();
+        break;
+      }
+      case 'bw-tab-close': {
+        const id = el.dataset.id;
+        if (!id) break;
+        const r = await bridge.closeBrowserPage(id);
+        if (r && r.state) applyBrowserState(r.state);
+        break;
+      }
+      case 'bw-tab-clear': {
+        const r = await bridge.clearBrowserPages();
+        if (r && r.state) applyBrowserState(r.state);
+        toast('已关闭全部页面', 'ok');
+        break;
+      }
+      case 'bw-tab-focus': {
+        // 单窗口模型：切到历史页面 = 把窗口导航过去（用户亲手操作，不过授权门）
+        const id = el.dataset.id;
+        const p = (state.browser.pages || []).find((x) => x.id === id);
+        if (!p) break;
+        const r = await bridge.browserGoto(p.url);
+        if (r && r.state) applyBrowserState(r.state);
+        if (r && r.ok === false) toast(`切换失败：${r.reason || ''}`, 'err');
+        break;
+      }
       case 'browser-show': browserAct(() => bridge.setBrowserVisible(true)); break;
       case 'browser-hide': browserAct(() => bridge.setBrowserVisible(false)); break;
       case 'browser-close': browserAct(() => bridge.closeBrowser(), '浏览器已关闭'); break;
 
-      /* 终端面板（P2-10） */
-      case 'terminal-panel': openTerminalPanel(); break;
+      /* 终端面板（P2-10）+ 底部抽屉（需求3） */
+      case 'terminal-panel': {
+        // 右下角图标：展开 / 收起抽屉
+        if (state.terminalPanelOpen) closeTerminalPanel(); else openTerminalPanel();
+        break;
+      }
+      case 'term-full': toggleTermFull(); break;
       case 'term-close': closeTerminalPanel(); break;
       case 'term-new': newTerminalSession(); break;
       case 'term-tab': {
@@ -4531,6 +4928,11 @@
     if (bridge.onAuthRequest) {
       bridge.onAuthRequest((req) => { showApprovalModal(req); });
     }
+
+    // 需求3：状态栏右下角图标区（浏览器 / 终端）在所有元数据到位后建一次，
+    // 此时 loaded / open 已是真实值，图标才不会先闪一下「未接入」再点亮。
+    renderStatusBarActions();
+    renderBrowserSide();
 
     console.log('[init] parallel results:', results.map((r, i) => r.status === 'rejected' ? `${i}:FAIL` : `${i}:ok`).join(', '));
 

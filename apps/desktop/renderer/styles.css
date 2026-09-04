@@ -659,3 +659,94 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 .fd-stat{padding:6px 14px;font-size:11.5px;color:var(--fg-dim);border-bottom:1px solid var(--border)}
 .badge.warn{color:#d29922;border:1px solid rgba(210,153,34,.4);border-radius:8px;
   padding:0 7px;font-size:10.5px;line-height:16px}
+
+/* ===========================================================================
+   本轮 UI 重构（需求 2 / 3 / 4）
+   =========================================================================== */
+
+/* ---- 状态栏右下角图标区：浏览器 / 终端（文字按钮已从标题栏移除）----
+   未激活=灰，激活=点亮（accent）；未接入主进程=半透明且禁用光标。 */
+.sb-actions{margin-left:auto;display:flex;align-items:center;gap:2px}
+.sb-icon{display:grid;place-items:center;width:22px;height:22px;padding:0;border:1px solid transparent;
+  border-radius:5px;background:transparent;color:var(--fg-faint);cursor:pointer;transition:.12s}
+.sb-icon:hover{background:var(--bg-hover);color:var(--fg-dim)}
+.sb-icon.on{color:var(--accent);border-color:var(--border-strong);background:var(--accent-soft)}
+.sb-icon.unavailable{opacity:.45;cursor:not-allowed}
+
+/* ---- 思考链展开/收起（typing 消息右侧箭头）----
+   默认折叠只显示最近一步，展开后显示完整工具明细。 */
+.think-head{display:flex;align-items:center;gap:6px;font-size:11.5px}
+.think-toggle{display:grid;place-items:center;width:18px;height:18px;padding:0;margin-left:2px;
+  border:1px solid var(--border);border-radius:4px;background:var(--bg-inset);
+  color:var(--fg-faint);cursor:pointer;transition:transform .15s,color .12s}
+.think-toggle:hover{color:var(--fg-dim);border-color:var(--border-strong)}
+.think-toggle.open{transform:rotate(180deg);color:var(--accent);border-color:var(--border-strong)}
+.think-detail{margin-top:4px;margin-left:2px;padding-left:7px;border-left:2px solid var(--border)}
+.think-detail .trow{font-size:11px;color:var(--fg-dim);padding:3px 8px;margin:2px 0;
+  border-radius:4px;display:flex;gap:8px;align-items:center;background:var(--bg-inset)}
+.think-detail .trow .tdot{width:7px;height:7px;border-radius:50%;flex:none}
+
+/* ---- 待办：执行明细折叠区 + 次级步骤行 ----
+   工具调用不再是待办主列表（那是手段不是任务），折叠在语义步骤下方。 */
+.ctx-fold{margin-top:8px;font-size:11px;color:var(--fg-faint)}
+.ctx-fold summary{cursor:pointer;list-style:none;display:flex;gap:5px;align-items:center;padding:2px 6px;border-radius:5px}
+.ctx-fold summary::-webkit-details-marker{display:none}
+.ctx-fold summary:hover{background:var(--bg-hover);color:var(--fg-dim)}
+.ctx-step.mini{padding:2px 6px 2px 12px;font-size:11px}
+.ctx-step.mini .step-text{color:var(--fg-faint);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px}
+.ctx-step.mini .step-dot{width:12px;height:12px;margin-top:2px}
+
+/* ---- 右栏「文件」TAB（工作目录全部文件；与「产物」不同源）---- */
+.ftab-head{display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:4px;
+  border-bottom:1px solid var(--border);font-size:11.5px;color:var(--fg-dim)}
+.ftab-root{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ftab-head .btn{padding:0 5px;min-height:20px;line-height:18px;display:grid;place-items:center}
+.ftab-tree{padding:2px 0;max-height:calc(100vh - 260px);overflow:auto}
+.ftab-row{display:flex;align-items:center;gap:6px;padding:3px 8px;font-size:11.5px;
+  color:var(--fg-dim);cursor:pointer;border-radius:4px}
+.ftab-row:hover{background:var(--bg-hover);color:var(--fg)}
+.ftab-row.dir{color:var(--fg)}
+.ftab-ico{display:flex;flex:none;color:var(--fg-faint)}
+.ftab-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ftab-acts{display:flex;justify-content:center;padding:4px 0 2px}
+.ftab-tip{padding:5px 8px;font-size:10px;border-top:1px solid var(--border);margin-top:4px}
+
+/* ---- 浏览器侧栏（需求3）：与任务监控共用第 4 列，展开时顶替任务监控 ----
+   底层是单个隐藏 CDP 窗口，卡片表达「Agent 访问过的页面」，不是多标签浏览器。 */
+.browser-side{background:var(--bg-panel);border-left:1px solid var(--border);overflow-y:auto;
+  display:none;flex-direction:column;min-height:0}
+.app.browser-mode{grid-template-columns:60px 270px 1fr 300px}
+.app.browser-mode .context{display:none}
+.app.browser-mode .browser-side{display:flex}
+.bw-head{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);
+  font-size:12px;position:sticky;top:0;background:var(--bg-panel);z-index:1}
+.bw-head b{font-weight:600}
+.bw-head .btn{padding:0 6px;min-height:20px;line-height:18px;font-size:10.5px;display:grid;place-items:center}
+.bw-side-x{margin-left:auto;display:grid;place-items:center;width:20px;height:20px;padding:0;
+  border:1px solid transparent;border-radius:4px;background:transparent;color:var(--fg-faint);cursor:pointer}
+.bw-side-x:hover{background:var(--bg-hover);color:var(--fg)}
+.bw-tabs{padding:6px;display:flex;flex-direction:column;gap:6px}
+.bw-tab{display:flex;gap:8px;align-items:flex-start;padding:6px;border:1px solid var(--border);
+  border-radius:7px;background:var(--bg-inset);cursor:pointer;transition:.12s}
+.bw-tab:hover{border-color:var(--border-strong);background:var(--bg-hover)}
+.bw-tab.active{border-color:var(--accent);background:var(--accent-soft)}
+.bw-tab-shot{width:64px;height:44px;flex:none;border-radius:4px;object-fit:cover;background:var(--bg-panel)}
+.bw-tab-shot.ph{display:grid;place-items:center;color:var(--fg-faint)}
+.bw-tab-meta{flex:1;min-width:0}
+.bw-tab-title{font-size:11.5px;line-height:1.35;overflow:hidden;display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical}
+.bw-tab-url{font-size:10px;color:var(--fg-faint);margin-top:2px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.bw-tab-x{flex:none;display:grid;place-items:center;width:18px;height:18px;padding:0;
+  border:1px solid transparent;border-radius:4px;background:transparent;color:var(--fg-faint);cursor:pointer}
+.bw-tab-x:hover{background:var(--danger-soft);color:var(--danger)}
+.bw-empty{padding:18px 14px;text-align:center;font-size:11.5px;color:var(--fg-dim);line-height:1.7}
+.bw-foot{padding:7px 10px;font-size:10px;line-height:1.6;border-top:1px solid var(--border);margin-top:auto}
+
+/* ---- 终端抽屉（需求3）：底部展开，挤压上方主区而不是覆盖它 ----
+     放在文档流里（标题栏/主区/抽屉/状态栏），主区 flex:1 会自动让出高度；
+     全屏档位同样靠挤压实现，不遮挡任何内容。 */
+.term-drawer{flex:none;height:300px;display:flex;flex-direction:column;background:var(--bg);
+  border-top:1px solid var(--border);min-height:0}
+.term-drawer.full{height:calc(100vh - 66px)}  /* 只留标题栏 38 + 状态栏 28 */
+.term-drawer.hidden{display:none}

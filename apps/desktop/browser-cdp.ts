@@ -24,10 +24,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   BROWSER_NO_ELEMENT,
+  BROWSER_PAGES_MAX,
   BROWSER_SHOT_DIR,
   BROWSER_SHOT_THUMB_WIDTH,
   browserShotRelativePath,
   clampBrowserTimeout,
+  type BrowserPageSnapshot,
   type BrowserStateSnapshot,
   type BrowserWaitMode,
 } from './browser-tools';
@@ -55,6 +57,14 @@ let shotSeq = 0;
 let lastShot: { path: string; dataUrl?: string } | null = null;
 let lastError = '';
 let stateListener: ((st: BrowserStateSnapshot) => void) | null = null;
+/**
+ * 页面快照 TAB（UI 重构）：单窗口模型下的「访问过的页面」登记簿。
+ * 最新访问的排在最前；超过 BROWSER_PAGES_MAX 丢最旧（与 trace pending 同一个道理，
+ * 遥测级数据不许无界）。
+ */
+let pages: BrowserPageSnapshot[] = [];
+let activePageId: string | null = null;
+let pageSeq = 0;
 
 export function onBrowserStateChange(cb: ((st: BrowserStateSnapshot) => void) | null): void {
   stateListener = cb;
@@ -64,10 +74,45 @@ export function isBrowserOpen(): boolean {
   return !!win && !win.isDestroyed();
 }
 
+/**
+ * 登记一次页面访问（导航成功后调用）：同 URL 复用已有卡片，否则新建一张并置为活跃。
+ * 单窗口模型下「同一时刻只有一个活跃页面」是硬事实，卡片列表表达的是
+ * 「Agent 先后访问过哪些页面」，不是「多个页面并存」。
+ */
+function registerPage(url: string, title?: string): void {
+  const u = url || '';
+  if (!u) return;
+  const existing = pages.find((p) => p.url === u);
+  if (existing) {
+    if (title) existing.title = title;
+    activePageId = existing.id;
+    pages.forEach((p) => { p.active = p.id === existing.id; });
+    return;
+  }
+  pageSeq += 1;
+  const page: BrowserPageSnapshot = { id: `pg${pageSeq}`, url: u, title: title || '', at: Date.now(), active: true };
+  pages = [page, ...pages.map((p) => ({ ...p, active: false }))];
+  activePageId = page.id;
+  // 上限：丢最旧（活跃页永远在最前，不会被丢）
+  if (pages.length > BROWSER_PAGES_MAX) pages = pages.slice(0, BROWSER_PAGES_MAX);
+}
+
+/** 当前活跃页面快照（没有则 null）。 */
+function activePage(): BrowserPageSnapshot | null {
+  return pages.find((p) => p.id === activePageId) || pages[0] || null;
+}
+
+/** 截图完成后把缩略图回填到活跃页面卡上。 */
+function stampActiveShot(dataUrl: string | undefined): void {
+  if (!dataUrl) return;
+  const ap = activePage();
+  if (ap) ap.shot = dataUrl;
+}
+
 export function getBrowserState(): BrowserStateSnapshot {
-  // 未打开时也要给出 lastShot: null —— 状态对象形状必须稳定，
+  // 未打开时也要给出 lastShot: null / pages: [] —— 状态对象形状必须稳定，
   // 否则渲染层要用 `st.lastShot || null` 之类的兜底才能不显示上一张截图。
-  if (!isBrowserOpen() || !win) return { open: false, lastShot: null, lastError: lastError || undefined };
+  if (!isBrowserOpen() || !win) return { open: false, lastShot: null, lastError: lastError || undefined, pages: [] };
   return {
     open: true,
     url: win.webContents.getURL() || '',
@@ -75,10 +120,56 @@ export function getBrowserState(): BrowserStateSnapshot {
     visible: win.isVisible(),
     lastShot,
     lastError: lastError || undefined,
+    pages: pages.map((p) => ({ ...p })),
   };
 }
 
+/**
+ * 关闭单个页面快照 TAB（UI 侧栏「×」）。
+ * 关的是**卡片**，不是窗口：底层只有一个窗口，关掉活跃卡时窗口同时收起，
+ * 关掉非活跃卡只从列表移除（那个页面早已不在窗口里了）。
+ */
+export function closeBrowserPage(id: string): BrowserStateSnapshot {
+  const target = pages.find((p) => p.id === id);
+  if (target) {
+    pages = pages.filter((p) => p.id !== id);
+    if (activePageId === id) {
+      // 活跃卡被关：让出窗口 —— 还有其它卡则切到最新一张，否则关窗口
+      const next = pages[0];
+      if (next) {
+        next.active = true;
+        activePageId = next.id;
+        if (isBrowserOpen()) void navigateTo(next.url, 15_000).catch(() => { /* 导航失败保留卡片 */ });
+      } else {
+        activePageId = null;
+        closeBrowser();
+        return getBrowserState();
+      }
+    }
+  }
+  emit();
+  return getBrowserState();
+}
+
+/** 关闭全部页面快照 TAB（UI 侧栏「全部关闭」）：清空登记簿并收起窗口。 */
+export function clearBrowserPages(): BrowserStateSnapshot {
+  pages = [];
+  activePageId = null;
+  lastShot = null;
+  closeBrowser();
+  emit();
+  return getBrowserState();
+}
+
 function emit(): void {
+  // 标题在 did-finish-load 后才稳定：每次推送顺带把活跃页卡片的标题同步一遍，
+  // 否则侧栏 TAB 会一直停在导航那一刻的旧标题（甚至是空标题）。
+  if (win && !win.isDestroyed()) {
+    const t = win.webContents.getTitle() || '';
+    const u = win.webContents.getURL() || '';
+    const ap = activePage();
+    if (ap && u && ap.url === u && t) ap.title = t;
+  }
   if (stateListener) {
     try { stateListener(getBrowserState()); } catch { /* 推送失败不影响工具执行 */ }
   }
@@ -293,6 +384,9 @@ export async function openBrowser(
     // loadURL 已在 did-finish-load 时 resolve，这里只是把状态同步出去
     lastError = '';
   }
+  // 导航成功 = 一次页面访问：登记进侧栏的页面快照 TAB（同 URL 复用卡片）。
+  // 标题在 did-finish-load 后才稳定，这里取的是当前值，后续状态推送会带着新标题。
+  registerPage(url, win!.webContents.getTitle() || '');
   emit();
   return getBrowserState();
 }
@@ -421,6 +515,8 @@ export async function screenshotBrowser(
     } catch { /* 缩略图失败不影响主结果 */ }
 
     lastShot = { path: abs, dataUrl };
+    // 缩略图回填到活跃页面卡上——侧栏 TAB 显示的就是这张（没有截过图的页面显示占位）
+    stampActiveShot(dataUrl);
     lastError = '';
     emit();
     return { ok: true, path: abs, dataUrl, via, note };
@@ -457,6 +553,10 @@ export function closeBrowser(): boolean {
     const w = win;
     win = null;
     lastShot = null;
+    // 窗口关了 = 一次浏览会话结束：页面快照 TAB 一并清空，
+    // 否则下次打开浏览器会看到上一轮的陈旧卡片（且它们的 URL 已不在窗口里）。
+    pages = [];
+    activePageId = null;
     try { w.close(); } catch { /* 已关闭 */ }
   }
   emit();

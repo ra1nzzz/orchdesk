@@ -209,6 +209,8 @@ const orchdesk = {
   getBrowserStatus: (): Promise<{
     open: boolean; url?: string; title?: string; visible?: boolean;
     lastShot?: { path: string; dataUrl?: string } | null; lastError?: string; shotsDir?: string;
+    /** 页面快照 TAB（单窗口模型下的「访问过的页面」登记簿，最新在前）。 */
+    pages?: Array<{ id: string; url: string; title: string; shot?: string; at: number; active: boolean }>;
   }> => ipcRenderer.invoke('orchdesk:browser-status'),
 
   /** 显示 / 隐藏浏览器窗口（Agent 默认在后台窗口操作，用户可随时调出来看）。 */
@@ -218,6 +220,24 @@ const orchdesk = {
   /** 关闭浏览器窗口（用户侧紧急制动）。 */
   closeBrowser: (): Promise<{ ok: boolean; closed: boolean; state?: Record<string, unknown> }> =>
     ipcRenderer.invoke('orchdesk:browser-close'),
+
+  /**
+   * 关闭单个页面快照 TAB（侧栏卡片的「×」）。
+   * 关的是**卡片**不是窗口——底层只有一个隐藏窗口，关活跃卡才会连带收起窗口。
+   */
+  closeBrowserPage: (id: string): Promise<{ ok: boolean; reason?: string; state?: Record<string, unknown> }> =>
+    ipcRenderer.invoke('orchdesk:browser-close-page', id),
+
+  /** 关闭全部页面快照 TAB（侧栏「全部关闭」）：清空登记簿并收起窗口。 */
+  clearBrowserPages: (): Promise<{ ok: boolean; state?: Record<string, unknown> }> =>
+    ipcRenderer.invoke('orchdesk:browser-clear-pages'),
+
+  /**
+   * 用户亲手把窗口切到某个已访问过的页面（侧栏点 TAB 卡片）。
+   * 用户操作不走授权门，且目标 URL 本来就是 Agent 访问过的。
+   */
+  browserGoto: (url: string): Promise<{ ok: boolean; reason?: string; state?: Record<string, unknown> }> =>
+    ipcRenderer.invoke('orchdesk:browser-goto', url),
 
   /** 在系统文件管理器中打开截图目录。 */
   openBrowserShotDir: (): Promise<{ ok: boolean; dir?: string; reason?: string }> =>
