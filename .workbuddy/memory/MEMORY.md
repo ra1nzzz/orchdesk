@@ -46,6 +46,9 @@
   **完成度只用显式标记（[x]/✅）判定，不拿工具数猜**；工具调用是折叠的「执行明细」不是待办。
 - **e2e 定位一律用 `data-id`，禁止 `nth(N)` 索引**：插入/重排 TAB 会静默切错页，
   表象是后续元素超时，排查极贵。文件 TAB 三个分支（正常/未绑定/读取失败）都必须有全屏入口按钮。
+- 右栏 TAB = 待办 / 产物 / 文件 / **能力**（`ctx-tab` 的 id：`todo|products|files|caps`）。
+  「能力」= 插件（`pluginRuntime` 真实装载）+ 技能（磁盘 `skills/*.skill` 真实扫描）+ MCP。
+  改名前后两组数据都是假的，别再按旧名找 `skills`。
 
 ## 工具与 skill（本机）
 - `impeccable`（UI/UX 审查）：不在 `~/.workbuddy/skills/` 但在 **`~/.workbuddy/skills-marketplace/skills/` 缓存**
@@ -58,7 +61,7 @@
 - 网关软拒绝：带 tools 返 200 空→逐级降级不带 tools，`Map<provider.id|model>` 记忆；去 tools 后仍空不误置 toolsRejected。
 
 ## 知识库与债务（docs/）
-- 入口 docs/README.md；分层 00/10/20/30/40/50/60/70/80/99；ID `orch-<area>-<nnn>`；改后 `audit_knowledge_base.py docs` 须 0 issues。canonical：verify 计数→CHECKPOINT、结构→quality-gates、需求→PRD、分层→architecture。外部资料只引用不回拷；密钥/本机路径禁入。
+- 入口 docs/README.md；分层 00/10/20/30/40/50/60/70/80/99；ID `orch-<area>-<nnn>`；改后 `python scripts/audit_knowledge_base.py docs` 须 0 issues（脚本 2026-09-05 才落进 `scripts/`，此前文档写了门禁命令但仓库里没这个文件）。canonical：verify 计数→CHECKPOINT、结构→quality-gates、需求→PRD、分层→architecture。外部资料只引用不回拷；密钥/本机路径禁入。
 - 最大欠账是勾选不是代码（PLAN 107 仅 23 已勾）；83 项运行期验收是**待执行**非环境阻断，别写「受 BUG-W02 门控」。对照 `docs/00-项目/openworker-对照-2026-09-03.md`。
 - verify 缺环境隔离（用真实 dataDir，有污染 prod 遥测风险，待补）。
 - 死挂点审计 v0.12.0 清零（累计 15+）：含零调用方/零写入方变体；契约+接线测试都要有。方法见 `~/.workbuddy/skills/dead-hook-audit/`。
