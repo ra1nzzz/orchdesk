@@ -107,6 +107,8 @@ import {
 import {
   ALLOWED_COMMANDS,
   TOOL_DEFS,
+  FILE_READ_RESULT_MAX,
+  WEB_FETCH_RESULT_MAX,
   type ApiMessage,
   type ModelReply,
   type NativeToolCall,
@@ -163,6 +165,7 @@ import {
   sortTreeEntries,
   FILE_TREE_MAX_ENTRIES,
   SNIFF_WINDOW,
+  FILE_READ_MAX_BYTES,
 } from './file-panel';
 
 // ============================================================================
@@ -1098,14 +1101,15 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
           recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'error', reason: `stat 失败：${(err as Error).message}`, sessionId: sid });
           return { name, result: '', error: `无法读取文件：${(err as Error).message}` };
         }
-        const MAX_READ_BYTES = 2 * 1024 * 1024; // 与渲染层 file 面板读取上限一致（2MB）
-        if (size > MAX_READ_BYTES) {
-          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: `文件 ${size} 字节超过 2MB 读取上限`, sessionId: sid });
+        // ④H-1：读取上限单源化 —— 与渲染层 file 面板共用 FILE_READ_MAX_BYTES（file-panel.ts:31）。
+        // 注意 file_read 工具超限=拒绝，面板 IPC=截断+truncated 标记：仅共享上限值，处理语义各自保留。
+        if (size > FILE_READ_MAX_BYTES) {
+          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: `文件 ${size} 字节超过 ${FILE_READ_MAX_BYTES} 读取上限`, sessionId: sid });
           return { name, result: '', error: `文件过大（${size} 字节），超过 2MB 读取上限，请用文件面板或分段读取` };
         }
         const content = fs.readFileSync(filePath, 'utf-8');
         recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'allowed', sessionId: sid });
-        return { name, result: content.slice(0, 50000) }; // 限制 50KB 回传
+        return { name, result: content.slice(0, FILE_READ_RESULT_MAX) }; // ④M-3：回传上限单源（agent-runtime.ts）
       }
       case 'file_write': {
         const filePath = path.resolve(cwd, String(args.path || ''));
@@ -1221,7 +1225,7 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
         }
         try {
           const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-          // 响应体积护栏：承诺只回传 30KB，但不能因此整读超大响应进内存（防 OOM / 主进程阻塞）。
+          // 响应体积护栏：承诺只回传 WEB_FETCH_RESULT_MAX（30KB），但不能因此整读超大响应进内存（防 OOM / 主进程阻塞）。
           // content-length 预检 + 流式读满上限即停，两重保险。
           const MAX_FETCH_BYTES = 1 * 1024 * 1024;
           const declared = Number(res.headers.get('content-length') || '0');
@@ -1232,7 +1236,7 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
           if (!res.body) {
             const buf = Buffer.from(await res.arrayBuffer());
             recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
-            return { name, result: buf.toString('utf-8').slice(0, 30000) };
+            return { name, result: buf.toString('utf-8').slice(0, WEB_FETCH_RESULT_MAX) };
           }
           const chunks: Buffer[] = [];
           let total = 0;
@@ -1243,7 +1247,7 @@ async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }):
             chunks.push(b);
           }
           recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
-          return { name, result: Buffer.concat(chunks).toString('utf-8').slice(0, 30000) };
+          return { name, result: Buffer.concat(chunks).toString('utf-8').slice(0, WEB_FETCH_RESULT_MAX) };
         } catch (err) {
           recordSandbox({ tool: name, kind: 'network', target: url, decision: 'error', reason: (err as Error).message, sessionId: sid });
           return { name, result: '', error: (err as Error).message.slice(0, 2000) };
@@ -1984,7 +1988,8 @@ type AuthzServiceLike = {
   getLevels(): Array<{ level: number; label: string; scope: string; requiresApproval: boolean }>;
   getAuditLog(): Array<{ kind: string; ts: number; mode?: string; outcome?: string; toolName?: string; reason?: string; sessionId?: string }>;
   setUiAnswerer(fn: ((req: { toolName: string; reason?: string; sessionId?: string }) => Promise<string>) | null): void;
-  getModes?(): Array<{ id: string; label: string; sandboxMode: string; approvalPolicy: string }>;
+  getModes?(): Array<{ id: string; label: string; sandboxMode: string; approvalPolicy: string; blurb: string }>;
+  getGrantTools?(): readonly string[];
   subscribe?(cb: (evt: unknown) => void): () => void;
   // ---- PRD FR-9：会话 / 永久授权白名单 ----
   listGrants?(): GrantRuleLike[];
@@ -2133,6 +2138,20 @@ ipcMain.handle('orchdesk:authz-set-mode', async (_e, mode: string) => {
 ipcMain.handle('orchdesk:authz-get-levels', async () => {
   if (!authzService) return [];
   try { return authzService.getLevels(); } catch { return []; }
+});
+// ④M-1：授权模式卡 / 白名单工具下拉数据化（canonical = packages/plugin/authz AUTHZ_MODES + GRANT_TOOLS）。
+// 此前渲染层 app.js 硬编码 AUTH_MODES（trusted 文案已漂移，丢了「仍受 SandboxMode 约束」），
+// getModes() 在 AuthzServiceLike 已声明却从未接 IPC —— 半接线残留。此处补齐透传通道。
+ipcMain.handle('orchdesk:authz-get-modes', async () => {
+  if (!authzService?.getModes) return { modes: [], grantTools: [] };
+  try {
+    return {
+      modes: authzService.getModes(),
+      grantTools: authzService.getGrantTools?.() ?? ['*'],
+    };
+  } catch {
+    return { modes: [], grantTools: ['*'] };
+  }
 });
 ipcMain.handle('orchdesk:authz-get-audit', async () => {
   if (!authzService) return [];

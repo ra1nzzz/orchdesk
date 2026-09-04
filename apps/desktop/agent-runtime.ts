@@ -101,6 +101,15 @@ export const ALLOWED_COMMANDS: string[] = [
   'notepad', 'code', 'cmd', 'powershell', 'pwsh',
 ];
 
+/**
+ * ④M-3：file_read / web_fetch 回传宿主结果的内容上限（字节字符）。
+ * canonical 宿主切片点 = main.ts executeTool（slice 到这些上限后回传），
+ * schema 描述模板字符串引用同常量，杜绝「描述说 50KB 实际 slice 50000」式漂移。
+ * 注意与 TOOL_RESULT_FEEDBACK_LIMIT（回传模型前的再裁剪）分层：这是宿主原始回传上限。
+ */
+export const FILE_READ_RESULT_MAX = 50000; // file_read 结果切片上限（≈50KB）
+export const WEB_FETCH_RESULT_MAX = 30000; // web_fetch 结果切片上限（≈30KB）
+
 export const TOOL_DEFS: ToolDef[] = [
   // ---- 浏览器（CDP）工具：会改变页面状态的三个在宿主侧过授权门 ----
   ...BROWSER_TOOL_DEFS,
@@ -108,7 +117,7 @@ export const TOOL_DEFS: ToolDef[] = [
     type: 'function',
     function: {
       name: 'file_read',
-      description: '读取本地文本文件内容（最大 50KB）',
+      description: `读取本地文本文件内容（最大 ${FILE_READ_RESULT_MAX / 1000}KB）`,
       parameters: {
         type: 'object',
         properties: { path: { type: 'string', description: '文件绝对路径' } },
@@ -159,7 +168,7 @@ export const TOOL_DEFS: ToolDef[] = [
     type: 'function',
     function: {
       name: 'web_fetch',
-      description: '抓取网页原始内容（最大 30KB）',
+      description: `抓取网页原始内容（最大 ${WEB_FETCH_RESULT_MAX / 1000}KB）`,
       parameters: {
         type: 'object',
         properties: { url: { type: 'string', description: 'http(s) 开头的 URL' } },

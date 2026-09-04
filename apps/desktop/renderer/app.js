@@ -98,11 +98,20 @@
     const cat = state.orchestrationCatalog;
     return !!(cat && Array.isArray(cat.experts) && cat.experts.length);
   }
-  const AUTH_MODES = [
-    { id: 'default', label: '默认安全', blurb: '工作区可写；L3/L4 操作弹窗确认。' },
-    { id: 'trusted', label: '信任模式', blurb: '同默认沙箱，放宽命令/网络白名单；高危操作仍弹窗。' },
-    { id: 'paranoid', label: '偏执模式', blurb: '只读沙箱 + 任何 ask 自动拒绝。' },
+  // ④M-1：授权模式不再硬编码 —— canonical 来自 authz 插件 AUTHZ_MODES，经
+  // orchdesk:authz-get-modes IPC 灌入 state.authModes。这里只留「未加载完成」的
+  // 兜底展示（与插件同文案，加载后即被真实数据覆盖），杜绝 trusted 文案漂移。
+  const FALLBACK_AUTH_MODES = [
+    { id: 'default', label: '默认安全', blurb: '工作区可写；L3/L4 操作弹窗确认（ask）。平衡日常使用与安全。' },
+    { id: 'trusted', label: '信任模式', blurb: '同默认沙箱，但放宽命令/网络白名单（仍受 SandboxMode 约束）。高危操作仍弹窗。' },
+    { id: 'paranoid', label: '偏执模式', blurb: '只读沙箱 + 任何 ask 自动拒绝（never）。最严；不可逆/越界操作一律不开门。' },
   ];
+  const authModesForRender = () => (state.authModes.length ? state.authModes : FALLBACK_AUTH_MODES);
+  // 模式 id → 显示名（消费 authModesForRender，杜绝散落「默认安全/信任/偏执」手写映射漂移）。
+  const authModeLabel = (id) => {
+    const m = authModesForRender().find((x) => x.id === id);
+    return m ? m.label : '默认安全';
+  };
   const PROMPT_CAT_LABELS = { role: '角色行为', safety: '安全边界', format: '输出格式', 'skill-link': '技能联动' };
   const PROMPT_CATS = Object.keys(PROMPT_CAT_LABELS);
   const PLUGINS = [
@@ -207,6 +216,7 @@
       setAuthMode: () => Promise.resolve({ ok: false }),
       getAuthLevels: () => Promise.resolve([]),
       getAuthAudit: () => Promise.resolve([]),
+      getAuthModes: () => Promise.resolve({ modes: [], grantTools: [] }),
       onAuthRequest: () => () => {},
       submitDecision: () => {},
       // 授权白名单（PRD FR-9）
@@ -298,6 +308,8 @@
     newConvMode: true,
     feedback: new Set(), authMode: 'default',
     authLevels: [], authAudit: [],
+    // ④M-1：授权模式卡 / 白名单工具下拉数据化（canonical = authz 插件 AUTHZ_MODES / GRANT_TOOLS）
+    authModes: [], grantTools: [],
     // 授权白名单（PRD FR-9）：会话 / 永久规则，来自 authz 插件真实服务
     grants: [],
     promptDocs: [], promptConflicts: [],
@@ -1001,7 +1013,6 @@
 
   function thinkLabel(l) { return ({ off: '关闭', standard: '标准', deep: '深度', max: '最大' })[l] || '标准'; }
   function renderComposer(s) {
-    const AUTH_MODE_LABEL = { default: '默认安全', trusted: '信任模式', paranoid: '偏执模式' };
     const mpLabel = state.selectedModels.length > 1 ? state.selectedModels.length + ' 个模型' : (state.selectedModels[0] || '选择模型');
     const thinkIdx = ({ off: 0, standard: 1, deep: 2, max: 3 })[state.thinkLevel] || 1;
     // 当前选中项目
@@ -1047,7 +1058,7 @@
             <div class="composer-more-item" data-action="auth-open">
               <span class="cm-icon">${ic('shield', 16)}</span>
               <span class="cm-label">授权模式</span>
-              <span class="cm-val">${AUTH_MODE_LABEL[state.authMode] || '默认安全'}</span>
+              <span class="cm-val">${authModeLabel(state.authMode)}</span>
             </div>
             <div class="composer-more-sep"></div>
             <div class="composer-more-item think-item">
@@ -1567,8 +1578,10 @@
         <div class="faint" style="margin-bottom:8px">插件加载前经 inject 静态声明审查；<b>红色能力</b>需用户主动授权。</div>
         <div class="card" style="padding:10px">
           <div style="font-size:11.5px;font-weight:600;margin-bottom:6px">L0-L4 分级</div>
-          <div class="faint" style="font-size:11.5px;line-height:1.7">
-            L0 读取（无副作用）<br>L1 状态写入（应用域内）<br>L2 文件系统（受限目录）<br>L3 网络（白名单）<br>L4 Shell / 进程（仅 FULL ACCESS）
+          <div class="levels">
+            ${state.authLevels.length
+              ? state.authLevels.map((l) => `<div class="lv"><span class="lv-n">L${l.level}</span><span class="lv-l">${esc(l.label)}</span><span class="faint">${esc(l.scope)}</span>${l.requiresApproval ? '<span class="badge warn">需授权</span>' : ''}</div>`).join('')
+              : '<div class="faint">分级定义加载中…</div>'}
           </div>
         </div>
         <div class="sec-title">当前激活</div>
@@ -1603,7 +1616,7 @@
       const rtOk = state.pluginRuntime && state.pluginRuntime.ready;
       return `<div class="main-inner"><h1 class="pg">设置</h1><div class="pg-sub">模型、沙箱、授权、桌面集成等能力均以插件形式挂载，在此统一管理。</div>
         <div class="statbar">
-          <div class="stat"><div class="sk">授权模式</div><div class="sv"><span class="dot" style="background:var(--ok)"></span>${({ default: '默认安全', trusted: '信任模式', paranoid: '偏执模式' })[state.authMode] || '默认安全'}</div></div>
+          <div class="stat"><div class="sk">授权模式</div><div class="sv"><span class="dot" style="background:var(--ok)"></span>${authModeLabel(state.authMode)}</div></div>
           <div class="stat"><div class="sk">沙箱</div><div class="sv"><span class="badge ok" style="font-weight:600">Windows ACL</span></div></div>
           <div class="stat"><div class="sk">数据目录</div><div class="sv" style="font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px" title="${esc(ddOk ? state.dataDirInventory.dir : '')}">${ddOk ? '…/' + esc(ddShort) : '本地（未扫描）'}</div></div>
           <div class="stat"><div class="sk">运行时</div><div class="sv" style="font-size:12px;font-weight:500">${rtOk ? `插件运行时就绪 · ${state.pluginRuntime.activeCount}/${state.pluginRuntime.total}` : '插件运行时未启动'}</div></div>
@@ -1684,7 +1697,7 @@
           </div>
           <div class="faint" style="margin-bottom:8px">授权模式（三模式映射到 dsh 沙箱 + 审批策略，切换经 session 事件持久化，重启可回放）</div>
           <div class="auth-modes">
-            ${AUTH_MODES.map((m) => `<div class="am ${state.authMode === m.id ? 'sel' : ''}" data-action="auth-mode-pick" data-id="${m.id}">
+            ${authModesForRender().map((m) => `<div class="am ${state.authMode === m.id ? 'sel' : ''}" data-action="auth-mode-pick" data-id="${m.id}">
               <div class="am-h"><b>${m.label}</b>${state.authMode === m.id ? '<span class="badge ok">当前</span>' : ''}</div>
               <div class="faint" style="font-size:11.5px;margin-top:4px">${m.blurb}</div>
             </div>`).join('')}
@@ -1701,7 +1714,7 @@
           <div class="faint" style="margin-bottom:6px">粒度分「会话 / 永久」，规则 = 操作类型 + 目标模式（仅 <span class="mono">*</span> 通配，整串匹配）。命中即放行并计入审计；<b>偏执模式下白名单不生效</b>（切到偏执 = 全锁）。</div>
           <div class="grant-add">
             <select id="grant-tool" class="inp" style="width:150px">
-              ${['*', 'file_write', 'shell_command', 'web_fetch'].map((t) => `<option value="${t}">${t === '*' ? '任意操作' : t}</option>`).join('')}
+              ${(state.grantTools.length ? state.grantTools : ['*', 'file_write', 'shell_command', 'web_fetch']).map((t) => `<option value="${t}">${t === '*' ? '任意操作' : t}</option>`).join('')}
             </select>
             <input type="text" id="grant-pattern" class="inp mono" placeholder="目标模式，如 D:/Code/OrchDesk/* 或 *" style="flex:1;font-size:11.5px">
             <select id="grant-scope" class="inp" style="width:110px"><option value="permanent">永久</option><option value="session">本会话</option></select>
@@ -2212,7 +2225,7 @@
   // 从更严模式切到更松模式需二次确认（防 L4 风险）。
   const MODE_RANK = { paranoid: 0, default: 1, trusted: 2 };
   function confirmSwitchAuth(target) {
-    const targetSpec = AUTH_MODES.find((m) => m.id === target);
+    const targetSpec = authModesForRender().find((m) => m.id === target);
     const loosening = (MODE_RANK[target] ?? 1) > (MODE_RANK[state.authMode] ?? 1);
     const danger = target === 'trusted' || target === 'default' ? '' : '';
     openModal(`<div class="mh ${loosening ? 'danger' : ''}">${ic('shield', 18)}<b>切换授权模式到「${targetSpec ? targetSpec.label : target}」？</b></div>
@@ -2233,7 +2246,7 @@
     openModal(`<div class="mh">${ic('shield', 18)}<b>选择授权模式</b></div>
       <div class="mb">
         <div class="faint" style="margin-bottom:10px">三模式映射到 dsh 沙箱（read-only / workspace-write）与审批策略（ask / never）。</div>
-        ${AUTH_MODES.map((m) => `<div class="row" style="padding:9px 10px;border:1px solid ${state.authMode === m.id ? 'var(--accent)' : 'var(--border)'};border-radius:8px;margin-bottom:7px;cursor:pointer" data-action="auth-mode-pick" data-id="${m.id}">
+        ${authModesForRender().map((m) => `<div class="row" style="padding:9px 10px;border:1px solid ${state.authMode === m.id ? 'var(--accent)' : 'var(--border)'};border-radius:8px;margin-bottom:7px;cursor:pointer" data-action="auth-mode-pick" data-id="${m.id}">
           <div style="flex:1"><b>${m.label}</b>${state.authMode === m.id ? ' <span class="badge ok">当前</span>' : ''}<div class="faint" style="font-size:11px;margin-top:3px">${m.blurb}</div></div>
           ${state.authMode === m.id ? '' : '<button class="btn sm">选择</button>'}
         </div>`).join('')}
@@ -2982,7 +2995,7 @@
     try {
       const res = await bridge.setAuthMode(target);
       if (!res || res.ok === false) toast('授权模式切换未持久化（运行时未接入？）', 'warn');
-      else toast(`已切换为「${({ default: '默认安全', trusted: '信任模式', paranoid: '偏执模式' })[target]}」`, target === 'paranoid' ? 'ok' : 'warn');
+      else toast(`已切换为「${authModeLabel(target)}」`, target === 'paranoid' ? 'ok' : 'warn');
     } catch {
       toast('授权模式切换失败（运行时未接入）', 'warn');
     }
@@ -4439,6 +4452,13 @@
       // 授权
       bridge.getAuthMode().then(r => { if (r?.mode) state.authMode = r.mode; }).catch(() => {}),
       bridge.getAuthLevels().then(r => { if (Array.isArray(r) && r.length) state.authLevels = r; }).catch(() => {}),
+      // ④M-1：授权模式卡 + 白名单工具下拉数据化（canonical = authz 插件；加载后覆盖兜底文案）
+      (typeof bridge.getAuthModes === 'function'
+        ? bridge.getAuthModes().then((r) => {
+            if (r && Array.isArray(r.modes) && r.modes.length) state.authModes = r.modes;
+            if (r && Array.isArray(r.grantTools) && r.grantTools.length) state.grantTools = r.grantTools;
+          })
+        : Promise.resolve()).catch(() => {}),
       bridge.getAuthAudit().then(r => { if (r) state.authAudit = r; }).catch(() => {}),
       // 授权白名单（PRD FR-9）：真实规则列表（此前只有「单次」粒度，UI 无白名单可看）
       (typeof bridge.listGrants === 'function'

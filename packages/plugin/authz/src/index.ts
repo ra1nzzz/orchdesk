@@ -266,6 +266,8 @@ export interface AuthzService {
   getAuditLog(): AuditEntry[];
 
   // ---- PRD FR-9：会话 / 永久授权白名单（可查看、可撤销）----
+  /** 可预置进白名单 UI 下拉的工具名（'*' = 任意；未列出的工具仍可传，UI 只是不预置）。 */
+  getGrantTools(): readonly string[];
   /** 列出全部白名单规则（含命中次数）。 */
   listGrants(): GrantRule[];
   /** 新增一条规则；非法入参拒绝并给 reason（不静默丢弃）。 */
@@ -529,6 +531,7 @@ export function apply(ctx: Context, config: AuthzConfig): void {
       },
       getAuditLog: () => [...audit],
       // FR-9 白名单
+      getGrantTools: () => GRANT_TOOLS,
       listGrants: () => grants.map((g) => ({ ...g })),
       grant,
       revoke,

@@ -21,148 +21,9 @@ import { clampInt, toBool } from './common-tools';
 import type { ToolDef } from './agent-runtime';
 
 // ---------------------------------------------------------------------------
-// 工具定义
+// 常量（前置声明：BROWSER_TOOL_DEFS 的描述文案要引用这些默认/上限，
+// 必须声明在工具定义之前；钳制函数 clampBrowserTimeout 复用同一组常量）
 // ---------------------------------------------------------------------------
-
-export const BROWSER_TOOL_DEFS: ToolDef[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'browser_open',
-      description: '打开内置浏览器并访问网址（复用同一窗口，保留登录态）；返回页面标题与地址',
-      parameters: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'http(s) 开头的网址；可省略协议（自动补 https://）' },
-          waitUntil: { type: 'string', description: 'load（默认，等页面加载完成）或 dom（仅等 DOM 就绪，更快）' },
-          timeout: { type: 'number', description: '等待毫秒数，默认 20000，上限 60000' },
-        },
-        required: ['url'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'browser_text',
-      description: '读取当前页面的可见文本（可指定 CSS 选择器限定区域）',
-      parameters: {
-        type: 'object',
-        properties: {
-          selector: { type: 'string', description: '可选的 CSS 选择器；省略则取整个 body' },
-          maxChars: { type: 'number', description: '返回字符上限，默认 8000，上限 30000' },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'browser_links',
-      description: '列出当前页面的链接（文本 + 地址），比读全文更省上下文',
-      parameters: {
-        type: 'object',
-        properties: {
-          selector: { type: 'string', description: '可选的 CSS 选择器，限定取链接的区域' },
-          limit: { type: 'number', description: '最多返回条数，默认 30，上限 100' },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'browser_click',
-      description: '点击页面中匹配 CSS 选择器的元素（会改变页面状态，需要授权）',
-      parameters: {
-        type: 'object',
-        properties: {
-          selector: { type: 'string', description: 'CSS 选择器，如 #submit 或 button.primary' },
-          timeout: { type: 'number', description: '等待元素出现的毫秒数，默认 5000，上限 30000' },
-        },
-        required: ['selector'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'browser_type',
-      description: '向输入框填入文本（支持 React/Vue 受控组件；需要授权）',
-      parameters: {
-        type: 'object',
-        properties: {
-          selector: { type: 'string', description: '目标的 CSS 选择器' },
-          text: { type: 'string', description: '要填入的文本' },
-          clear: { type: 'boolean', description: '填入前是否清空原有内容，默认 true' },
-          pressEnter: { type: 'boolean', description: '填完后是否回车提交，默认 false' },
-        },
-        required: ['selector', 'text'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'browser_screenshot',
-      description: '对当前页面截图并保存到数据目录，返回图片绝对路径（同时可在「浏览器」面板查看缩略图）',
-      parameters: {
-        type: 'object',
-        properties: {
-          fullPage: { type: 'boolean', description: '是否截取整页（超出视口部分），默认 false' },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'browser_eval',
-      description: '在页面上下文中执行 JavaScript 表达式并返回值（高危：等价在网页里执行代码，必须经用户授权）',
-      parameters: {
-        type: 'object',
-        properties: {
-          expression: { type: 'string', description: '要执行的 JS 表达式（不是语句块；用 IIFE 可写多步逻辑）' },
-          timeout: { type: 'number', description: '执行超时毫秒数，默认 10000，上限 30000' },
-        },
-        required: ['expression'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'browser_close',
-      description: '关闭内置浏览器窗口（释放资源；登录态保留在用户数据目录）',
-      parameters: { type: 'object', properties: {}, required: [] },
-    },
-  },
-];
-
-export const BROWSER_TOOL_NAMES: string[] = BROWSER_TOOL_DEFS.map((t) => t.function.name);
-
-/** 各浏览器工具的主参数名（模型把参数写成裸字符串时兜底）。browser_close 无参数，不入表。 */
-export const BROWSER_TOOL_PRIMARY_ARG: Record<string, string> = {
-  browser_open: 'url',
-  browser_text: 'selector',
-  browser_links: 'selector',
-  browser_click: 'selector',
-  browser_type: 'selector',
-  browser_screenshot: 'fullPage',
-  browser_eval: 'expression',
-};
-
-/** 需要过授权门的工具（会改变页面/站内状态，与 file_write 同档）。 */
-export const BROWSER_WRITE_TOOLS: string[] = ['browser_click', 'browser_type', 'browser_eval'];
-
-// ---------------------------------------------------------------------------
-// 常量与钳制
-// ---------------------------------------------------------------------------
-
-export const BROWSER_URL_PROTOCOLS = ['http:', 'https:'];
 
 /** 导航等待上限（模型乱填 999999 时不至于挂死整个回合）。 */
 export const BROWSER_NAV_TIMEOUT_MIN = 1000;
@@ -210,6 +71,149 @@ export const BROWSER_NO_ELEMENT = '__ORCHDESK_NO_ELEMENT__';
 
 export const BROWSER_WAIT_MODES = ['load', 'dom'] as const;
 export type BrowserWaitMode = typeof BROWSER_WAIT_MODES[number];
+
+// ---------------------------------------------------------------------------
+// 工具定义
+// ---------------------------------------------------------------------------
+
+export const BROWSER_TOOL_DEFS: ToolDef[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'browser_open',
+      description: '打开内置浏览器并访问网址（复用同一窗口，保留登录态）；返回页面标题与地址',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'http(s) 开头的网址；可省略协议（自动补 https://）' },
+          waitUntil: { type: 'string', description: 'load（默认，等页面加载完成）或 dom（仅等 DOM 就绪，更快）' },
+          timeout: { type: 'number', description: `等待毫秒数，默认 ${BROWSER_NAV_TIMEOUT_DEFAULT}，上限 ${BROWSER_NAV_TIMEOUT_MAX}` },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_text',
+      description: '读取当前页面的可见文本（可指定 CSS 选择器限定区域）',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: '可选的 CSS 选择器；省略则取整个 body' },
+          maxChars: { type: 'number', description: `返回字符上限，默认 ${BROWSER_TEXT_DEFAULT}，上限 ${BROWSER_TEXT_MAX}` },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_links',
+      description: '列出当前页面的链接（文本 + 地址），比读全文更省上下文',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: '可选的 CSS 选择器，限定取链接的区域' },
+          limit: { type: 'number', description: `最多返回条数，默认 ${BROWSER_LINKS_DEFAULT}，上限 ${BROWSER_LINKS_MAX}` },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_click',
+      description: '点击页面中匹配 CSS 选择器的元素（会改变页面状态，需要授权）',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: 'CSS 选择器，如 #submit 或 button.primary' },
+          timeout: { type: 'number', description: `等待元素出现的毫秒数，默认 ${BROWSER_ACTION_TIMEOUT_DEFAULT}，上限 ${BROWSER_ACTION_TIMEOUT_MAX}` },
+        },
+        required: ['selector'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_type',
+      description: '向输入框填入文本（支持 React/Vue 受控组件；需要授权）',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: '目标的 CSS 选择器' },
+          text: { type: 'string', description: '要填入的文本' },
+          clear: { type: 'boolean', description: '填入前是否清空原有内容，默认 true' },
+          pressEnter: { type: 'boolean', description: '填完后是否回车提交，默认 false' },
+        },
+        required: ['selector', 'text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_screenshot',
+      description: '对当前页面截图并保存到数据目录，返回图片绝对路径（同时可在「浏览器」面板查看缩略图）',
+      parameters: {
+        type: 'object',
+        properties: {
+          fullPage: { type: 'boolean', description: '是否截取整页（超出视口部分），默认 false' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_eval',
+      description: '在页面上下文中执行 JavaScript 表达式并返回值（高危：等价在网页里执行代码，必须经用户授权）',
+      parameters: {
+        type: 'object',
+        properties: {
+          expression: { type: 'string', description: '要执行的 JS 表达式（不是语句块；用 IIFE 可写多步逻辑）' },
+          timeout: { type: 'number', description: `执行超时毫秒数，默认 ${BROWSER_EVAL_TIMEOUT_DEFAULT}，上限 ${BROWSER_EVAL_TIMEOUT_MAX}` },
+        },
+        required: ['expression'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_close',
+      description: '关闭内置浏览器窗口（释放资源；登录态保留在用户数据目录）',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+];
+
+export const BROWSER_TOOL_NAMES: string[] = BROWSER_TOOL_DEFS.map((t) => t.function.name);
+
+/** 各浏览器工具的主参数名（模型把参数写成裸字符串时兜底）。browser_close 无参数，不入表。 */
+export const BROWSER_TOOL_PRIMARY_ARG: Record<string, string> = {
+  browser_open: 'url',
+  browser_text: 'selector',
+  browser_links: 'selector',
+  browser_click: 'selector',
+  browser_type: 'selector',
+  browser_screenshot: 'fullPage',
+  browser_eval: 'expression',
+};
+
+/** 需要过授权门的工具（会改变页面/站内状态，与 file_write 同档）。 */
+export const BROWSER_WRITE_TOOLS: string[] = ['browser_click', 'browser_type', 'browser_eval'];
+
+// ④M-3：超时 / 文本 / 链接等默认与上限已前置到文件顶部「常量」区
+// （供 BROWSER_TOOL_DEFS 描述文案引用），此处仅剩协议白名单与归一化逻辑。
+
+export const BROWSER_URL_PROTOCOLS = ['http:', 'https:'];
 
 // ---------------------------------------------------------------------------
 // 参数归一化

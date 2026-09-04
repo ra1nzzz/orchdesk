@@ -23,6 +23,9 @@ import type { Context } from '@deepseek-ai/cordis';
 import { hostServices, getHostServices, type HostServices } from './host-services';
 import { decryptWithKey } from './credentials';
 import { getDataDir } from './data-dir';
+// ④H-2：记忆四域 canonical 单源化 —— memory-promotion 为纯逻辑层（零 electron），
+// dsh-runtime 引用方向正确。跨进程 canonical 在 packages/plugin/memory/src/index.ts。
+import { MEMORY_DOMAINS } from './memory-promotion';
 
 /** TRACE 上报目标（OrchDesk 公开仓库；上传端 = GitHub Issues，NDJSON 批量）。 */
 export const TRACE_REPO_URL = 'https://github.com/ra1nzzz/orchdesk';
@@ -246,7 +249,8 @@ export interface MemoryPersistApi {
   hydrateDomains(snapshot: Record<string, unknown[]>): void;
 }
 
-const MEMORY_DOMAINS = ['global', 'project', 'director', 'worker'] as const;
+// ④H-2：四域 canonical = packages/plugin/memory/src/index.ts（跨进程）
+// 同进程引用见 memory-promotion.ts:21-23（含 MemoryDomainName/isMemoryDomain），此处不再自声明。
 let memorySaveTimer: NodeJS.Timeout | null = null;
 let lastMemorySnapshot = '';
 

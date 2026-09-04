@@ -88,6 +88,13 @@ const orchdesk = {
   getAuthLevels: (): Promise<Array<{ level: number; label: string; scope: string; requiresApproval: boolean }>> =>
     ipcRenderer.invoke('orchdesk:authz-get-levels'),
 
+  /**
+   * ④M-1：授权模式卡 + 白名单工具下拉数据化（canonical = authz 插件 AUTHZ_MODES / GRANT_TOOLS）。
+   * 此前渲染层硬编码 AUTH_MODES，trusted 文案已漂移（丢了「仍受 SandboxMode 约束」）。
+   */
+  getAuthModes: (): Promise<{ modes: Array<{ id: string; label: string; sandboxMode: string; approvalPolicy: string; blurb: string }>; grantTools: string[] }> =>
+    ipcRenderer.invoke('orchdesk:authz-get-modes'),
+
   /** 授权审计日志（T-P3-2）：近期 approval/* + sandbox/mode 事件快照。 */
   getAuthAudit: (): Promise<Array<{ kind: string; ts: number; mode?: string; outcome?: string; toolName?: string; reason?: string }>> =>
     ipcRenderer.invoke('orchdesk:authz-get-audit'),
