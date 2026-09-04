@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-04
+
+### Added
+- 委派树展示 composeTeam 执行结果（task/产出/状态），②真执行 UI 闭环
+
+### Changed
+- **dsh-runtime**: 插件装载三样板收敛 + startRuntime 竞态修复（⑤）
+- **audit**: canonical 去重 + authz 模式数据通道（④H+M）
+
+### Fixed
+- 全项目多维审验③ 无界内存队列加固（trace/memory/multi 三插件）
+- 全项目多维审验① IPC sender 校验（纵深防御，唯一可信窗=主窗）
+- 全项目多维审验②半接线接成真执行（composeTeam 喂 task + Director 放行门）
+- 全项目多维审验②半接线之死代码/过时注释清理
+- 全项目多维审验第二轮（loadModelConfig 默认统一 + 双窗口导航防护）
+- 全项目多维审验第一轮（六处确定性高危 + 回归断言）
+- 全盘死挂点扫描修复（IPC/事件/UI 全景图 11 处 + 三方审阅收敛）
+
+
 ## [0.13.2] - 2026-09-03
 
 ### Fixed
