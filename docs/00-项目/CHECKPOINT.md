@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.13.2`（tag `v0.13.2` 已推；Release 待实机冒烟后转正） | SemVer，pre-1.0 阶段 |
-| **最新 Commit** | `fdaffb8` | refactor(audit): canonical 去重 + authz 模式数据通道（④H+M） |
+| **最新 Commit** | `e3f5b78` | refactor(dsh-runtime): 插件装载三样板收敛 + startRuntime 竞态修复（⑤） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.12.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.12.0)（`v0.13.0` 已本地打包、待推） | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正（`gh release edit v0.12.0 --notes-file … --draft=false`）——CI 不会自动发布。v0.13.0 产物已出（Setup 88,081,451 B / portable 87,736,328 B，sha512 与 `latest.yml` 一致，asar 195 文件校验通过），**待桌面会话实机冒烟后再推 Release** |
