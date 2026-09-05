@@ -10,7 +10,7 @@
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | **当前版本** | `0.14.0`（tag `v0.14.0` 已推；GitHub Release 待建 —— `gh` 未登录，需用 ra1nzzz token 走 API） | SemVer，pre-1.0 阶段 |
-| **最新 Commit** | `TBD` | feat(ui): UI/UX 前端收敛（对比度 / 键盘可达 / 硬编码色 / 插件&SKILL 搜索 / 设置页导航 / 响应式） |
+| **最新 Commit** | `5f1ae01` | feat(ui): UI/UX 前端收敛（对比度 / 键盘可达 / 硬编码色 / 插件&SKILL 搜索 / 设置页导航 / 响应式） |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
 | **最新 Release** | [v0.12.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.12.0)（`v0.13.0` 已本地打包、待推） | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正（`gh release edit v0.12.0 --notes-file … --draft=false`）——CI 不会自动发布。v0.13.0 产物已出（Setup 88,081,451 B / portable 87,736,328 B，sha512 与 `latest.yml` 一致，asar 195 文件校验通过），**待桌面会话实机冒烟后再推 Release** |
