@@ -49,6 +49,11 @@
 - 右栏 TAB = 待办 / 产物 / 文件 / **能力**（`ctx-tab` 的 id：`todo|products|files|caps`）。
   「能力」= 插件（`pluginRuntime` 真实装载）+ 技能（磁盘 `skills/*.skill` 真实扫描）+ MCP。
   改名前后两组数据都是假的，别再按旧名找 `skills`。
+- **MCP 真接入**：零依赖 stdio 客户端在 `mcp-client.ts`（纯逻辑），不引 SDK。
+  配置存 `数据目录/mcp.json`（`DATA_FILE_NAMES.mcp`），env 值 `encryptSecret` 加密。
+  子进程 spawn 必须剔 NODE_OPTIONS/NODE_PATH/ELECTRON_RUN_AS_NODE（shim 会注入崩掉 server）。
+  握手/列工具/调工具各自超时（15s/15s/120s）；id 走 `isMcpId` 白名单防穿越。
+  IPC：`mcp-list/save/delete/set-enabled/probe/call-tool`。
 
 ## 工具与 skill（本机）
 - `impeccable`（UI/UX 审查）：不在 `~/.workbuddy/skills/` 但在 **`~/.workbuddy/skills-marketplace/skills/` 缓存**

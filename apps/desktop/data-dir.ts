@@ -44,6 +44,8 @@ export const DATA_FILE_NAMES = {
   market: 'plugin-market.json',
   /** PRD FR-5 模型用量追踪（回合级条目 + 聚合；随数据目录迁移）。 */
   usage: 'usage.json',
+  /** MCP server 配置（真接入：命令/参数/env，随数据目录迁移）。 */
+  mcp: 'mcp.json',
 } as const;
 
 /** 随数据目录迁移的目录名（与 DATA_FILE_NAMES 同理，集中登记）。 */

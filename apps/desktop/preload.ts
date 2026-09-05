@@ -185,6 +185,42 @@ const orchdesk = {
   clearConnectorAudit: (): Promise<{ ok: boolean; cleared: number }> =>
     ipcRenderer.invoke('orchdesk:connector-audit-clear'),
 
+  // ---- MCP（Model Context Protocol）真接入 ----
+
+  /** MCP 列表（含连接状态 + 工具清单）。 */
+  mcpList: (): Promise<{
+    ok: boolean; servers: Array<Record<string, unknown>>;
+    stats: { total: number; configured: number; connected: number; tools: number };
+    reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:mcp-list'),
+
+  /** 保存一条 MCP 配置（保存即探测一次）。 */
+  mcpSave: (config: Record<string, unknown>): Promise<{
+    ok: boolean; configured?: boolean; state?: Record<string, unknown> | null;
+    probe?: { ok: boolean; connected: boolean; tools?: Array<Record<string, unknown>>; reason?: string; latencyMs?: number } | null;
+    reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:mcp-save', config),
+
+  /** 删除一条 MCP 配置。 */
+  mcpDelete: (id: string): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:mcp-delete', id),
+
+  /** 启用 / 停用。 */
+  mcpSetEnabled: (id: string, enabled: boolean): Promise<{ ok: boolean; state?: Record<string, unknown> | null; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:mcp-set-enabled', id, enabled),
+
+  /** 用已存配置重新探测（拿最新工具清单）。 */
+  mcpProbe: (id: string): Promise<{
+    ok: boolean; state?: Record<string, unknown> | null;
+    probe?: { ok: boolean; connected: boolean; tools?: Array<Record<string, unknown>>; reason?: string; latencyMs?: number } | null;
+    reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:mcp-probe', id),
+
+  /** 调用 MCP 工具（主会话 / Agent 复用）。 */
+  mcpCallTool: (id: string, toolName: string, args: unknown): Promise<{
+    ok: boolean; result?: unknown; isError?: boolean; reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:mcp-call-tool', id, toolName, args),
+
   /** 打开外部链接（http/https 白名单；渲染层 <a href> 会导航窗口，不能用）。 */
   openExternal: (url: string): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:open-external', url),

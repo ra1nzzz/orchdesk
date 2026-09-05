@@ -160,6 +160,7 @@ async function run() {
     // 供断言「askInput 回调真的把任务派发出去」（旧代码 .then 崩溃 → 永不可达）。
     window.__composeCalls = [];
     window.__uninstallCalls = [];
+    window.__mcpSaveCalls = [];
     window.orchdesk = {
       // 启动路径要求 loadSessions 返回数组（remote.length 判断）。默认返回对象
       // （走 wizard「首次运行」路径，前 13 组依赖该行为）；组 14 reload 前设置
@@ -205,6 +206,21 @@ async function run() {
         try { window.__uninstallCalls.push(String(slug || '')); } catch (e) { /* ignore */ }
         return Promise.resolve({ ok: true });
       },
+      // MCP（真接入）：真实形状。两条——一条已连接带工具，一条连接失败。
+      // 「能力」TAB 的 MCP 分组必须读它，不能再用写死的 4 个插件名冒充连接。
+      mcpList: () => Promise.resolve({
+        ok: true,
+        servers: [
+          { id: 'fs', name: '文件系统', configured: true, enabled: true, lastConnectOk: true, lastMessage: '已连接 · 2 个工具', lastConnectAt: Date.now() - 5000, tools: ['read_file', 'write_file'] },
+          { id: 'gh', name: 'GitHub', configured: true, enabled: true, lastConnectOk: false, lastMessage: '握手失败：command not found', lastConnectAt: Date.now() - 60000, tools: [] },
+        ],
+        stats: { total: 2, configured: 2, connected: 1, tools: 2 },
+      }),
+      mcpSave: (config) => { try { window.__mcpSaveCalls.push(config); } catch (e) { /* ignore */ } return Promise.resolve({ ok: true, configured: true, state: null, probe: { ok: true, connected: true, tools: [{ name: 't1' }], latencyMs: 5 } }); },
+      mcpDelete: (id) => Promise.resolve({ ok: true }),
+      mcpSetEnabled: (id, enabled) => Promise.resolve({ ok: true }),
+      mcpProbe: (id) => Promise.resolve({ ok: true, state: null, probe: { ok: true, connected: true, tools: [{ name: 't1' }], latencyMs: 5 } }),
+      mcpCallTool: (id, toolName, args) => Promise.resolve({ ok: true, result: { content: [{ type: 'text', text: 'ok' }] }, isError: false }),
       // 死挂点修复 e2e（#48）：composeTeam 记录调用（tid+task）并返回一张 3 节点委派树。
       // 旧渲染代码对 askInput 返回值调 .then 必抛 TypeError，这里必须真的被派发到。
       composeTeam: (tid, task) => {
@@ -783,14 +799,18 @@ async function run() {
     // Switch to 能力 tab
     await page.locator('[data-action="ctx-tab"][data-id="caps"]').first().click();
     await page.waitForTimeout(200);
+    // MCP 真接入：两条真实 server（1 已连接 + 1 连接失败），不再用写死的插件名冒充连接。
     const mcpDots = page.locator('.mcp-dot');
-    await assert(await mcpDots.count() > 0, 'MCP 连接状态指示器存在 (count=' + await mcpDots.count() + ')');
+    await assert(await mcpDots.count() === 2, 'MCP 有 2 条真实 server 指示器 (count=' + await mcpDots.count() + ')');
+    const mcpConnected = page.locator('.mcp-dot.connected');
+    await assert(await mcpConnected.count() === 1, 'MCP 有 1 条已连接 (count=' + await mcpConnected.count() + ')');
     // 「能力」= 插件 + 技能 + MCP 三组，缺一组就是名不副实
     const capTitles = await page.locator('.ctx-section-title').allTextContents();
     const capText = capTitles.join(' | ');
     await assert(/插件/.test(capText), '能力 TAB 有「插件」分组');
     await assert(/技能/.test(capText), '能力 TAB 有「技能」分组');
     await assert(/MCP/.test(capText), '能力 TAB 有「MCP 连接」分组');
+    await assert(/MCP 连接 · 1\/2/.test(capText), 'MCP 标题显示真实连接数 1/2');
   }
 
   // 验证 renderMsg 兼容两种消息格式（m.r/m.x 旧版 + m.role/m.text 新版）

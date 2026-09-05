@@ -46,6 +46,7 @@ const PURE_MODULES = [
   'credentials.ts', 'data-dir.ts',
   'file-panel.ts',
   'memory-promotion.ts', 'memory-summarize.ts', 'plugin-market.ts',
+  'mcp-client.ts',
   'sandbox-log.ts', 'session-events.ts', 'terminal-tools.ts', 'usage-registry.ts',
 ];
 function pureFiles() {

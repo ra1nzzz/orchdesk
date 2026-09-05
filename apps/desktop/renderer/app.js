@@ -419,6 +419,10 @@
     connAudit: { entries: [], stats: { total: 0, saves: 0, clears: 0, tests: 0, fails: 0 }, total: 0, max: 200, loaded: false },
     // 本地插件市场（PRD FR-3）：dataDir()/plugins 下的第三方插件。
     market: { items: [], dir: '', count: 0, loaded: false, busy: null },
+    // MCP（真接入）：真实 server 配置 + 连接状态 + 工具清单。
+    // loaded=false = 主进程桥未接入；servers=[] = 已接入但没配置（两者不是一回事）。
+    mcp: { servers: [], stats: { total: 0, configured: 0, connected: 0, tools: 0 }, loaded: false },
+    mcpExpanded: null,
   };
 
   const $ = (s) => document.querySelector(s);
@@ -699,6 +703,24 @@
       };
       if (state.page === 'plugins') render();
     }).catch(() => {});
+  }
+
+  /* ---------- MCP（真接入） ---------- */
+  /** 重拉 MCP 列表 + 连接状态。桥不可用保持 loaded=false，UI 显「未接入」。 */
+  function refreshMcp() {
+    if (typeof bridge.mcpList !== 'function') {
+      state.mcp.loaded = false;
+      return Promise.resolve();
+    }
+    return bridge.mcpList().then((r) => {
+      if (!r || typeof r !== 'object') return;
+      state.mcp = {
+        servers: Array.isArray(r.servers) ? r.servers : [],
+        stats: r.stats || { total: 0, configured: 0, connected: 0, tools: 0 },
+        loaded: r.ok === true,
+      };
+      if (state.page === 'plugins') render();
+    }).catch(() => { state.mcp.loaded = false; });
   }
 
   /** 连接器状态徽标。manual（无自动探测）与 http 的「未验证」语义不同，不能共用一个词。 */
@@ -1469,26 +1491,10 @@
       //   · 内置插件名写死成常量数组，与运行时真实装载无关。
       // 改为：插件取 pluginRuntime 真实装载，技能取本地磁盘真实扫描。
 
-      // MCP 连接状态：此前是硬编码常量（含假的 connected:true）。
-      // 现在以插件运行时真实装载状态为准——内置插件即本地能力来源；
-      // 运行时不可用时全部标为「未接入」，不伪造已连接。
+      // 插件运行时真实装载（「插件」分组用）。
       const rt = state.pluginRuntime;
       const rtReady = !!(rt && rt.ready);
       const rtOf = (n) => (rt && Array.isArray(rt.plugins) ? rt.plugins.find((x) => x.name === n) : null);
-      const mcps = [
-        { name: 'filesystem', desc: '文件系统', plugin: 'brain' },
-        { name: 'intent', desc: '意图识别网关', plugin: 'intent' },
-        { name: 'memory', desc: '记忆服务', plugin: 'memory' },
-        { name: 'orchestration', desc: '多 Agent 编排', plugin: 'multi' },
-      ].map((m) => {
-        const live = rtOf(m.plugin);
-        return {
-          name: m.name,
-          desc: m.desc,
-          connected: rt && rt.ready ? (live ? live.active === true : false) : false,
-          unavailable: !(rt && rt.ready),
-        };
-      });
 
       // ---- Tab 内容 ----
       let bodyHTML = '';
@@ -1578,10 +1584,34 @@
             ? (skills.length ? skRows : '<div class="faint" style="font-size:10px;padding:2px 0 6px">暂无已安装技能 · 插件页 → 技能市场（观雅集）可安装</div>')
             : '<div class="faint" style="font-size:10px;padding:2px 0 6px">技能目录未接入（主进程桥不可用）· 非「没有技能」</div>')
           + '</div>';
-        // ③ MCP 连接
-        bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接</div>'
-          + (mcps.length && mcps[0].unavailable ? '<div class="faint" style="font-size:10px;padding:2px 0 6px">运行时未接入 · 以下为待接入能力，非实时连接状态</div>' : '')
-          + mcps.map(m => '<div class="ctx-mcp"><span class="mcp-dot ' + (m.connected ? 'connected' : 'disconnected') + '"></span><span style="flex:1">' + esc(m.name) + '</span><span style="font-size:10px;color:var(--fg-faint)">' + esc(m.desc) + ' · ' + (m.unavailable ? '未接入' : (m.connected ? '已连接' : '待连接')) + '</span></div>').join('') + '</div>';
+        // ③ MCP 连接（真接入）：真实 server 配置 + 连接状态 + 工具清单。
+        //    此前这里写死 4 个「filesystem/intent/memory/orchestration」并拿插件装载状态
+        //    冒充连接态（全仓无真实 MCP 实现）——已换成 mcp-client.ts 的真实数据。
+        const mcps = state.mcp.servers || [];
+        const mcpLoaded = state.mcp.loaded;
+        const mcpStats = state.mcp.stats || { total: 0, configured: 0, connected: 0, tools: 0 };
+        const mcpRows = mcps.map((m) => {
+          const connected = m.lastConnectOk === true;
+          const label = connected
+            ? '已连接'
+            : (m.enabled === false ? '已停用' : (m.lastConnectOk === false ? '连接失败' : '待连接'));
+          const toolN = Array.isArray(m.tools) ? m.tools.length : 0;
+          const toolTitle = connected ? (toolN ? ` · ${toolN} 个工具` : ' · 无工具') : '';
+          const msg = m.lastMessage ? esc(m.lastMessage) : '';
+          return '<div class="ctx-mcp"><span class="mcp-dot ' + (connected ? 'connected' : 'disconnected') + '"></span>'
+            + '<span style="flex:1">' + esc(m.name || m.id) + '</span>'
+            + '<span style="font-size:10px;color:var(--fg-dim)">' + esc(label) + toolTitle + '</span></div>'
+            + (msg ? '<div class="faint" style="font-size:10px;padding:0 0 4px 26px">' + msg + '</div>' : '');
+        }).join('');
+        bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接'
+          + (mcpLoaded ? ' · ' + mcpStats.connected + '/' + mcpStats.total : ' · 未接入')
+          + '</div>'
+          + (!mcpLoaded
+            ? '<div class="faint" style="font-size:10px;padding:2px 0 6px">MCP 桥未接入（主进程不可用）· 非「没有配置」</div>'
+            : (mcps.length
+              ? mcpRows
+              : '<div class="faint" style="font-size:10px;padding:2px 0 6px">暂无 MCP server · 插件页 → MCP 可添加（命令/参数/env）</div>'))
+          + '</div>';
       }
 
       return '<div class="ctx-header"><div class="ctx-title">' + ic('clipboard', 16) + ' 任务监控</div><div class="ctx-subtitle">' + esc(s.title) + ' · ' + esc(s.expert) + '</div></div><div class="ctx-tabs">' + tabsHTML + '</div><div class="ctx-body">' + bodyHTML + '</div><div id="previewRoot"></div>';
@@ -1710,6 +1740,32 @@
             ${state.connAudit.entries.map((e) => `<div class="row" style="padding:3px 0;border-top:1px solid var(--border)"><span class="mono" style="font-size:11px;width:86px">${esc(e.id)}</span><span class="badge ${e.action === 'test' ? 'ok' : e.action === 'test-fail' ? 'warn' : ''}" style="margin:0 6px">${esc(e.action)}</span><span style="flex:1;font-size:11.5px">${esc(e.message)}</span><span class="faint mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString()}</span></div>`).join('')}
           </div>
           <div class="row" style="margin-top:6px"><button class="btn sm ghost" data-action="conn-audit-clear">清空审计</button></div>` : ''}
+        </div>
+        <div class="sec-title" style="margin-top:18px">MCP（Model Context Protocol）</div>
+        <div class="card" style="padding:12px">
+          <div class="faint" style="margin-bottom:8px">接入 MCP server（stdio）：命令 + 参数 + 环境变量（env 密钥<b>加密</b>落盘）。保存即握手探测一次，拿到真实工具清单。${state.mcp.loaded ? `共 ${state.mcp.stats.total} 个 · 已连接 ${state.mcp.stats.connected} · 工具 ${state.mcp.stats.tools}` : ''}</div>
+          ${!state.mcp.loaded
+    ? '<div class="faint">MCP 桥未接入（主进程不可用）</div>'
+    : state.mcp.servers.map((m) => {
+      const connected = m.lastConnectOk === true;
+      const open = state.mcpExpanded === m.id;
+      const tools = Array.isArray(m.tools) ? m.tools : [];
+      return `<div class="plug" data-mcpid="${esc(m.id)}">
+            <div class="ph">
+              <div style="min-width:0;flex:1">
+                <div class="ptitle">${esc(m.name || m.id)} ${connected ? '<span class="ib badge ok">已连接</span>' : (m.enabled === false ? '<span class="ib badge">已停用</span>' : (m.lastConnectOk === false ? '<span class="ib badge warn">连接失败</span>' : '<span class="ib badge warn">待连接</span>'))}</div>
+                <div class="pdesc mono" style="font-size:11px">${esc(m.command || '')}${(Array.isArray(m.args) && m.args.length) ? ' ' + m.args.map((a) => esc(a)).join(' ') : ''}</div>
+                <div class="pmeta">${connected && tools.length ? tools.map((t) => `<span class="badge cap">${esc(t)}</span>`).join('') : `<span class="faint" style="font-size:11px">${esc(m.lastMessage || '尚未连接')}</span>`}</div>
+              </div>
+              <div class="pactions">
+                <button class="btn sm" data-action="mcp-probe" data-id="${esc(m.id)}" ${m.enabled === false ? 'disabled' : ''}>探测</button>
+                <button class="btn sm" data-action="mcp-toggle" data-id="${esc(m.id)}">${m.enabled === false ? '启用' : '停用'}</button>
+                <button class="btn sm ghost" data-action="mcp-del" data-id="${esc(m.id)}">删除</button>
+              </div>
+            </div>
+          </div>`;
+    }).join('')}
+          <div class="row" style="margin-top:10px"><button class="btn sm primary" data-action="mcp-add">+ 添加 MCP server</button></div>
         </div>
         <div class="sec-title" style="margin-top:18px">本地插件市场（PRD FR-3）</div>
         <div class="card" style="padding:12px">
@@ -4294,6 +4350,107 @@
         break;
       }
 
+      /* MCP（真接入） */
+      case 'mcp-add': {
+        openModal(`<div class="mh">${ic('zap', 18)}<b>添加 MCP server</b></div>
+          <div class="mb">
+            <div class="faint" style="margin-bottom:8px">stdio 传输：填写启动命令与参数。env 值（如 API 密钥）将<b>加密</b>落盘。保存即握手探测一次。</div>
+            <div class="mb-row"><label>ID（唯一）</label><input id="mcpId" class="inp" placeholder="如 filesystem / github"></div>
+            <div class="mb-row"><label>显示名</label><input id="mcpName" class="inp" placeholder="可留空，默认用 ID"></div>
+            <div class="mb-row"><label>命令</label><input id="mcpCmd" class="inp" placeholder="npx / uvx / node / 绝对路径"></div>
+            <div class="mb-row"><label>参数（空格分隔）</label><input id="mcpArgs" class="inp" placeholder="-y @modelcontextprotocol/server-filesystem /path"></div>
+            <div class="mb-row"><label>环境变量（KEY=VALUE，一行一个，选填）</label><textarea id="mcpEnv" class="inp" rows="3" placeholder="GITHUB_TOKEN=ghp_xxx"></textarea></div>
+          </div>
+          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button>
+            <button class="btn primary" data-action="mcp-save">保存并探测</button></div>`);
+        break;
+      }
+      case 'mcp-save': {
+        const id = ($('#mcpId') && $('#mcpId').value || '').trim();
+        const name = ($('#mcpName') && $('#mcpName').value || '').trim();
+        const command = ($('#mcpCmd') && $('#mcpCmd').value || '').trim();
+        const argsRaw = ($('#mcpArgs') && $('#mcpArgs').value || '').trim();
+        const envRaw = ($('#mcpEnv') && $('#mcpEnv').value || '').trim();
+        if (!id || !command) { toast('ID 与命令必填', 'warn'); break; }
+        const args = argsRaw ? argsRaw.split(/\s+/).filter(Boolean) : [];
+        const env = {};
+        if (envRaw) {
+          for (const line of envRaw.split('\n')) {
+            const eq = line.indexOf('=');
+            if (eq <= 0) continue;
+            env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+          }
+        }
+        try {
+          const r = typeof bridge.mcpSave === 'function'
+            ? await bridge.mcpSave({ id, name, command, args, env: Object.keys(env).length ? env : undefined, enabled: true })
+            : { ok: false, reason: '主进程未接入' };
+          if (r && r.ok) {
+            const probe = r.probe;
+            toast(probe && probe.connected
+              ? `已保存并连接「${id}」· ${(probe.tools || []).length} 个工具`
+              : (probe ? `已保存但连接失败：${probe.reason || '未知'}` : '已保存（未启用连接）'),
+              probe && probe.connected ? 'ok' : 'warn');
+          } else {
+            toast(`保存失败：${(r && r.reason) || '未知错误'}`, 'danger');
+          }
+        } catch (err) {
+          toast(`保存异常：${(err && err.message) || err}`, 'danger');
+        }
+        closeModal();
+        await refreshMcp();
+        render();
+        break;
+      }
+      case 'mcp-probe': {
+        const id = el.dataset.id;
+        el.textContent = '探测中…'; el.disabled = true;
+        try {
+          const r = typeof bridge.mcpProbe === 'function'
+            ? await bridge.mcpProbe(id)
+            : { ok: false, reason: '主进程未接入' };
+          const probe = r && r.probe;
+          toast(probe && probe.connected
+            ? `已连接「${id}」· ${(probe.tools || []).length} 个工具`
+            : `连接失败：${(probe && probe.reason) || (r && r.reason) || '未知'}`, probe && probe.connected ? 'ok' : 'warn');
+        } catch (err) {
+          toast(`探测异常：${(err && err.message) || err}`, 'danger');
+        }
+        await refreshMcp();
+        render();
+        break;
+      }
+      case 'mcp-toggle': {
+        const id = el.dataset.id;
+        const cur = state.mcp.servers.find((x) => x.id === id);
+        const want = !(cur && cur.enabled !== false);
+        try {
+          const r = typeof bridge.mcpSetEnabled === 'function'
+            ? await bridge.mcpSetEnabled(id, want)
+            : { ok: false, reason: '主进程未接入' };
+          if (!r || !r.ok) toast(`切换失败：${(r && r.reason) || '未知错误'}`, 'danger');
+        } catch (err) {
+          toast(`切换异常：${(err && err.message) || err}`, 'danger');
+        }
+        await refreshMcp();
+        render();
+        break;
+      }
+      case 'mcp-del': {
+        const id = el.dataset.id;
+        try {
+          const r = typeof bridge.mcpDelete === 'function'
+            ? await bridge.mcpDelete(id)
+            : { ok: false, reason: '主进程未接入' };
+          toast(r && r.ok ? `已删除「${id}」` : `删除失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'warn' : 'danger');
+        } catch (err) {
+          toast(`删除异常：${(err && err.message) || err}`, 'danger');
+        }
+        await refreshMcp();
+        render();
+        break;
+      }
+
       /* T-P6-2 OrchClaw Hub 联调 */
       case 'hub-pair': {
         const url = (($('#hubUrl') && $('#hubUrl').value) || '').trim();
@@ -5002,6 +5159,8 @@
       bridge.guanjiList().then(r => { if (Array.isArray(r) && r.length) state.guanjiSkills = r; }).catch(() => {}),
       // 本地已安装技能（磁盘真实扫描；此前只存内存，重启即显示 0 个）
       refreshInstalledSkills(),
+      // MCP（真接入）：真实 server 配置 + 连接状态 + 工具清单
+      refreshMcp(),
       // Hub
       bridge.hubStatus().then(r => { if (r) state.hubStatus = r; }).catch(() => {}),
     ]);

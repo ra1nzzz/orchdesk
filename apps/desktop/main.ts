@@ -123,6 +123,21 @@ import {
 } from './agent-runtime';
 import { isAbsoluteLike } from './common-tools';
 import {
+  callMcpTool,
+  connectMcpServer,
+  emptyMcpStore,
+  isMcpId,
+  normalizeMcpConfig,
+  parseMcpStore,
+  serializeMcpStore,
+  type McpCallResult,
+  type McpConnState,
+  type McpConnectionState,
+  type McpListResult,
+  type McpServerConfig,
+  type McpStore,
+} from './mcp-client';
+import {
   buildClickExpression,
   buildLinksExpression,
   buildTextExpression,
@@ -261,6 +276,8 @@ const DATA_FILES: MigrateFileSpec[] = [
   { name: DATA_FILE_NAMES.connectors, mode: 'copy-if-absent' },
   // FR-5 用量追踪：真实记账不因换目录断档（0 记录也是历史事实）。
   { name: DATA_FILE_NAMES.usage, mode: 'copy-if-absent' },
+  // MCP 配置：env 密文同连接器（机器派生密钥），跨机器解不开表现为「连接失败」。
+  { name: DATA_FILE_NAMES.mcp, mode: 'copy-if-absent' },
 ];
 const DATA_DIRS = [DATA_DIR_NAMES.skills];
 
@@ -2429,6 +2446,200 @@ function persistConnectors(): boolean {
   }
 }
 
+// ---------------------------------------------------------------------------
+// MCP（Model Context Protocol）真接入
+// ---------------------------------------------------------------------------
+// 客户端协议 / 配置归一化 / stdio 子进程管理全在 mcp-client.ts（纯逻辑、零 electron）。
+// 这里只管摸到本机的四件事：文件读写、env 值加密落盘 / 解密回显、把结论挂到 IPC、
+// 以及真实探测。
+// ---------------------------------------------------------------------------
+
+let mcpStore: McpStore = emptyMcpStore();
+
+function mcpFilePath(): string {
+  return path.join(dataDir(), DATA_FILE_NAMES.mcp);
+}
+
+/** 启动装载：坏文件 / 缺文件 → 空表（配置丢了可以重配，不该阻断启动）。 */
+function loadMcp(): number {
+  try {
+    const raw = fs.readFileSync(mcpFilePath(), 'utf-8');
+    const parsed = parseMcpStore(raw);
+    if (!parsed.ok) {
+      log('WARN', 'mcp', `MCP 配置解析失败，按空表启动: ${parsed.reason}`);
+      mcpStore = emptyMcpStore();
+      return 0;
+    }
+    mcpStore = parsed.store;
+    if (parsed.dropped > 0) log('WARN', 'mcp', `MCP 配置有 ${parsed.dropped} 条非法条目已丢弃`);
+    return Object.keys(mcpStore.servers).length;
+  } catch {
+    mcpStore = emptyMcpStore();
+    return 0;
+  }
+}
+
+/**
+ * 写穿落盘。env 里的密钥值在落盘前加密（同凭据纪律），读回时解密。
+ * 失败只 WARN：配置已在内存态生效，落盘失败不该让用户刚填的 MCP 凭空消失。
+ */
+function persistMcp(): boolean {
+  try {
+    const file = mcpFilePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const toWrite: McpStore = {
+      servers: {},
+      states: {},
+    };
+    for (const [id, cfg] of Object.entries(mcpStore.servers)) {
+      const envEnc: Record<string, string> = {};
+      if (cfg.env) {
+        for (const [k, v] of Object.entries(cfg.env)) {
+          envEnc[k] = /^v1:/.test(v) ? v : encryptSecret(v);
+        }
+      }
+      toWrite.servers[id] = { ...cfg, env: Object.keys(envEnc).length ? envEnc : undefined };
+    }
+    fs.writeFileSync(file, serializeMcpStore(toWrite), 'utf-8');
+    return true;
+  } catch (err) {
+    log('WARN', 'mcp', `MCP 配置落盘失败（内存态仍生效）: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** 解密 env 值，得到可直接用于 spawn 的配置副本。 */
+function decryptMcpConfig(cfg: McpServerConfig): McpServerConfig {
+  if (!cfg.env) return cfg;
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(cfg.env)) env[k] = /^v1:/.test(v) ? decryptSecret(v) : v;
+  return { ...cfg, env };
+}
+
+/** 组装单条 MCP 的展示态（脱敏：env 值永不回显明文）。 */
+function mcpState(id: string): McpConnectionState {
+  const cfg = mcpStore.servers[id];
+  const st: McpConnState = mcpStore.states[id] || { lastConnectOk: null, lastMessage: '', lastConnectAt: null, tools: [] };
+  return {
+    id,
+    configured: !!cfg,
+    enabled: cfg ? cfg.enabled !== false : false,
+    lastConnectOk: st.lastConnectOk,
+    lastMessage: st.lastMessage,
+    lastConnectAt: st.lastConnectAt,
+    tools: st.tools,
+  };
+}
+
+/** 全量列表 + 统计。 */
+function mcpListResult(): McpListResult {
+  const ids = Object.keys(mcpStore.servers);
+  const servers = ids.map((id) => mcpState(id));
+  return {
+    ok: true,
+    servers,
+    stats: {
+      total: ids.length,
+      configured: ids.length,
+      connected: servers.filter((s) => s.lastConnectOk === true).length,
+      tools: servers.reduce((n, s) => n + s.tools.length, 0),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// MCP IPC
+// ---------------------------------------------------------------------------
+
+/** MCP 列表（含连接状态 + 工具清单）。 */
+ipcMain.handle('orchdesk:mcp-list', () => mcpListResult());
+
+/** 保存一条 MCP 配置并立即探测一次（同连接器「保存即探测」纪律）。 */
+ipcMain.handle('orchdesk:mcp-save', async (_e, raw: unknown) => {
+  const norm = normalizeMcpConfig(raw);
+  if (!norm.ok) return { ok: false, reason: norm.reason };
+  const cfg = norm.config;
+  // env 值先加密再入内存表，避免明文常驻。
+  if (cfg.env) {
+    const envEnc: Record<string, string> = {};
+    for (const [k, v] of Object.entries(cfg.env)) envEnc[k] = /^v1:/.test(v) ? v : encryptSecret(v);
+    cfg.env = envEnc;
+  }
+  mcpStore.servers[cfg.id] = cfg;
+  persistMcp();
+
+  if (cfg.enabled === false) {
+    mcpStore.states[cfg.id] = { lastConnectOk: null, lastMessage: '已停用（未主动连接）', lastConnectAt: Date.now(), tools: [] };
+    return { ok: true, configured: true, state: mcpState(cfg.id), probe: null };
+  }
+
+  const probe = await connectMcpServer(decryptMcpConfig(cfg));
+  if (probe.connected) {
+    mcpStore.states[cfg.id] = {
+      lastConnectOk: true,
+      lastMessage: `已连接 · ${(probe.tools || []).length} 个工具`,
+      lastConnectAt: Date.now(),
+      tools: (probe.tools || []).map((t) => t.name),
+    };
+  } else {
+    mcpStore.states[cfg.id] = {
+      lastConnectOk: false,
+      lastMessage: probe.reason || '连接失败',
+      lastConnectAt: Date.now(),
+      tools: [],
+    };
+  }
+  return { ok: true, configured: true, state: mcpState(cfg.id), probe };
+});
+
+/** 删除一条 MCP 配置（连同连接结论一起清掉）。 */
+ipcMain.handle('orchdesk:mcp-delete', (_e, id: unknown) => {
+  if (!isMcpId(id)) return { ok: false, reason: `非法 id: ${String(id)}` };
+  if (!mcpStore.servers[id]) return { ok: false, reason: '配置不存在' };
+  delete mcpStore.servers[id];
+  delete mcpStore.states[id];
+  persistMcp();
+  return { ok: true };
+});
+
+/** 启用 / 停用（停用不删配置，下次启用仍可连）。 */
+ipcMain.handle('orchdesk:mcp-set-enabled', (_e, id: unknown, enabled: unknown) => {
+  if (!isMcpId(id)) return { ok: false, reason: `非法 id: ${String(id)}` };
+  const cfg = mcpStore.servers[id];
+  if (!cfg) return { ok: false, reason: '配置不存在' };
+  cfg.enabled = enabled !== false;
+  persistMcp();
+  return { ok: true, state: mcpState(id) };
+});
+
+/** 用已存配置重新探测（拿最新工具清单）。 */
+ipcMain.handle('orchdesk:mcp-probe', async (_e, id: unknown) => {
+  if (!isMcpId(id)) return { ok: false, reason: `非法 id: ${String(id)}` };
+  const cfg = mcpStore.servers[id];
+  if (!cfg) return { ok: false, reason: '配置不存在' };
+  const probe = await connectMcpServer(decryptMcpConfig(cfg));
+  if (probe.connected) {
+    mcpStore.states[id] = {
+      lastConnectOk: true,
+      lastMessage: `已连接 · ${(probe.tools || []).length} 个工具`,
+      lastConnectAt: Date.now(),
+      tools: (probe.tools || []).map((t) => t.name),
+    };
+  } else {
+    mcpStore.states[id] = { lastConnectOk: false, lastMessage: probe.reason || '连接失败', lastConnectAt: Date.now(), tools: [] };
+  }
+  return { ok: true, state: mcpState(id), probe };
+});
+
+/** 调用 MCP 工具（供主会话 / Agent 运行时复用）。 */
+ipcMain.handle('orchdesk:mcp-call-tool', async (_e, id: unknown, toolName: unknown, args: unknown): Promise<McpCallResult> => {
+  if (!isMcpId(id)) return { ok: false, reason: `非法 id: ${String(id)}` };
+  const cfg = mcpStore.servers[id];
+  if (!cfg) return { ok: false, reason: '配置不存在' };
+  if (typeof toolName !== 'string' || !toolName.trim()) return { ok: false, reason: 'toolName 为空' };
+  return callMcpTool(decryptMcpConfig(cfg), toolName.trim(), args);
+});
+
 // ---- 本地插件市场（PRD FR-3）：启用意愿持久化（插件代码在 dataDir()/plugins/）----
 let marketEnabledMap: Record<string, boolean> = {};
 
@@ -3695,6 +3906,14 @@ app.whenReady().then(async () => {
     marketEnabledMap = loadMarketEnabled();
   } catch (err) {
     console.warn('[orchdesk] 插件市场状态装载失败:', (err as Error).message);
+  }
+
+  // MCP 真接入：配置装载（env 密文随目录迁移，跨机器解不开会表现为「连接失败」而非明文泄漏）。
+  try {
+    const n = loadMcp();
+    if (n > 0) log('INFO', 'mcp', `MCP 配置已装载：${n} 个 server（${mcpFilePath()}）`);
+  } catch (err) {
+    console.warn('[orchdesk] MCP 配置装载失败:', (err as Error).message);
   }
 
   // PRD FR-4.2：桌面集成开关全量重放（此前 6 项全是设置页空壳，见第十个死挂点）。
