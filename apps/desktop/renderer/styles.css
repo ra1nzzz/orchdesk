@@ -1,26 +1,46 @@
 :root{
   --bg:#1E1E1E; --bg-panel:#252526; --bg-hover:#2E2E30; --bg-inset:#232324;
-  --fg:#E5E7EB; --fg-dim:#9CA3AF; --fg-faint:#6B7280;
+  --fg:#E5E7EB; --fg-dim:#A6ADBB; --fg-faint:#8A93A3;
   --border:#3A3A3C; --border-strong:#4A4A4D;
   --accent:#3B82F6; --accent-soft:#1E3A5F; --accent-fg:#93C5FD;
   --ok:#22C55E; --ok-soft:#14532D; --warn:#F59E0B; --warn-soft:#4A3512;
   --danger:#EF4444; --danger-soft:#5A1D1D;
   --ceo:#A78BFA; --ceo-soft:#3B2A63; --director:#60A5FA; --worker:#9CA3AF;
   --shadow:0 8px 28px rgba(0,0,0,.5); --radius:8px;
+  /* 终端背景（P2 归一化）：刻意保持深色惯例，落成显式 token，light 也复用同一深底 */
+  --term-bg:#161622; --term-fg:#E6E6F0;
+  --diff-add-bg:rgba(46,160,67,.16); --diff-add-fg:#3FB950;
+  --diff-del-bg:rgba(229,72,77,.14); --diff-del-fg:#E5484D;
 }
 [data-theme="light"]{
   --bg:#FFFFFF; --bg-panel:#F5F5F4; --bg-hover:#ECECEA; --bg-inset:#FAFAF9;
-  --fg:#1F2937; --fg-dim:#6B7280; --fg-faint:#9CA3AF;
+  --fg:#1F2937; --fg-dim:#5F6B7A; --fg-faint:#667085;
   --border:#E5E4E2; --border-strong:#D6D5D2;
   --accent:#2563EB; --accent-soft:#DBEAFE; --accent-fg:#1D4ED8;
   --ok:#16A34A; --ok-soft:#DCFCE7; --warn:#D97706; --warn-soft:#FEF3C7;
   --danger:#DC2626; --danger-soft:#FEE2E2;
   --ceo:#7C3AED; --ceo-soft:#EDE9FE; --director:#2563EB; --worker:#6B7280;
   --shadow:0 8px 28px rgba(0,0,0,.14);
+  --term-bg:#161622; --term-fg:#E6E6F0;   /* 终端刻意保持深色（见 :root 注释） */
+  --diff-add-bg:rgba(46,160,67,.16); --diff-add-fg:#1A7F37;
+  --diff-del-bg:rgba(229,72,77,.14); --diff-del-fg:#CF222E;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
-body{font:13px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--fg);overflow:hidden;display:flex;flex-direction:column;height:100vh;transition:background .25s,color .25s}
+/* P3 响应式保护（/adapt，2026-09-06）：桌面 grid 是 60/270/1fr/300 硬布局，
+   窗口收窄到 ~860px 以下时主区被两侧栏挤扁。给最小宽度 + 窄窗自动收拢侧栏：
+   <900px 隐藏任务监控/浏览器侧栏（保留 rail + 会话侧栏），主区保底可读。 */
+body{font:13px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--fg);overflow:hidden;display:flex;flex-direction:column;height:100vh;transition:background .25s,color .25s;min-width:700px}
+@media (max-width:900px){
+  .context{display:none!important}
+  .app.has-ctx{grid-template-columns:60px 270px 1fr}
+  .app.browser-mode .context{display:none}
+}
+/* <640 由 body min-width:700 兜底（窗口不会收到这窄），此分支仅供超窄纵向参考 */
+@media (max-width:640px){
+  .app.has-ctx,.app.browser-mode{grid-template-columns:60px 1fr}
+  .side{display:none}
+}
 .titlebar{height:38px;flex:none;display:flex;align-items:center;gap:10px;padding:0 12px;background:var(--bg-panel);border-bottom:1px solid var(--border);user-select:none}
 .titlebar .logo{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--ceo),var(--accent));display:grid;place-items:center;color:#fff;font-size:10px;font-weight:700}
 .titlebar .app-name{font-weight:600}
@@ -33,8 +53,15 @@ body{font:13px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-se
 .mut{color:var(--fg-dim)}
 code,pre,.mono{font-family:"JetBrains Mono",Consolas,monospace;font-size:12px}
 button{font:inherit;color:inherit;cursor:pointer;border:none;background:none}
-button:focus-visible,.navbtn:focus-visible,.t-btn:focus-visible,.iconbtn:focus-visible,.opbtn:focus-visible,.sess:focus-visible,.proj-head:focus-visible{outline:2px solid var(--accent-fg);outline-offset:2px;border-radius:4px}
+/* 焦点可达（/harden，2026-09-06）：除命名 class 外，覆盖所有被补了 role=button 的
+   div[data-action] —— 焦点样式与 tabindex 一起到，键盘用户才看得到自己在哪。 */
+button:focus-visible,.navbtn:focus-visible,.t-btn:focus-visible,.iconbtn:focus-visible,.opbtn:focus-visible,.sess:focus-visible,.proj-head:focus-visible,
+[data-action][tabindex]:focus-visible,[role="button"]:focus-visible,[role="switch"]:focus-visible,
+.ctx-tab:focus-visible,.ssec .ss-h:focus-visible,.plug .switch:focus-visible{outline:2px solid var(--accent-fg);outline-offset:2px;border-radius:4px}
 .navbtn:focus-visible{outline-offset:-2px}
+.switch:focus-visible,.switch.on:focus-visible{outline:2px solid var(--accent-fg);outline-offset:2px}
+.ctx-tab:focus-visible{border-radius:6px}
+.ssec .ss-h:focus-visible{border-radius:6px}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:4px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -413,11 +440,34 @@ input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;ut
 .plug .pbody{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);display:none}
 .plug.open .pbody{display:block}
 
+/* 插件页搜索（2026-09-06）：顶部搜索条，前端即时过滤内置插件卡片 */
+.plug-search-bar{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.plug-search-bar .inp{max-width:360px;flex:0 1 auto}
+
+/* 技能市场「已安装」清单（2026-09-06）：行内状态 + 尺寸 + 启停/卸载，视觉与全局一致 */
+.installed-skills{display:flex;flex-direction:column;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.is-row{display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12px;background:var(--bg)}
+.is-row+.is-row{border-top:1px solid var(--border)}
+.is-row:hover{background:var(--bg-inset)}
+.is-row .is-name{flex:none;color:var(--fg);min-width:0}
+.btn.ghost.danger-text{color:var(--danger)}
+.btn.ghost.danger-text:hover{background:var(--danger-soft);color:var(--danger)}
+
 /* 设置 - 状态条 */
 .statbar{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
-.stat{background:var(--bg-panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.stat{background:var(--bg-panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px;transition:border-color .12s}
+.stat:hover{border-color:var(--border-strong)}
 .stat .sk{font-size:10.5px;color:var(--fg-faint);text-transform:uppercase;letter-spacing:.06em}
 .stat .sv{font-size:14px;font-weight:600;margin-top:2px;display:flex;align-items:center;gap:6px}
+
+/* 设置左侧导航（2026-09-06）：纵向项统一为一行 icon+label，active 高亮收敛 */
+.settings-nav{display:flex;flex-direction:column;gap:2px;margin-top:2px}
+.settings-nav-item{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;cursor:pointer;color:var(--fg-dim);border:1px solid transparent;transition:all .12s;font-size:12.5px}
+.settings-nav-item:hover{background:var(--bg-hover);color:var(--fg)}
+.settings-nav-item.active{background:var(--accent-soft);color:var(--accent-fg);border-color:transparent}
+.settings-nav-item .sni-icon{display:grid;place-items:center;color:var(--fg-dim);width:16px;height:16px;flex:none}
+.settings-nav-item.active .sni-icon{color:var(--accent-fg)}
+.settings-nav-item .sni-icon svg{width:14px;height:14px}
 
 /* 设置 - 模型搜索 */
 .models-search{margin-bottom:10px}
@@ -597,8 +647,8 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 .badge.warn{color:var(--warn);background:var(--warn-soft);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
 
 /* 终端 */
-.term-body{flex:1;position:relative;background:#161622;overflow:hidden}
-[data-theme="light"] .term-body{background:#161622}
+.term-body{flex:1;position:relative;background:var(--term-bg);overflow:hidden}
+[data-theme="light"] .term-body{background:var(--term-bg)}
 .term-container{position:absolute;inset:0;padding:6px 10px}
 .term-container.hidden{display:none}
 .term-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
@@ -612,7 +662,7 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 .term-degrade{padding:5px 8px;font-size:11px;color:var(--warn);background:var(--warn-soft);
   border-bottom:1px solid var(--border)}
 .term-pre{margin:0;padding:6px 8px;font:12px/1.5 Consolas,"Courier New",monospace;
-  color:#e6e6f0;white-space:pre-wrap;word-break:break-all;height:calc(100% - 74px);overflow:auto}
+  color:var(--term-fg);white-space:pre-wrap;word-break:break-all;height:calc(100% - 74px);overflow:auto}
 .term-fb-row{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:6px;
   padding:6px 10px;border-top:1px solid var(--border);background:var(--bg-panel)}
 .term-fb-ps{color:var(--ceo);font:12px Consolas,monospace}
@@ -647,7 +697,7 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
   background:var(--bg);tab-size:4}
 .file-edit-area:focus{outline:none}
 .file-edit-error{display:flex;align-items:center;gap:8px;padding:8px 14px;font-size:12px;
-  color:#e5484d;background:rgba(229,72,77,.08);border-bottom:1px solid var(--border)}
+  color:var(--danger);background:color-mix(in srgb,var(--danger) 8%,transparent);border-bottom:1px solid var(--border)}
 .file-diff{font:12px/1.55 Consolas,"Courier New",monospace;min-width:max-content}
 .fd-hunk{padding:2px 0}
 .fd-hunk + .fd-hunk{border-top:2px dashed var(--border);margin-top:2px}
@@ -655,13 +705,14 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 .fd-no{flex:none;width:52px;text-align:right;padding:0 6px;color:var(--fg-faint);
   user-select:none;border-right:1px solid var(--border)}
 .fd-t{padding:0 10px;flex:1}
-.fd-row.add{background:rgba(46,160,67,.16)}
-.fd-row.add .fd-t{color:#3fb950}
-.fd-row.del{background:rgba(229,72,77,.14)}
-.fd-row.del .fd-t{color:#e5484d;text-decoration:none}
+.fd-row.add{background:var(--diff-add-bg)}
+.fd-row.add .fd-t{color:var(--diff-add-fg)}
+.fd-row.del{background:var(--diff-del-bg)}
+.fd-row.del .fd-t{color:var(--diff-del-fg);text-decoration:none}
 .fd-row.ctx{color:var(--fg-dim)}
 .fd-stat{padding:6px 14px;font-size:11.5px;color:var(--fg-dim);border-bottom:1px solid var(--border)}
-.badge.warn{color:#d29922;border:1px solid rgba(210,153,34,.4);border-radius:8px;
+/* 终端降级徽标（via:pipe 等）：与全局 .badge.warn 同 token，不另起色值 */
+.badge.warn{color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 40%,transparent);border-radius:8px;
   padding:0 7px;font-size:10.5px;line-height:16px}
 
 /* ===========================================================================

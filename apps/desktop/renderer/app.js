@@ -423,6 +423,8 @@
     // loaded=false = 主进程桥未接入；servers=[] = 已接入但没配置（两者不是一回事）。
     mcp: { servers: [], stats: { total: 0, configured: 0, connected: 0, tools: 0 }, loaded: false },
     mcpExpanded: null,
+    // 插件页搜索（前端过滤；对内置插件卡片按名称/描述/能力/标识做不区分大小写子串匹配）
+    plugSearch: '',
   };
 
   const $ = (s) => document.querySelector(s);
@@ -1673,8 +1675,17 @@
         sec('connectors', '连接器', connCount, connItems);
     },
     main() {
+      // 插件页搜索（2026-09-06）：顶部搜索条即时过滤内置插件卡片。
+      // 全部卡片仍一次渲染（避免重渲染丢输入焦点），由 plugSearchFilter() 在
+      // 运行时切换每张卡 .hidden；匹配文本（名称/描述/能力/标识/仓库）预先拼进
+      // data-search 小写。不触后端，纯即时前端过滤。
       return `<div class="main-inner"><h1 class="pg">插件</h1><div class="pg-sub">一切皆插件——能力以插件形式挂载；启用 = 注册 effect，停用 = 注册回滚（无残留）。</div>
-        ${PLUGINS.map((p) => `<div class="plug" data-pid="${p.id}">
+        <div class="plug-search-bar">
+          <input type="search" class="inp" id="plugSearch" placeholder="搜索内置插件（名称 / 能力 / 描述）…"
+            value="${esc(state.plugSearch)}" aria-label="搜索内置插件">
+          <span class="faint" id="plugSearchCount" style="font-size:11px"></span>
+        </div>
+        ${PLUGINS.map((p) => `<div class="plug" data-pid="${p.id}" data-search="${esc([p.n, p.d, (p.caps || []).join(' '), p.id, p.repo || ''].join(' ').toLowerCase())}">
           <div class="ph">
             <div style="min-width:0;flex:1">
               <div class="ptitle">${p.n}
@@ -1696,6 +1707,7 @@
             <div class="row" style="margin-top:6px"><button class="btn sm">查看审计日志</button><button class="btn sm ghost" data-action="plug-unload">卸载并回滚</button></div>
           </div>
         </div>`).join('')}
+        <div class="faint" id="plugSearchEmpty" style="padding:14px;display:none">没有匹配的内置插件</div>
         <div class="sec-title" style="margin-top:18px">连接器（PRD FR-3）</div>
         <div class="card" style="padding:12px">
           <div class="faint" style="margin-bottom:8px">第三方服务接入：凭证仅本地<b>加密</b>保存（密钥存系统安全存储），保存即自动探测一次连通性。${state.connectors.loaded ? `共 ${state.connectors.stats.total} 个 · 已配置 ${state.connectors.stats.configured} · 连通 ${state.connectors.stats.ok}` : ''}</div>
@@ -1814,16 +1826,32 @@
           ${state.guanjiTokenSet
             ? '<div class="row" style="margin-bottom:8px"><span class="badge ok">已配置 TOKEN</span><button class="btn sm ghost" data-action="guanji-token" style="margin-left:8px">更换 TOKEN</button></div>'
             : '<div class="row" style="margin-bottom:8px"><span class="badge warn">未配置 TOKEN</span><button class="btn sm primary" data-action="guanji-token" style="margin-left:8px">配置观雅集 TOKEN</button></div>'}
+          <div class="row" style="margin-bottom:6px;gap:8px">
+            <input type="search" class="inp" id="skillSearch" placeholder="搜索技能（slug / 名称 / 描述 / 能力）…" style="max-width:340px" aria-label="搜索技能">
+            <span class="faint" id="skillSearchCount" style="font-size:11px"></span>
+          </div>
           <table style="width:100%">
             <tr><th style="width:32%">技能</th><th>能力</th><th style="width:80px;text-align:right">操作</th></tr>
-            ${(state.guanjiSkills.length ? state.guanjiSkills : SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }))).map((s) => `<tr>
+            ${(state.guanjiSkills.length ? state.guanjiSkills : SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }))).map((s) => `<tr data-skill-search="${esc([s.slug, s.name, s.description || '', (s.caps || []).join(' ')].join(' ').toLowerCase())}">
               <td><div class="mono" style="font-size:11.5px">${esc(s.slug)}</div><div class="faint" style="font-size:11px;margin-top:2px">${esc(s.description || '')}</div></td>
               <td>${s.caps.map((c) => `<span class="badge cap" style="margin:2px 4px 2px 0">${esc(c)}</span>`).join('')}${s.auth ? '<span class="badge warn">需授权</span>' : ''}</td>
               <td style="text-align:right"><button class="btn sm primary" data-action="guanji-install" data-slug="${esc(s.slug)}">安装</button></td>
             </tr>`).join('')}
           </table>
           <div class="row" style="margin-top:10px"><button class="btn sm" data-action="guanji-publish">发布技能到观雅集</button></div>
-          ${state.installedSkills.length ? `<div class="sec-title" style="margin-top:12px;font-size:12px">已安装（启用 / 停用 / 卸载）</div>` + state.installedSkills.map((s) => `<div class="row" style="padding:5px 0;border-top:1px solid var(--border)"><div style="flex:1"><span class="mono" style="font-size:11.5px">${esc(s.slug)}</span>${s.enabled ? '' : '<span class="badge">已停用</span>'}</div><button class="btn sm" data-action="skill-toggle" data-n="${esc(s.slug)}">${s.enabled ? '停用' : '启用'}</button><button class="btn sm ghost" data-action="skill-uninstall" data-n="${esc(s.slug)}">卸载</button></div>`).join('') : ''}
+          ${state.installedSkills.length ? `<div class="sec-title" style="margin-top:14px;font-size:12px">已安装（${state.installedSkills.length}）</div>
+          <div class="installed-skills">` + state.installedSkills.map((s) => {
+            const on = s.enabled !== false;
+            const size = s.bytes ? (s.bytes > 1024 ? (s.bytes / 1024).toFixed(1) + 'KB' : s.bytes + 'B') : '';
+            return `<div class="is-row">
+              <span class="is-name mono">${esc(s.slug)}</span>
+              <span class="badge ${on ? 'ok' : ''}">${on ? '已启用' : '已停用'}</span>
+              ${size ? `<span class="faint mono" style="font-size:10.5px">${size}</span>` : ''}
+              <span style="flex:1"></span>
+              <button class="btn sm" data-action="skill-toggle" data-n="${esc(s.slug)}">${on ? '停用' : '启用'}</button>
+              <button class="btn sm ghost danger-text" data-action="skill-uninstall" data-n="${esc(s.slug)}">卸载</button>
+            </div>`;
+          }).join('') + `</div>` : ''}
         </div></div>`;
     },
     ctx() {
@@ -1858,8 +1886,10 @@
   VIEWS.settings = {
     side() {
       return `<div class="sec-title">设置</div>
+        <div class="settings-nav">
         ${[{ id: 'model', n: '模型', icon: 'bot' }, { id: 'cred', n: '凭据', icon: 'shield' }, { id: 'sandbox', n: '沙箱与授权', icon: 'shield' }, { id: 'prompt', n: '系统提示词', icon: 'at' }, { id: 'desktop', n: '桌面集成', icon: 'settings' }, { id: 'data', n: '数据目录', icon: 'folder' }, { id: 'about', n: '关于', icon: 'at' }]
-          .map((s) => `<div class="node" data-action="settings-nav" data-id="${s.id}" style="padding:6px 8px;border-radius:7px;cursor:pointer;display:flex;align-items:center;gap:8px"><span style="color:var(--fg-dim)">${ic(s.icon, 14)}</span><span style="font-size:12.5px">${s.n}</span></div>`).join('')}`;
+          .map((s) => `<div class="node settings-nav-item" data-action="settings-nav" data-id="${s.id}"><span class="sni-icon">${ic(s.icon, 14)}</span><span class="sni-label">${s.n}</span></div>`).join('')}
+        </div>`;
     },
     main() {
       // BUG（全盘死挂点扫描）：statbar 硬编码「%APPDATA%/OrchDesk」「dsh 99f6f02」——
@@ -2210,12 +2240,23 @@
       $('#context').innerHTML = v.ctx();
       $('#appGrid').classList.toggle('has-ctx', state.ctxOpen);
       $('#winTitle').textContent = (PAGES.find((x) => x.id === state.page)?.n || '会话') + ' — 本地 Agent 工作台';
+      // P1 键盘可达（/harden）：渲染后给所有非原生可交互的 [data-action] 补
+      // role/tabindex —— 项目惯用 div+data-action，靠逐个补必漏（焦点样式有了，
+      // 但没有 tabindex 焦点根本到不了）。委托层一次性收敛，新元素自动继承。
+      hardenActions($('#main')); hardenActions($('#side')); hardenActions($('#context'));
+      if (state.page === 'plugins') { plugSearchFilter(); skillSearchFilter(); }
       if (state.page === 'settings') renderModelProviders();
       if (state.page === 'settings' && state.settingsSection) {
         const target = $('#settings-section-' + state.settingsSection);
         if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
         document.querySelectorAll('[data-action="settings-nav"]').forEach(el => {
-          el.style.background = el.dataset.id === state.settingsSection ? 'var(--bg-hover)' : '';
+          // 用 class 而非 inline background（2026-09-06）：active 高亮走 .settings-nav-item.active
+          el.classList.toggle('active', el.dataset.id === state.settingsSection);
+        });
+      } else if (state.page === 'settings') {
+        // 首次进入设置页未选分区：高亮第一项（模型）
+        document.querySelectorAll('[data-action="settings-nav"]').forEach(el => {
+          el.classList.toggle('active', el.dataset.id === 'model');
         });
       }
       const sc = $('#msgScroll'); if (sc) sc.scrollTop = sc.scrollHeight;
@@ -2223,6 +2264,64 @@
       console.error('[render] ERROR:', err);
       $('#main').innerHTML = '<div style="color:#EF4444;padding:40px;font-family:monospace"><b>渲染错误</b><pre>' + (err && err.stack || err) + '</pre></div>';
     }
+  }
+
+  /* ---------- P1 键盘可达（/harden，2026-09-06） ----------
+   * 在委托层为 div[data-action] 统一补无障碍属性，取代「逐个补」——
+   * 逐个补会在每次新增交互元素时漏一个（此前全项目 tabindex=0 即是证据）。
+   * 只处理没有原生交互语义的标签（div/span/li），button/input/select 本身可聚焦。
+   * 键盘触发（Enter/Space）由 body 级 keydown 委托统一接管（见 init 末尾）。 */
+  /* ---------- 技能市场搜索过滤（2026-09-06）----------
+   * 与插件搜索同套路：运行时不触发 render（保输入焦点），按 #skillSearch 词
+   * 切换表格行可见性并更新命中计数。词来自 <input>，不做 DOM 重建。 */
+  function skillSearchFilter() {
+    const inp = $('#skillSearch');
+    if (!inp) return;
+    const q = inp.value.trim().toLowerCase();
+    const rows = document.querySelectorAll('tr[data-skill-search]');
+    let shown = 0;
+    rows.forEach((r) => {
+      const hit = !q || (r.dataset.skillSearch || '').includes(q);
+      r.style.display = hit ? '' : 'none';
+      if (hit) shown++;
+    });
+    const cnt = $('#skillSearchCount');
+    if (cnt) cnt.textContent = q ? `命中 ${shown}/${rows.length}` : '';
+  }
+
+  function hardenActions(root) {
+    if (!root) return;
+    root.querySelectorAll('[data-action]').forEach((el) => {
+      const tag = el.tagName;
+      if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'A' || tag === 'TEXTAREA') return;
+      if (el.hasAttribute('role')) return;   // 已显式给过 role（如 .switch 的 role="switch"）不覆盖
+      if (el.closest('[role="menu"]')) return; // 菜单项键盘由方向键/Enter 处理，不强制 tab
+      el.setAttribute('role', 'button');
+      if (el.hasAttribute('tabindex')) return; // 已显式给过（编辑器输入等）不抢
+      el.tabIndex = 0;
+    });
+  }
+
+  /* ---------- 插件页搜索过滤（2026-09-06） ----------
+   * 在运行时按 #plugSearch 词隐藏/显示内置插件卡片，并更新命中计数。
+   * 不清空 #plugSearch（input 里的词是用户正在输入的焦点所在），只改卡片可见性，
+   * 所以不触发 render()，不丢焦点。空词 = 全部显示。 */
+  function plugSearchFilter() {
+    const inp = $('#plugSearch');
+    if (!inp) return;
+    const q = inp.value.trim().toLowerCase();
+    state.plugSearch = inp.value; // 供「切走再切回」保留词（render 会回填 value）
+    const cards = document.querySelectorAll('.plug[data-pid]');
+    let shown = 0;
+    cards.forEach((c) => {
+      const hit = !q || (c.dataset.search || '').includes(q);
+      c.style.display = hit ? '' : 'none';
+      if (hit) shown++;
+    });
+    const cnt = $('#plugSearchCount');
+    if (cnt) cnt.textContent = q ? `命中 ${shown}/${cards.length}` : '';
+    const empty = $('#plugSearchEmpty');
+    if (empty) empty.style.display = (q && shown === 0) ? 'block' : 'none';
   }
 
   function updateTraceUi() {
@@ -3596,6 +3695,10 @@
     }
   });
   /* composer Enter-to-send（homeComposer + 会话内 #composer） */
+  document.body.addEventListener('input', (e) => {
+    if (e.target && e.target.id === 'plugSearch') plugSearchFilter();
+    else if (e.target && e.target.id === 'skillSearch') skillSearchFilter();
+  });
   document.body.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       // 终端 / 文件面板：ESC 收起。但焦点在终端内部（xterm 的输入区 / 降级输入框）
@@ -3609,6 +3712,16 @@
       const sendBtn = e.target.closest('.home-textarea-wrap')?.querySelector('[data-action="home-send"]')
         || document.querySelector('[data-action="home-send"], [data-action="send"]');
       if (sendBtn) sendBtn.click();
+    }
+    // P1 键盘可达（/harden）：委托层统一把 Enter/Space 映射到 [data-action] 的 click。
+    // 只对「被 hardenActions 补了 tabindex 的 div 交互元素」生效，不抢原生控件的默认键
+    //（如文本输入的回车、按钮的 Space、下拉的箭头）。textarea 需要 shift+Enter 时不拦。
+    if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.closest) {
+      const actEl = e.target.closest('[data-action][tabindex]:not(button):not(input):not(select):not(a):not(textarea)');
+      if (actEl) {
+        e.preventDefault();
+        actEl.click();
+      }
     }
   });
   document.body.addEventListener('click', async (e) => {

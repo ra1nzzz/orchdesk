@@ -49,6 +49,12 @@
 - 右栏 TAB = 待办 / 产物 / 文件 / **能力**（`ctx-tab` 的 id：`todo|products|files|caps`）。
   「能力」= 插件（`pluginRuntime` 真实装载）+ 技能（磁盘 `skills/*.skill` 真实扫描）+ MCP。
   改名前后两组数据都是假的，别再按旧名找 `skills`。
+- **前端即时过滤实现**：插件/技能搜索（2026-09-06）走「预拼 `data-search` 小写 + 运行时
+  `.style.display` 切换」，**不触发 render()**（避免丢输入焦点）。委托层收敛模式可复用：
+  任何 `[data-action]` div 交互元素经 `hardenActions(root)` 一次性补 `role/tabindex`。
+- **对比度纪律**：修改 `--fg-faint`/`--fg-dim` 须用相对亮度公式重算 ×(bg/panel) 双主题，
+  浅色 panel 比 bg 容易翻车（用 ≥4.5 的色要挨个核）。现值（2026-09-06）：
+  dark `#A6ADBB/#8A93A3`、light `#5F6B7A/#667085` 全 AA。
 - **MCP 真接入**：零依赖 stdio 客户端在 `mcp-client.ts`（纯逻辑），不引 SDK。
   配置存 `数据目录/mcp.json`（`DATA_FILE_NAMES.mcp`），env 值 `encryptSecret` 加密。
   子进程 spawn 必须剔 NODE_OPTIONS/NODE_PATH/ELECTRON_RUN_AS_NODE（shim 会注入崩掉 server）。

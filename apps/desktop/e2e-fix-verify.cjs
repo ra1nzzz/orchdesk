@@ -1291,6 +1291,55 @@ async function run() {
     '桥不可用时显「未接入」');
 
   // ================================================================
+  // 测试组 12b：插件页搜索（2026-09-06，前端即时过滤内置插件卡片）
+  // 内置卡片渲染 data-search（名称/描述/能力/标识小写），input 事件运行时切换
+  // .hidden —— 不清空输入框、不触发 render（保留焦点）。空词恢复全量。
+  // ================================================================
+  console.log('📋 测试组 12b：插件页搜索');
+  // 先回会话页再进插件页，确保拿到干净的内置卡片列表（data-pid）
+  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await page.waitForTimeout(300);
+  await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+  await page.waitForTimeout(700);
+  const builtinCount = await page.locator('.plug[data-pid]').count();
+  await assert(builtinCount >= 4, `内置插件卡片已渲染（count=${builtinCount}）`);
+  const searchInput = page.locator('#plugSearch');
+  await assert(await searchInput.count() === 1, '插件页有搜索框 #plugSearch');
+  // 搜索「编排」：multi 插件（多Agent编排）应命中且可见，其它卡片隐藏
+  await searchInput.fill('编排');
+  await page.waitForTimeout(200);
+  await assert(await page.locator('.plug[data-pid="multi"]').isVisible(), '搜索「编排」命中 multi 插件（可见）');
+  await assert(!(await page.locator('.plug[data-pid="intent"]').isVisible()), '搜索「编排」不命中 intent（隐藏）');
+  const cntText = await page.locator('#plugSearchCount').innerText();
+  await assert(/命中 1\//.test(cntText), `命中计数显示 1（实际=${cntText}）`);
+  // 搜索命中数归一化：清空后全部恢复可见
+  await searchInput.fill('');
+  await page.waitForTimeout(200);
+  await assert(await page.locator('.plug[data-pid="intent"]').isVisible(), '清空搜索后 intent 恢复可见');
+
+  // 技能市场搜索 + 已安装清单（插件页底部）
+  // 滚动到含 #skillSearch 的技能市场卡
+  await page.evaluate(() => document.querySelector('#skillSearch')?.scrollIntoView());
+  await page.waitForTimeout(300);
+  const skillSearch = page.locator('#skillSearch');
+  await assert(await skillSearch.count() === 1, '技能市场有搜索框 #skillSearch');
+  // 搜索 guanji：只命中 slug 含 guanji 的行
+  const skillRowsBefore = await page.locator('tr[data-skill-search]').count();
+  await assert(skillRowsBefore >= 2, `技能市场行已渲染（count=${skillRowsBefore}）`);
+  await skillSearch.fill('guanji');
+  await page.waitForTimeout(200);
+  const visibleSkillRows = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('tr[data-skill-search]')).filter((r) => r.style.display !== 'none').length);
+  await assert(visibleSkillRows >= 1 && visibleSkillRows < skillRowsBefore,
+    `搜索 guanji 后可见行收窄（${visibleSkillRows}/${skillRowsBefore}）`);
+  await skillSearch.fill('');
+  await page.waitForTimeout(200);
+  // 已安装技能（mock listInstalledSkills 返回 guanji + aihot）→ 应渲染已安装清单
+  const installedRows = await page.locator('.is-row').count();
+  await assert(installedRows === 2, `已安装技能清单渲染 2 条（count=${installedRows}）`);
+  await assert(/已启用/.test(await page.locator('.is-row').first().innerText()), '已安装技能行显示状态');
+
+  // ================================================================
   // 测试组 13：本地插件市场（PRD FR-3）
   // 此前整栏标「规划中」；本地目录接入后必须区分「本地可装」与「远程未接入」。
   // ================================================================
