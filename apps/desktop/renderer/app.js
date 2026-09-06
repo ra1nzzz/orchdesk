@@ -364,7 +364,7 @@
     // 数据目录内容清单（PRD FR-4.2）：真实扫描结果。ok=false = 未接入/扫描失败，
     // UI 显示「未接入」而不是沿用写死的「~ 24 MB」。
     dataDirInventory: { ok: false, dir: '', items: [], totalSize: 0, totalFiles: 0, totalSizeText: '', errors: [] },
-    // 分层记忆（PRD FR-10）：四域可查 + 晋升。loaded=false = 桥不可用，
+    // 分层记忆：四域可查 + 晋升。loaded=false = 桥不可用，
     // 与「接进了但域是空的」区分开 —— worker 域空有两种完全不同的成因
     // （还没跑过 SubAgent vs 桥断了），UI 必须说清楚是哪一种。
     memory: { domain: 'worker', items: [], stats: null, loaded: false, busy: false },
@@ -761,6 +761,20 @@
     return '<span class="ib badge">未启用</span>';
   }
 
+  /**
+   * 技能市场单元格：按本地已安装清单（磁盘真实扫描）反映状态。
+   * 此前恒定渲染「安装」按钮 —— 安装成功后按钮文字不变，用户无法判断装没装上
+   * （重试/重复安装的根源）。已安装 → 绿色「已安装」标记 + 可「重装」覆盖。
+   */
+  function skillInstallCell(slug) {
+    const installed = (state.installedSkills || []).some((s) => s.slug === slug);
+    if (installed) {
+      return `<span class="badge ok" title="本地已安装（数据目录 skills/${esc(slug)}.skill）">已安装</span>`
+        + `<button class="btn sm ghost" data-action="guanji-install" data-slug="${esc(slug)}" title="重新下载覆盖">重装</button>`;
+    }
+    return `<button class="btn sm primary" data-action="guanji-install" data-slug="${esc(slug)}">安装</button>`;
+  }
+
   /* ---------- FR-5 用量追踪 ---------- */
   function refreshUsage() {
     if (typeof bridge.getUsage !== 'function') {
@@ -801,12 +815,12 @@
     if (!u.loaded) {
       if (u.error) {
         return `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px">
-          <div class="row" style="justify-content:space-between"><b style="font-size:12px">用量追踪（FR-5）</b><span class="badge warn">读取失败</span></div>
+          <div class="row" style="justify-content:space-between"><b style="font-size:12px">用量追踪</b><span class="badge warn">读取失败</span></div>
           <div class="faint" style="font-size:11.5px;margin-top:4px">主进程用量读取失败：${esc(u.error)}（重新打开设置页可重试）。</div>
         </div>`;
       }
       return `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px">
-        <div class="row" style="justify-content:space-between"><b style="font-size:12px">用量追踪（FR-5）</b><span class="badge">未接入</span></div>
+        <div class="row" style="justify-content:space-between"><b style="font-size:12px">用量追踪</b><span class="badge">未接入</span></div>
         <div class="faint" style="font-size:11.5px;margin-top:4px">主进程未接入用量桥接，无法显示真实记账。</div>
       </div>`;
     }
@@ -819,7 +833,7 @@
     </tr>`).join('');
     return `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px">
       <div class="row" style="justify-content:space-between;margin-bottom:6px">
-        <b style="font-size:12px">用量追踪（FR-5）</b>
+        <b style="font-size:12px">用量追踪</b>
         <span class="row" style="gap:8px">
           <span class="faint" style="font-size:11px">合计 ↑${fmtTokens(u.total.promptTokens)} · ↓${fmtTokens(u.total.completionTokens)} · 总 ${fmtTokens(u.total.totalTokens)} · ${u.total.turns} 回合</span>
           <button class="btn sm ghost" data-action="usage-refresh">刷新</button>
@@ -1333,7 +1347,7 @@
    * 混用不分会让「模型可见必入日志」变成一句没人能验证的话。 */
   function replaySourceNote() {
     const ev = state.sessionEvents;
-    if (ev.loaded && ev.data && ev.data.source === 'event-log') return 'append-only 事件流重建（ADR-0009）';
+    if (ev.loaded && ev.data && ev.data.source === 'event-log') return 'append-only 事件流重建';
     if (ev.loaded && ev.data && ev.data.source === 'legacy') return '历史会话：事件流无记录或不完整，从消息数组重建';
     return '从消息数组重建（事件流未接入）';
   }
@@ -1634,18 +1648,23 @@
           ${expanded ? `<div class="ss-l">${html}</div>` : ''}
         </div>`;
       };
-      const builtIn = PLUGINS.map((p) => `<div class="ss-i ${p.on ? 'on' : ''}" data-action="plug-nav" data-id="${p.id}">
-        <span class="id"></span><span class="in">${p.n}</span>
-        ${p.on ? '<span class="ib badge ok">启</span>' : p.deferred ? '<span class="ib badge">延后</span>' : '<span class="ib badge">关</span>'}</div>`).join('');
-      // 插件市场：本地目录已接真实注册表（FR-3）；远程源（观雅集/Hub）未接入，诚实标注。
-      // 此前整栏标「规划中」，本地目录接入后必须区分两种状态。
+      // 侧栏条目统一构造：能跳转的给 pside-nav（滚动到主区对应分区并高亮），
+      // 没有对应落点的显式标 .ss-i-static（cursor:default / 无 hover）——
+      // 此前部分条目带 data-action、部分完全没有，看起来一样但点了没反应。
+      const nav = (target, label, badge, on) => `<div class="ss-i pside-nav ${on ? 'on' : ''}" data-action="pside-nav" data-target="${target}"><span class="id"></span><span class="in">${label}</span>${badge || ''}</div>`;
+      const staticRow = (label, badge) => `<div class="ss-i ss-i-static" title="仅展示，无对应操作"><span class="id"></span><span class="in">${label}</span>${badge || ''}</div>`;
+      const builtIn = PLUGINS.map((p) => nav('psec-builtin', p.n,
+        p.on ? '<span class="ib badge ok">启</span>' : p.deferred ? '<span class="ib badge">延后</span>' : '<span class="ib badge">关</span>',
+        p.on)).join('');
       const market = (state.market.loaded
-        ? state.market.items.map((m) => `<div class="ss-i ${m.active ? 'on' : ''}" data-action="market-local-nav" data-id="${esc(m.dir)}"><span class="id"></span><span class="in">${esc(m.manifest && m.manifest.name || m.dir)}</span>${marketBadge(m)}</div>`).join('')
+        ? state.market.items.map((m) => nav('psec-market', esc(m.manifest && m.manifest.name || m.dir), marketBadge(m), m.active)).join('')
         : '') +
-        PLUGIN_MARKET.map((p) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(p.n)}</span><span class="ib badge">远程未接入</span></div>`).join('');
-      const skills = SKILLS_MARKET.map((s) => `<div class="ss-i"><span class="id"></span><span class="in mono" style="font-size:11.5px">${esc(s.n)}</span>${s.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>'}</div>`).join('');
-      const experts = [...expertList().map((e) => `<div class="ss-i"><span class="id"></span><span class="in">${e}</span><span class="ib badge info">专家</span></div>`),
-        ...teamList().map((t) => `<div class="ss-i"><span class="id"></span><span class="in">${esc(t.n)}</span><button class="btn sm ghost" data-action="team-compose" data-tid="${esc(t.id || '')}" data-tn="${esc(t.n)}">派发任务</button><span class="ib badge ceo">团</span></div>`)].join('');
+        // 远程源未接入：无本地落点，标为静态（不假装可点）
+        PLUGIN_MARKET.map((p) => staticRow(esc(p.n), '<span class="ib badge">远程未接入</span>')).join('');
+      const skills = SKILLS_MARKET.map((s) => nav('psec-skills', `<span class="mono" style="font-size:11.5px">${esc(s.n)}</span>`,
+        s.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>')).join('');
+      const experts = [...expertList().map((e) => staticRow(e, '<span class="ib badge info">专家</span>')),
+        ...teamList().map((t) => `<div class="ss-i ss-i-action"><span class="id"></span><span class="in">${esc(t.n)}</span><button class="btn sm ghost" data-action="team-compose" data-tid="${esc(t.id || '')}" data-tn="${esc(t.n)}">派发任务</button><span class="ib badge ceo">团</span></div>`)].join('');
       // 委派树结果（composeTeam 返回后渲染；CEO→Director→Worker 三层）。
       // ②半接线修复后 composeTeam 会把 task 真实喂给各 Director 经 agentRunner 执行，
       // 节点携带 task/result/note —— 必须在树里可见，否则又落入「执行了却存而不显」。
@@ -1665,8 +1684,10 @@
       // 连接器侧栏：真实后端状态。桥不可用（loaded=false）显「未接入」，
       // 与「已接入但都没配置」必须区分 —— 把 null 当空数组是本项目踩过三次的坑。
       const connItems = state.connectors.loaded
-        ? state.connectors.items.map((c) => `<div class="ss-i ${c.state && c.state.lastTestOk === true ? 'on' : ''}" data-action="conn-cfg" data-id="${esc(c.id)}"><span class="id"></span><span class="in">${esc(c.name)}</span>${connBadge(c)}</div>`).join('')
-        : '<div class="ss-i"><span class="id"></span><span class="in">连接器注册表</span><span class="ib badge">未接入</span></div>';
+        // 点击 = 滚到连接器分区 + 展开该连接器配置（此前只展开不滚动，
+        // 若分区在下方视口外，点了像没反应）。
+        ? state.connectors.items.map((c) => `<div class="ss-i ${c.state && c.state.lastTestOk === true ? 'on' : ''}" data-action="conn-nav" data-id="${esc(c.id)}"><span class="id"></span><span class="in">${esc(c.name)}</span>${connBadge(c)}</div>`).join('')
+        : '<div class="ss-i ss-i-static"><span class="id"></span><span class="in">连接器注册表</span><span class="ib badge">未接入</span></div>';
       const connCount = state.connectors.loaded ? state.connectors.stats.total : 0;
       return sec('builtin', '内置插件', PLUGINS.length, builtIn) +
         sec('market', '插件市场', (state.market.loaded ? state.market.items.length : 0) + PLUGIN_MARKET.length, market) +
@@ -1680,7 +1701,7 @@
       // 运行时切换每张卡 .hidden；匹配文本（名称/描述/能力/标识/仓库）预先拼进
       // data-search 小写。不触后端，纯即时前端过滤。
       return `<div class="main-inner"><h1 class="pg">插件</h1><div class="pg-sub">一切皆插件——能力以插件形式挂载；启用 = 注册 effect，停用 = 注册回滚（无残留）。</div>
-        <div class="plug-search-bar">
+        <div class="plug-search-bar" id="psec-builtin">
           <input type="search" class="inp" id="plugSearch" placeholder="搜索内置插件（名称 / 能力 / 描述）…"
             value="${esc(state.plugSearch)}" aria-label="搜索内置插件">
           <span class="faint" id="plugSearchCount" style="font-size:11px"></span>
@@ -1704,11 +1725,13 @@
           </div>
           <div class="pbody" data-cfg="${p.id}">
             ${p.cfg.map((c) => `<div class="row" style="padding:3px 0"><span class="faint" style="width:180px">${c}</span></div>`).join('')}
-            <div class="row" style="margin-top:6px"><button class="btn sm">查看审计日志</button><button class="btn sm ghost" data-action="plug-unload">卸载并回滚</button></div>
+            <!-- 「查看审计日志」此前是无 data-action 的死按钮（主进程无该 IPC）；
+                 不留死按钮 —— 停用即注册回滚（无残留），故这里只给真实停用的入口。 -->
+            <div class="row" style="margin-top:6px"><button class="btn sm ghost" data-action="plug-disable" data-id="${p.id}">停用（注册回滚，无残留）</button></div>
           </div>
         </div>`).join('')}
         <div class="faint" id="plugSearchEmpty" style="padding:14px;display:none">没有匹配的内置插件</div>
-        <div class="sec-title" style="margin-top:18px">连接器（PRD FR-3）</div>
+        <div class="sec-title psec" id="psec-connectors" style="margin-top:18px">连接器</div>
         <div class="card" style="padding:12px">
           <div class="faint" style="margin-bottom:8px">第三方服务接入：凭证仅本地<b>加密</b>保存（密钥存系统安全存储），保存即自动探测一次连通性。${state.connectors.loaded ? `共 ${state.connectors.stats.total} 个 · 已配置 ${state.connectors.stats.configured} · 连通 ${state.connectors.stats.ok}` : ''}</div>
           ${!state.connectors.loaded
@@ -1754,7 +1777,7 @@
           </div>
           <div class="row" style="margin-top:6px"><button class="btn sm ghost" data-action="conn-audit-clear">清空审计</button></div>` : ''}
         </div>
-        <div class="sec-title" style="margin-top:18px">MCP（Model Context Protocol）</div>
+        <div class="sec-title psec" id="psec-mcp" style="margin-top:18px">MCP（Model Context Protocol）</div>
         <div class="card" style="padding:12px">
           <div class="faint" style="margin-bottom:8px">接入 MCP server（stdio）：命令 + 参数 + 环境变量（env 密钥<b>加密</b>落盘）。保存即握手探测一次，拿到真实工具清单。${state.mcp.loaded ? `共 ${state.mcp.stats.total} 个 · 已连接 ${state.mcp.stats.connected} · 工具 ${state.mcp.stats.tools}` : ''}</div>
           ${!state.mcp.loaded
@@ -1780,7 +1803,7 @@
     }).join('')}
           <div class="row" style="margin-top:10px"><button class="btn sm primary" data-action="mcp-add">+ 添加 MCP server</button></div>
         </div>
-        <div class="sec-title" style="margin-top:18px">本地插件市场（PRD FR-3）</div>
+        <div class="sec-title psec" id="psec-market" style="margin-top:18px">本地插件市场</div>
         <div class="card" style="padding:12px">
           <div class="faint" style="margin-bottom:8px">第三方插件放 <b>插件目录</b>（manifest.json + index.js）后出现在这里。扫描不执行代码；<b>启用 = 显式授权装载</b>，与内置插件同一套真热插拔（停用 = 逆回滚无残留）。远程市场需签名与来源校验，未接入。</div>
           <div class="row" style="margin-bottom:10px">
@@ -1816,13 +1839,13 @@
             </div>`;
       }).join('')}
         </div>
-        <div class="sec-title muted" style="margin-top:18px">临时插件（自进化 · 仅驻内存 · 重启即失）</div>
+        <div class="sec-title muted psec" id="psec-temp" style="margin-top:18px">临时插件（自进化 · 仅驻内存 · 重启即失）</div>
         <div class="card temp-plug-card">
           <div class="faint" style="margin-bottom:8px">Agent 运行时自建的临时插件；信任级 = Shell，须沙箱内运行，不持久化。加载前经静态分析 + CONFIRM（fail-closed）。</div>
           ${state.tempPlugins.length ? state.tempPlugins.map((p) => `<div class="tp-item"><span class="mono">${p.name}</span><span class="badge warn">shell</span><span class="faint">仅驻内存</span><button class="btn sm ghost" data-action="tp-dispose" data-id="${p.id}">卸载</button></div>`).join('') : '<div class="faint">暂无临时插件（创建后在此列出，重启即失）</div>'}
           <div class="row" style="margin-top:8px"><button class="btn sm" data-action="tp-new">+ 新建临时插件</button></div>
         </div>
-        <div class="sec-title" style="margin-top:18px">技能市场（观雅集）</div>
+        <div class="sec-title psec" id="psec-skills" style="margin-top:18px">技能市场（观雅集）</div>
         <div class="card models-card" style="padding:12px">
           ${state.guanjiTokenSet
             ? '<div class="row" style="margin-bottom:8px"><span class="badge ok">已配置 TOKEN</span><button class="btn sm ghost" data-action="guanji-token" style="margin-left:8px">更换 TOKEN</button></div>'
@@ -1832,11 +1855,11 @@
             <span class="faint" id="skillSearchCount" style="font-size:11px"></span>
           </div>
           <table style="width:100%">
-            <tr><th style="width:32%">技能</th><th>能力</th><th style="width:80px;text-align:right">操作</th></tr>
+            <tr><th style="width:32%">技能</th><th>能力</th><th style="width:96px;text-align:right">状态</th></tr>
             ${(state.guanjiSkills.length ? state.guanjiSkills : SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }))).map((s) => `<tr data-skill-search="${esc([s.slug, s.name, s.description || '', (s.caps || []).join(' ')].join(' ').toLowerCase())}">
               <td><div class="mono" style="font-size:11.5px">${esc(s.slug)}</div><div class="faint" style="font-size:11px;margin-top:2px">${esc(s.description || '')}</div></td>
               <td>${s.caps.map((c) => `<span class="badge cap" style="margin:2px 4px 2px 0">${esc(c)}</span>`).join('')}${s.auth ? '<span class="badge warn">需授权</span>' : ''}</td>
-              <td style="text-align:right"><button class="btn sm primary" data-action="guanji-install" data-slug="${esc(s.slug)}">安装</button></td>
+              <td style="text-align:right">${skillInstallCell(s.slug)}</td>
             </tr>`).join('')}
           </table>
           <div class="row" style="margin-top:10px"><button class="btn sm" data-action="guanji-publish">发布技能到观雅集</button></div>
@@ -1986,7 +2009,7 @@
               <div class="faint" style="font-size:11.5px;margin-top:4px">${m.blurb}</div>
             </div>`).join('')}
           </div>
-          <div class="sec-title" style="margin:16px 0 8px">网络域名白名单（PRD FR-8）</div>
+          <div class="sec-title" style="margin:16px 0 8px">网络域名白名单</div>
           <div class="faint" style="margin-bottom:6px">一行一个域名（如 <span class="mono">github.com</span>），<span class="mono">*</span> 表示不限；非白名单域名的抓取经补偿层二次确认（fail-closed）。</div>
           <textarea class="inp mono" id="net-allow" rows="3" style="width:100%;font-size:11.5px">${esc((state.sandbox.networkAllow || ['*']).join('\n'))}</textarea>
           <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="sandbox-save-net">保存白名单</button><span class="faint" id="net-allow-tip"></span></div>
@@ -1994,7 +2017,7 @@
           <div class="levels">
             ${state.authLevels.length ? state.authLevels.map((l) => `<div class="lv"><span class="lv-n">L${l.level}</span><span class="lv-l">${l.label}</span><span class="faint">${l.scope}</span>${l.requiresApproval ? '<span class="badge warn">需授权</span>' : ''}</div>`).join('') : '<div class="faint">分级定义加载中…</div>'}
           </div>
-          <div class="sec-title" style="margin:16px 0 8px">授权白名单（PRD FR-9 · 可查看可撤销）</div>
+          <div class="sec-title" style="margin:16px 0 8px">授权白名单（可查看可撤销）</div>
           <div class="faint" style="margin-bottom:6px">粒度分「会话 / 永久」，规则 = 操作类型 + 目标模式（仅 <span class="mono">*</span> 通配，整串匹配）。命中即放行并计入审计；<b>偏执模式下白名单不生效</b>（切到偏执 = 全锁）。</div>
           <div class="grant-add">
             <select id="grant-tool" class="inp" style="width:150px">
@@ -2026,7 +2049,7 @@
             ${state.compAudit.length ? state.compAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge warn">补偿</span><span class="mono faint">${(e.text || '').replace(/</g, '&lt;')}</span>${e.note ? `<span class="faint">${e.note}</span>` : ''}</div>`).join('') : '<div class="faint">暂无补偿动作记录（外发/不可逆操作后在此提供「补偿动作」）</div>'}
           </div>
           <div class="row" style="margin-top:8px"><button class="btn sm" data-action="comp-record">+ 记录补偿动作</button><span class="faint">不保证完全撤销，仅尽力补偿</span></div>
-          <div class="sec-title" style="margin:16px 0 8px">沙箱日志（PRD FR-8 · 可检索）</div>
+          <div class="sec-title" style="margin:16px 0 8px">沙箱日志（可检索）</div>
           <div class="faint" style="margin-bottom:6px">记录每一次沙箱判定：路径 / 命令 / 域名白名单、授权门、外发预判，以及执行成败。环形缓冲保留最近 ${state.sandboxLog.max} 条，随数据目录迁移。</div>
           <div class="sblog-bar">
             <input type="text" id="sblog-kw" class="inp mono" placeholder="检索：路径 / 命令 / 域名 / 会话 ID" style="flex:1;font-size:11.5px" value="${esc(state.sandboxLog.keyword)}">
@@ -2078,7 +2101,7 @@
           ${desktopItem('notify', '开机提醒', '关键事件系统通知')}
           <div class="desktop-item"><div><div class="di-name">TRACE 遥测</div><div class="di-desc" id="trace-desc">脱敏遥测上报至 OrchDesk 公开仓库（仅白名单字段，不含任何消息内容）</div></div><div class="switch ${state.traceEnabled ? 'on' : ''}" id="trace-switch" data-action="trace-toggle"></div></div>
         </div>
-        <div class="sec-title" id="settings-section-memory"><span class="ico">${ic('archive', 14)}</span>分层记忆（PRD FR-10）</div>
+        <div class="sec-title" id="settings-section-memory"><span class="ico">${ic('archive', 14)}</span>分层记忆</div>
         <div class="card">
           <div class="faint" style="margin-bottom:8px">四域物理隔离，各落独立文件。Worker 出域（→ 总监 / 项目 / 全局）一律经 Director 过滤，<b>fail-closed</b>：过滤器缺失、超时、抛错都按拒绝处理。</div>
           <div class="row" style="gap:6px;margin-bottom:8px;align-items:center">
@@ -4290,7 +4313,33 @@
       }
       case 'plug-cfg': { const card = el.closest('.plug'); if (card) card.classList.toggle('open'); break; }
       case 'plug-nav': { const card = document.querySelector(`.plug[data-pid="${id}"]`); if (card) { card.classList.add('open'); card.scrollIntoView({ behavior: 'smooth', block: 'start' }); } break; }
-      case 'plug-unload': toast('已卸载并回滚注册（无残留）', 'warn'); break;
+      // 停用即注册回滚（无残留）—— 走与开关相同的真实 IPC。
+      // 原「卸载并回滚」是只弹 toast 的假动作（主进程没有卸载 IPC），不留假按钮。
+      case 'plug-disable': {
+        try {
+          const r = await bridge.setPluginEnabled(id, false);
+          if (r && r.ok) {
+            state.pluginRuntime = await bridge.getPluginRuntime().catch(() => state.pluginRuntime);
+            toast(`已停用 ${id}（注册已回滚，无残留）`, 'warn');
+          } else {
+            toast(`停用失败：${(r && r.reason) || '未知错误'}`, 'danger');
+          }
+        } catch (err) {
+          toast(`停用异常：${(err && err.message) || err}`, 'danger');
+        }
+        render();
+        break;
+      }
+      case 'plug-unload': {
+        // 兼容旧入口：转发到真实停用
+        try {
+          const r = await bridge.setPluginEnabled(id || '', false);
+          if (r && r.ok) toast('已停用（注册已回滚，无残留）', 'warn');
+          else toast(`停用失败：${(r && r.reason) || '未知错误'}`, 'danger');
+        } catch { toast('停用异常', 'danger'); }
+        render();
+        break;
+      }
       case 'market': toast(`「${el.dataset.n}」请到 设置-技能市场（观雅集）完成安装与能力审查`, 'warn'); break;
       case 'market-auth': toast(`「${el.dataset.n}」需授权：请在 设置-技能市场 安装时于确认弹窗中授权高危能力`, 'warn'); break;
 
@@ -4408,7 +4457,37 @@
         }).catch((err) => toast(`操作失败：${err && err.message || err}`, 'err'));
         break;
       }
-      case 'market-local-nav': break;
+      // 侧栏导航：滚到主区对应分区并短暂高亮（此前 plug-nav 只处理内置插件，
+      // 其余条目要么没有 action、要么是空 case market-local-nav —— 点了像坏了）。
+      case 'pside-nav': {
+        const target = el.dataset.target;
+        const node = target && document.getElementById(target);
+        if (node) {
+          node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          node.classList.add('psec-flash');
+          setTimeout(() => node.classList.remove('psec-flash'), 1200);
+        }
+        break;
+      }
+      case 'market-local-nav': {
+        // 旧入口（已由 pside-nav 取代），保留以免外部/旧状态点击落空
+        const node = document.getElementById('psec-market');
+        if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        break;
+      }
+      case 'conn-nav': {
+        // 侧栏点连接器 = 滚到连接器分区 + 展开该连接器配置（原来只展开、不滚动）
+        const node = document.getElementById('psec-connectors');
+        if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        state.connectors.expanded = id;
+        render();
+        // render() 会重建 DOM，滚定位要在重建之后
+        requestAnimationFrame(() => {
+          const n2 = document.getElementById('psec-connectors');
+          if (n2) n2.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+        break;
+      }
 
       /* T-P6-1 观雅集技能市场 */
       case 'guanji-token': {

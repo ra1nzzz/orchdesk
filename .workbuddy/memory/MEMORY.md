@@ -107,3 +107,13 @@
 - 最大欠账是勾选不是代码（PLAN 107 仅 23 已勾）；83 项运行期验收是**待执行**非环境阻断，别写「受 BUG-W02 门控」。对照 `docs/00-项目/openworker-对照-2026-09-03.md`。
 - verify 缺环境隔离（用真实 dataDir，有污染 prod 遥测风险，待补）。
 - 死挂点审计 v0.12.0 清零（累计 15+）：含零调用方/零写入方变体；契约+接线测试都要有。方法见 `~/.workbuddy/skills/dead-hook-audit/`。
+
+## UI 交互纪律（插件页梳理 2026-09-07）
+- **不留死按钮**：无 IPC 支撑的操作宁可删掉按钮，也不留「点了没反应/只弹 toast」的假动作
+  （曾发现「查看审计日志」无 action、「卸载并回滚」假 toast、market-local-nav 空 case 三个）。
+- **侧栏条目三分类**：pside-nav（滚+flash 高亮）/ ss-i-action（内联按钮）/ ss-i-static
+  （显式不可点：cursor:default+opacity）——禁止「无 action 又不标 static」的僵尸条目。
+- **e2e 断言用户可见状态必须元素级定位**：全文正则 /已安装/ 会撞「已安装（N）」标题假阳性。
+- **UI 文案禁内部文档标识**（PRD FR-xx / ADR-xxxx）：代码注释保留引用，渲染文本一律不带。
+- **conn-nav 类「滚动+render」**：render 重建 DOM 会丢滚动位置，须 requestAnimationFrame 后再滚。
+- 侧栏 .ss-i padding 7px 10px（12px 字号下 5px 偏挤，用户可感）。

@@ -440,6 +440,11 @@ input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;ut
 .plug .pbody{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);display:none}
 .plug.open .pbody{display:block}
 
+/* 侧栏导航落点高亮（2026-09-07）：点击侧栏条目滚到分区后短暂闪烁，
+   让用户确认「跳过去了、就是这里」——否则长页面滚动后分不清到了哪一段。 */
+.psec{scroll-margin-top:12px;border-radius:6px;transition:background .2s,box-shadow .2s}
+.psec.psec-flash{background:var(--accent-soft);box-shadow:0 0 0 6px var(--accent-soft)}
+
 /* 插件页搜索（2026-09-06）：顶部搜索条，前端即时过滤内置插件卡片 */
 .plug-search-bar{display:flex;align-items:center;gap:8px;margin-bottom:12px}
 .plug-search-bar .inp{max-width:360px;flex:0 1 auto}
@@ -552,15 +557,24 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 /* 插件侧栏可折叠分组 */
 .ssec{padding:2px 2px 4px}
 .ssec+.ssec{margin-top:6px}
-.ssec .ss-h{display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:7px;cursor:pointer}
+.ssec .ss-h{display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:7px;cursor:pointer}
 .ssec .ss-h:hover{background:var(--bg-hover)}
 .ssec .ss-c{width:14px;height:14px;display:grid;place-items:center;color:var(--fg-faint);transition:.15s;flex:none}
 .ssec .ss-c.open{transform:rotate(90deg)}
 .ssec .ss-t{font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--fg-dim);text-transform:uppercase;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssec .ss-n{font-size:10px;color:var(--fg-faint);background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:0 5px;min-width:18px;text-align:center;flex:none}
-.ssec .ss-l{padding:2px 0 0 20px}
-.ssec .ss-i{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;margin-top:1px}
+.ssec .ss-l{padding:3px 0 2px 16px}
+/* 侧栏文字留白（2026-09-07）：原 5px 8px 对 12px 字号偏挤，尤其带 badge 的行
+   上下贴边；统一加大到 7px 10px，行间也更松。 */
+.ssec .ss-i{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:6px;cursor:pointer;margin-top:2px}
 .ssec .ss-i:hover{background:var(--bg-hover)}
+/* 明确不可点的条目（远程未接入 / 专家名等）：不显示 pointer、不给 hover 反馈，
+   避免「看着能点其实没反应」（此前这类项与可点项外观完全一致）。 */
+.ssec .ss-i.ss-i-static{cursor:default;opacity:.72}
+.ssec .ss-i.ss-i-static:hover{background:none}
+/* 带内联按钮的行（专家团「派发任务」）：按钮不撑破行高 */
+.ssec .ss-i.ss-i-action{gap:6px}
+.ssec .ss-i.ss-i-action .btn{padding:2px 6px;font-size:10.5px;flex:none}
 .ssec .ss-i .id{width:6px;height:6px;border-radius:50%;background:var(--fg-faint);flex:none}
 .ssec .ss-i.on .id{background:var(--ok)}
 .ssec .ss-i .in{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}

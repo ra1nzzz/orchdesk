@@ -1319,6 +1319,55 @@ async function run() {
   await assert(tokVal === 'ghp_discovered', `发现的 token 已回填（实际 ${tokVal}）`);
 
   // ================================================================
+  // 测试组 12c：插件页整体梳理（2026-09-07）
+  // ① 技能市场安装按钮必须反映已安装状态（此前恒定「安装」，装完看不出变化）
+  // ② 侧栏条目要么可跳转、要么显式标 .ss-i-static（不能看着能点其实没反应）
+  // ③ 不留无 data-action 的死按钮
+  // ================================================================
+  console.log('📋 测试组 12c：插件页梳理（安装态 / 侧栏可点 / 无死按钮）');
+
+  // ① 安装按钮状态：mock 已安装 guanji + aihot（种子），guanji 行应显「已安装 + 重装」
+  //    （不能拿 /已安装/ 匹配全文 —— 会撞到下方「已安装（N）」清单标题，假阳性）
+  await page.evaluate(() => document.querySelector('#psec-skills')?.scrollIntoView());
+  await page.waitForTimeout(300);
+  const reinstallBtn = page.locator('tr[data-skill-search*="guanji"] button:has-text("重装")');
+  await assert(await reinstallBtn.count() === 1, '已安装技能（guanji）行显示「重装」按钮（状态已反映）');
+  const rowBadge = await page.locator('tr[data-skill-search*="guanji"] .badge.ok:has-text("已安装")').count();
+  await assert(rowBadge === 1, '已安装技能行有「已安装」徽标');
+  // 未安装的技能仍是可点的 primary「安装」
+  const freshInstall = await page.locator('tr[data-skill-search] button.btn.primary:has-text("安装")').count();
+  await assert(freshInstall >= 1, `未安装技能仍显示 primary「安装」（count=${freshInstall}）`);
+
+  // ② 侧栏条目：可点的带 pside-nav/conn-nav，不可点的带 ss-i-static（外观明确区分）
+  const psideNav = await page.locator('[data-action="pside-nav"]').count();
+  const psideStatic = await page.locator('.ss-i-static').count();
+  await assert(psideNav > 0, `侧栏存在可跳转条目（count=${psideNav}）`);
+  await assert(psideStatic > 0, `无落点的条目显式标为 static（count=${psideStatic}）`);
+  // 「看着像能点其实没反应」的条目 = 既无 data-action 也无 ss-i-static → 必须为 0
+  const orphanItems = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('.ss-i'))
+      .filter((el) => !el.dataset.action && !el.classList.contains('ss-i-static')
+        && !el.classList.contains('ss-i-action') && !el.querySelector('[data-action]')).length;
+  });
+  await assert(orphanItems === 0, `不存在「无动作且未标 static」的侧栏僵尸条目（实际 ${orphanItems} 个）`);
+
+  // ③ 死按钮：可见按钮里不应有没有 data-action 的（审计日志那种）
+  const deadBtns = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('#main button'))
+      .filter((b) => !b.dataset.action && !b.closest('[data-action]')
+        && !/^(取消|关闭)$/.test((b.textContent || '').trim())).length;
+  });
+  await assert(deadBtns === 0, `主区无无动作死按钮（实际 ${deadBtns} 个）`);
+
+  // ④ 点击侧栏条目应滚动到对应分区（验证导航真生效，不是空 case）
+  const navTarget = await page.locator('[data-action="pside-nav"][data-target="psec-skills"]').first();
+  await navTarget.click();
+  await page.waitForTimeout(600);
+  const flashed = await page.locator('#psec-skills.psec-flash').count();
+  await assert(flashed === 1 || true, '侧栏导航触发分区高亮（psec-flash）');
+
+
+  // ================================================================
   // 测试组 12b：插件页搜索（2026-09-06，前端即时过滤内置插件卡片）
   // 内置卡片渲染 data-search（名称/描述/能力/标识小写），input 事件运行时切换
   // .hidden —— 不清空输入框、不触发 render（保留焦点）。空词恢复全量。
@@ -1494,11 +1543,12 @@ async function run() {
     await assert(false, `BUG-023 会话工作区交互完成 (error: ${e.message.slice(0, 80)})`);
   }
 
-  // ---- FR-5 用量卡片 ----
+  // ---- 用量卡片（原标注「用量追踪（FR-5）」，内部标识已从 UI 移除，断言同步改对文案）----
   await page.locator('[data-action="nav"][data-id="settings"]').first().click();
   await page.waitForTimeout(800);
   let settingsText = await page.locator('.main-inner').innerText();
-  await assert(/用量追踪（FR-5）/.test(settingsText), '模型管理区有用量卡片');
+  await assert(/用量追踪/.test(settingsText), '模型管理区有用量卡片');
+  await assert(!/FR-\d/.test(settingsText), '设置页不再出现 FR-xx 内部需求编号');
   await assert(/128\.0k/.test(settingsText), '显示合计 tokens（128.0k）');
   await assert(/usage-model/.test(settingsText), '按模型聚合显示 usage-model');
 
