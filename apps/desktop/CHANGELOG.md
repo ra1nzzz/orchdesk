@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-06
+
+### Added
+- **connector**: 连接器 CLI 登录态自动发现（github 从 ~/.git-credentials / gh 识别，只回填不自动写盘）
+- **ui**: UI/UX 前端收敛（对比度 / 键盘可达 / 硬编码色 / 插件&SKILL 搜索 / 设置页导航 / 响应式）
+- **mcp**: MCP 真接入（零依赖 stdio 客户端，替换「能力」TAB 的假 MCP 分组）
+- **ui**: 右栏「技能与MCP」→「能力」（插件/技能/MCP 三组，均改取真数据源）
+- **ui**: 待办语义化 + 侧栏重构（文件TAB/浏览器侧栏/终端抽屉）+ 思考链展开
+
+
 ## [0.14.0] - 2026-09-04
 
 ### Added
