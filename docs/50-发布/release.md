@@ -86,6 +86,19 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
 - 资产：`OrchDesk Setup 0.13.1.exe`（nsis，88,082,407 B）+ `OrchDesk 0.13.1.exe`（portable，87,737,276 B）+ blockmap + `latest.yml`；Setup sha512 `ItSWEaKXFiIAOjXzc0o8pz13YacF1/K6ZqosdXKJA6KetafYHOIS33pJ2Q2uAOSRDYUtWvzV58PN/vAm34pvVg==`（与 `latest.yml` 一致，已核对）。成功输出目录 `release-v0131-r1`（沿用「全新目录」规避 asar 句柄泄漏）。
 - 发版流程照旧：`changelog.mjs --version 0.13.1 --write` → bump → release commit → `tsc` + `vendor-dsh` → 打包 → tag。
 
+## v0.15.0（2026-09-06）
+
+- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.0
+- release commit `74458ee`，tag `v0.15.0`（打包**之后**打，遵守 `check-version.cjs` 顺序铁律）。
+- 资产：`OrchDesk Setup 0.15.0.exe`（nsis，88,120,279 B）+ `OrchDesk 0.15.0.exe`（portable，87,775,094 B）+ `latest.yml`；成功输出目录 `release-v0150-r2`。
+- Setup sha512 `+OOdHdI8DlPV7IzMnhA1kzDm…`（与 `latest.yml` 一致，已核对）。
+- 内容（CHANGELOG 0.15.0）：**MCP 真接入**（零依赖 stdio 客户端，替换「能力」TAB 假 MCP 分组）+ **UI/UX 前端收敛**（对比度/键盘可达/硬编码色/插件&SKILL 搜索/设置页导航/响应式）+ **连接器 CLI 登录态自动发现** + 右栏「技能与MCP」→「能力」（三组均改真数据源）+ 待办语义化与侧栏重构。
+- 验证：`tsc` EXIT=0；全量 verify **921 项全绿**（27 套件）；asar **203 文件**校验通过（含本版新增 `dist/mcp-client.js`、`dist/connector-discover.js`）；`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node` 已解包就位。
+- **打包踩坑（本轮新增）**：① 首次 `electron-builder` 在「searching for node modules」阶段报 `No JSON content found in output`（npm 依赖树收集被环境污染）→ 换全新输出目录后不再复现；② 随即遇到下载 nsis/winCodeSign 的 **TLS 断连**（已知约五成概率）→ **重试循环（最多 6 次 + 间隔 8s）第 2 次即通过**。延续结论：**同目录重试无效就换目录，下载失败就重试**。
+- **GitHub Release 踩坑（本轮新增，重要）**：用 API 创建 release 时若 `tag_name` 未正确关联，GitHub 会建成 **`untagged-<sha>` release**（产物传完才发现、指向错误 commit）。修正：对 release 做 `PATCH {"tag_name":"v0.15.0"}` 即可改回正确关联（**不必删 release 重传 176MB 产物**），再 `PATCH {"draft":false}` 转正。教训：**创建 release 后先核对返回的 `tag_name` 字段**，别等传完产物才发现。
+- **CHANGELOG 人工裁决**：本版「Skill 发布到本地」是加进来又在同一版内移除（从未发布给用户），已从 Added/Removed 两处剔除，避免对外发版说明出现"加了又撤"的噪音；存活的「连接器 CLI 登录态自动发现」保留。
+- **尚未实机冒烟**：GUI / MCP 真实 server 连接 / 连接器自动发现 建议在桌面会话按 [实机冒烟清单](../40-质量/smoke-checklist.md) 执行后回勾。
+
 ## 版本策略
 
 - 语义化版本 `MAJOR.MINOR.PATCH`；预发布用 `-alpha.N` / `-beta.N`。

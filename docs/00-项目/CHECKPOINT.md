@@ -9,11 +9,11 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.14.0`（tag `v0.14.0` 已推；GitHub Release 待建 —— `gh` 未登录，需用 ra1nzzz token 走 API） | SemVer，pre-1.0 阶段 |
-| **最新 Commit** | `16fb657` | revert(skill): 移除「Skill 发布到本地」，保留从观雅集下载 skill |
+| **当前版本** | `0.15.0`（tag `v0.15.0` 已推；**GitHub Release 已发布**，见下） | SemVer，pre-1.0 阶段 |
+| **最新 Commit** | `74458ee` | chore(release): 0.15.0 |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
-| **最新 Release** | [v0.12.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.12.0)（`v0.13.0` 已本地打包、待推） | 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正（`gh release edit v0.12.0 --notes-file … --draft=false`）——CI 不会自动发布。v0.13.0 产物已出（Setup 88,081,451 B / portable 87,736,328 B，sha512 与 `latest.yml` 一致，asar 195 文件校验通过），**待桌面会话实机冒烟后再推 Release** |
+| **最新 Release** | [v0.15.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.0)（**已发布**：Setup 88,120,279 B / Portable 87,775,094 B / latest.yml）| 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正——CI 不会自动发布。发布一律用 **ra1nzzz token 走 API**（`gh` 未登录）：创建 release → 上传资产（清空代理直连）→ 补 notes → `PATCH {"draft":false}` 转正。**创建后必须核对返回的 `tag_name`**（曾误建 `untagged-<sha>`，修正法见下）。待桌面实机冒烟后回勾 [smoke-checklist](../40-质量/smoke-checklist.md) |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
 | **验证套件** | 921/921 PASS | `npm run verify`（plugins 88 / orchestration 50 / trace-upload 37 / agent-runtime 40 / agent-loop 14 / model-loop 45 / dsh-runtime 31 / ipc-guard 4 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / **connector-discover 10** / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / browser-tools 44 / terminal-pty 29 / file-panel 20 / file-edit 20 / arch-guard 15 / mcp-client 10 / e2e 221）—— 27 套件；另设不进链的真机冒烟 `pnpm run smoke:browser`（11/11，需真 GPU/渲染进程） |

@@ -22,9 +22,21 @@
 - electron 套件：`Module._load` stub electron 后 require `dist/main.js`（stub 在 `scripts/verify-kit.cjs`）。
 
 ## 打包发版
-- 配方（绕 BUG-W01）：`npx tsc -p tsconfig.json && node scripts/vendor-dsh.cjs && node kill-running.cjs && npx electron-builder --win --publish never`；tag 在打包后打（check-version 严格模式阻断）。
-- Changelog 用零依赖 `scripts/changelog.mjs`（parser@6 吃不到 `-hash-` 静默 0 字节）。
-- asar 句柄泄漏→同目录重试 EBUSY：换全新输出目录（`-c.directories.output=release-xxx-rN`）。GitHub 直连约五成断连→重试 ≤5 次、间隔 6s。asar 头部是 pickle：首 `{` 到末 `}` 再 parse；node-pty 1.2.0 在 `prebuilds/<plat-arch>/conpty.node`。
+- 配方（绕 BUG-W01）：`npx tsc -p tsconfig.json && node scripts/vendor-dsh.cjs && node kill-running.cjs && npx electron-builder --win --publish never`（pnpm 包装层触发 safe-delete，别用 pnpm 跑）。
+- **顺序铁律（必守）**：bump → changelog → release commit → tsc + vendor-dsh → 打包 → **最后** 打 tag
+  （check-version.cjs 严格模式下 `version == 最新 tag` 阻断 dist）。
+  **bump 要手动改 package.json**，别用 `npm run version:bump`（bumpp 会连 tag 一起打，直接违反上面的顺序）。
+- Changelog 用零依赖 `scripts/changelog.mjs --from <旧tag> --version <新版本> --write`（parser@6 吃不到 -hash- 静默 0 字节）。
+  **人工裁决**：同一版内「加了又撤、从未发布」的功能要从 Added/Removed 两处剔除，别让对外说明出现噪音。
+- asar 句柄泄漏→同目录重试 EBUSY：换全新输出目录（`-c.directories.output=release-xxx-rN`）。
+  GitHub 直连约五成断连→重试 ≤5 次、间隔 6s（本版 0.15.0：首跑 npm 依赖树收集报
+  `No JSON content found in output` → 换目录；随即下载 TLS 断连 → 重试第 2 次过）。
+- **GitHub Release（gh 未登录，只能 token 走 API）**：创建 → 上传资产（清空代理直连）→ 补 notes →
+  `PATCH {"draft":false}` 转正。**创建后必须先核对返回的 `tag_name`** —— 若 tag 没关联上，GitHub 会建成
+  `untagged-<sha>`（曾传完 176MB 产物才发现）；修正：`PATCH {"tag_name":"vX.Y.Z"}` 改回即可，
+  **不用删 release 重传产物**。
+- asar 头解析：pickle 格式，JSON 从 **offset 16** 起、长度读 `readUInt32LE(12)`（不是 offset 8 / readUInt32LE(4)）。
+  校验必查 `app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node` 已解包。
 
 ## 模块要点（坑；完整见 ADR）
 - 浏览器（0011）：宁可降级别挂起、降级可见。挂起源：`Emulation.setDeviceMetricsOverride`（主进程消失）/`Page.captureScreenshot`（回退 `capturePage`）/`Page.navigate`（回退 `win.loadURL`）。缩略图用已得 PNG 本地 resize，别发第二次截图。
