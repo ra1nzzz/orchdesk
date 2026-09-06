@@ -99,6 +99,20 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
 - **CHANGELOG 人工裁决**：本版「Skill 发布到本地」是加进来又在同一版内移除（从未发布给用户），已从 Added/Removed 两处剔除，避免对外发版说明出现"加了又撤"的噪音；存活的「连接器 CLI 登录态自动发现」保留。
 - **尚未实机冒烟**：GUI / MCP 真实 server 连接 / 连接器自动发现 建议在桌面会话按 [实机冒烟清单](../40-质量/smoke-checklist.md) 执行后回勾。
 
+## v0.15.1（2026-09-07）
+
+- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.1
+- release commit `e5a94e6`，tag `v0.15.1`（打包**之后**打）。bump 走 **patch**（本版只有 fix，非 minor）。
+- 资产：`OrchDesk Setup 0.15.1.exe`（nsis，88,121,546 B）+ `OrchDesk 0.15.1.exe`（portable，87,776,426 B）+ `latest.yml`；输出目录 `release-v0151-r1`（**打包一次通过**，1m52s）。
+- 内容：插件页面整体梳理（安装态 / 侧栏导航 / padding / 去内部标识 / 清死按钮），见 CHANGELOG 0.15.1。
+- 验证：`tsc` EXIT=0；全量 verify **930 项全绿**（27 套件）；sha512 与 `latest.yml` 一致；asar 203 文件；`conpty.node` 已解包。
+- **Release 操作三个新踩坑（高危，必看）**：
+  1. **POST 创建绝不能放进「失败就重来」的重试循环** —— 本轮因 `break` 条件判断的是子 shell 格式化后的文本（原始 `$out` 中并不含该串），条件永不成立，**一口气创建了 5 个同名 release**（删掉 4 个才收场）。**break 只能基于命令真实输出（HTTP code）**；创建类操作应先查重、或只执行一次。
+  2. **curl 上传返 HTTP 000 ≠ 失败**：服务端可能已收下**被截断的损坏文件**。本轮 Setup 被传成 85,553,915 B（正确应为 88,121,546 B），portable 同理。**发布前必须逐资产核对 `size` 与本地一致**；发现不符就删净全部资产重传（本轮用 python urllib 重传后正确）。
+  3. **api.github.com 约 50% 概率返回 000 / SSL EOF**：`PATCH` 转正要重试 10+ 次才命中。上传走 `uploads.github.com`（python urllib 稳定），别用 curl（易 000）。
+  4. 附：Git Bash 下 curl 的 `--data-binary @/tmp/x.json` 读不到文件，必须用 Windows 路径 `C:/Users/.../AppData/Local/Temp/x.json`。
+- **伴随发现（未处理，待裁决）**：GitHub 上**每个历史版本都有 2 个重复 release**（v0.15.0 / v0.14.0 / v0.13.2 / v0.13.1 / v0.13.0，各一个 1 资产 + 一个 3 资产，多为 draft），系历史发布流程重复创建所致。删除属破坏性操作，需人工确认后再清理。
+
 ## 版本策略
 
 - 语义化版本 `MAJOR.MINOR.PATCH`；预发布用 `-alpha.N` / `-beta.N`。

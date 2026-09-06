@@ -35,6 +35,17 @@
   `PATCH {"draft":false}` 转正。**创建后必须先核对返回的 `tag_name`** —— 若 tag 没关联上，GitHub 会建成
   `untagged-<sha>`（曾传完 176MB 产物才发现）；修正：`PATCH {"tag_name":"vX.Y.Z"}` 改回即可，
   **不用删 release 重传产物**。
+- **Release 三个高危坑（0.15.1 实测，必守）**：
+  ① **POST 创建绝不放进「失败就重来」的循环** —— 曾因 break 条件读了子 shell 格式化后的文本
+  （原始 `$out` 里没有）导致条件永不成立，**一口气建了 5 个 release**。break 只能基于 HTTP code。
+  ② **curl 上传返 HTTP 000 不代表失败**：服务端可能已收下**截断的损坏文件**（Setup 传成
+  85,553,915 ≠ 正确 88,121,546）。**发布前必须逐资产核对 size 与本地一致**，不对就删净重传。
+     上传用 python urllib（uploads.github.com 稳）；curl 在这里易 000。
+  ③ **api.github.com 约 50% 概率 000 / SSL EOF**：PATCH 转正要重试 10+ 次才命中。
+  ④ Git Bash 里 curl 的 `--data-binary @/tmp/x.json` 读不到（/tmp 非 Windows 路径），
+     必须用 `C:/Users/.../AppData/Local/Temp/x.json`。
+- **历史遗留**：GitHub 上每个旧版本都有 2 个重复 release（1 资产 + 3 资产，多为 draft），
+  清理属破坏性操作，需用户裁决。
 - asar 头解析：pickle 格式，JSON 从 **offset 16** 起、长度读 `readUInt32LE(12)`（不是 offset 8 / readUInt32LE(4)）。
   校验必查 `app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node` 已解包。
 

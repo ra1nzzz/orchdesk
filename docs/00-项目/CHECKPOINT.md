@@ -9,11 +9,11 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.15.0`（tag `v0.15.0` 已推；**GitHub Release 已发布**，见下） | SemVer，pre-1.0 阶段 |
-| **最新 Commit** | `74458ee` | chore(release): 0.15.0 |
+| **当前版本** | `0.15.1`（tag `v0.15.1` 已推；**GitHub Release 已发布**，见下） | SemVer，pre-1.0 阶段 |
+| **最新 Commit** | `e5a94e6` | chore(release): 0.15.1 |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
-| **最新 Release** | [v0.15.0](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.0)（**已发布**：Setup 88,120,279 B / Portable 87,775,094 B / latest.yml）| 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正——CI 不会自动发布。发布一律用 **ra1nzzz token 走 API**（`gh` 未登录）：创建 release → 上传资产（清空代理直连）→ 补 notes → `PATCH {"draft":false}` 转正。**创建后必须核对返回的 `tag_name`**（曾误建 `untagged-<sha>`，修正法见下）。待桌面实机冒烟后回勾 [smoke-checklist](../40-质量/smoke-checklist.md) |
+| **最新 Release** | [v0.15.1](https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.1)（**已发布**：Setup 88,121,546 B / Portable 87,776,426 B / latest.yml）。注：GitHub 上每个历史版本都存在 2 个重复 release 条目（1 资产 + 3 资产，多为 draft），清理需人工裁决| 由 `v*` tag 触发 CI：tsc → electron-builder（nsis + portable）→ 上传资产为 **Draft**；需人工补 notes 并转正——CI 不会自动发布。发布一律用 **ra1nzzz token 走 API**（`gh` 未登录）：创建 release → 上传资产（清空代理直连）→ 补 notes → `PATCH {"draft":false}` 转正。**创建后必须核对返回的 `tag_name`**（曾误建 `untagged-<sha>`，修正法见下）。待桌面实机冒烟后回勾 [smoke-checklist](../40-质量/smoke-checklist.md) |
 | **文档审计** | 0 issues（`audit_knowledge_base.py docs`） | canonical 文档与代码保持一致 |
 | **TypeScript** | tsc EXIT=0 | 全栈编译无错误 |
 | **验证套件** | 930/930 PASS | `npm run verify`（plugins 88 / orchestration 50 / trace-upload 37 / agent-runtime 40 / agent-loop 14 / model-loop 45 / dsh-runtime 31 / ipc-guard 4 / credentials 34 / data-dir 47 / data-port 10 / session-fork 29 / memory-promotion 22 / memory-summarize 16 / connector-registry 30 / **connector-discover 10** / plugin-market 15 / usage-registry 11 / session-events 16 / ts-loader 13 / browser-tools 44 / terminal-pty 29 / file-panel 20 / file-edit 20 / arch-guard 15 / mcp-client 10 / e2e 230）—— 27 套件；另设不进链的真机冒烟 `pnpm run smoke:browser`（11/11，需真 GPU/渲染进程） |
