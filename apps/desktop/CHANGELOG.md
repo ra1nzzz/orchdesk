@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-07
+
+### Fixed
+- **plugins**: 插件页面整体梳理（安装态/侧栏导航/padding/内部标识/死按钮）
+
+
 ## [0.15.0] - 2026-09-06
 
 ### Added
