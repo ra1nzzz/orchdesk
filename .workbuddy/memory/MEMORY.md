@@ -62,14 +62,16 @@
   IPC：`mcp-list/save/delete/set-enabled/probe/call-tool`。
 
 ## 技能(.skill)与连接器发现（2026-09-06）
-- **.skill 真实格式**：ZIP 且**根目录 = `<slug>/SKILL.md`**（不是 SKILL.md 在 zip 根！），
-  可含 references/scripts/ 子目录；SKILL.md 顶 YAML frontmatter(name/description) `---` 分隔。
-  应用内 .skill **从不被解压执行**——是分发产物，只管理（列/删/上传）。
-- **零依赖 STORE zip 打包器** `skill-pack.ts`：不引 adm-zip/jszip（零依赖纪律）。
+- **.skill 真实格式（可复用知识）**：ZIP 且**根目录 = `<slug>/SKILL.md`**（不是 SKILL.md 在 zip
+  根！），可含 references/scripts/ 子目录；SKILL.md 顶 YAML frontmatter(name/description)
+  `---` 分隔。应用内 .skill **从不被解压执行**——是分发产物，只管理（列/删/上传）。
+- **零依赖 STORE zip 打包器写法（曾经实现又删掉，重做可直接复用）**：不引 adm-zip/jszip。
   CRC32 多项式 0xEDB88320。手写 zip 必须用**系统 python zipfile 跨语言读回**验证
   （自己写自己读都对、别人读不了 = 最大风险）。
-- **skill 本地发布**：`guanji.publishLocalSkill`（slug/desc/body → skills/<slug>.skill，
-  临时文件+rename 防半截）。UI 技能市场「+ 发布技能到本地」表单。
+- **⚠ Skill 本地发布已回滚移除（2026-09-06 用户裁决）**：`publishLocalSkill` / `skill-pack.ts` /
+  UI「发布到本地」全部删除，**保留从观雅集下载 skill**（guanji.listSkills+installSkill「安装」
+  按钮）与发到观雅集（guanji.publishSkill）。用户当时要的方向是「发布到本地 ≠ 观雅集下载」，
+  重提此功能前先确认形态（表单新建 vs 提示词库晋升）。
 - **连接器自动发现** `connector-discover.ts`：parseGitCredentials → github.com 明文 token
   优先；gh hosts.yml 仅作「已登录」信号（token 混淆不可读，诚实返 usable=false）。
   自动发现**只回填不写盘**，用户点「保存并测试」才落盘（诚实预填 + 保存即探测兜底）。

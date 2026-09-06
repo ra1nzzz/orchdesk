@@ -3497,16 +3497,6 @@ ipcMain.handle('orchdesk:guanji-publish', async (_e, input: { slug: string; alia
 // ok=false = 扫描失败，与「已扫描但没装」区分，UI 分别标注「未接入」与「暂无」。
 ipcMain.handle('orchdesk:skills-installed', () => guanjiClient.listInstalledSkills());
 ipcMain.handle('orchdesk:skill-uninstall', async (_e, slug: string) => guanjiClient.uninstallSkill(String(slug || '')));
-// 发布到本地：把一份技能（slug/description/body）打包 .skill 落盘数据目录 skills/。
-// 输入字段都来自渲染层表单，必须二次校验（防穿越 / 超大 body）。
-ipcMain.handle('orchdesk:skill-publish-local', async (_e, input: unknown) => {
-  const obj = (input && typeof input === 'object' ? input as Record<string, unknown> : {});
-  const slug = typeof obj.slug === 'string' ? obj.slug : '';
-  const description = typeof obj.description === 'string' ? obj.description : '';
-  const body = typeof obj.body === 'string' ? obj.body : '';
-  if (body.length > 512 * 1024) return { ok: false, reason: '正文过大（上限 512KB）' };
-  return guanjiClient.publishLocalSkill({ slug, description, body });
-});
 
 // ---------------------------------------------------------------------------
 // T-P6-2 OrchClaw Hub 联调桥（配对凭据经 safeStorage 加密存储）

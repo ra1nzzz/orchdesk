@@ -4,8 +4,6 @@ import * as fs from 'node:fs';
 import { safeStorage } from 'electron';
 import { DATA_FILE_NAMES, SKILLS_DIR_NAME, getDataDir } from './data-dir';
 import { isMarketDirName } from './plugin-market';
-import { assembleSkillBytes, isSkillSlug } from './skill-pack';
-
 // ============================================================================
 // 观雅集技能市场客户端（T-P6-1）
 // ----------------------------------------------------------------------------
@@ -75,9 +73,6 @@ export interface PublishResult {
   ok: boolean;
   reason?: string;
 }
-
-/** publishLocalSkill 的成功结果在 PublishResult 之上带落盘路径（供 UI 回显）。 */
-export type LocalPublishResult = PublishResult & { path?: string };
 
 /** 本地已安装技能包（数据目录/skills/<slug>.skill）。 */
 export interface InstalledSkill {
@@ -294,43 +289,6 @@ export class GuanjiClient {
       return { ok: true };
     } catch (err) {
       return { ok: false, reason: `删除失败：${(err as Error).message}` };
-    }
-  }
-
-  /**
-   * 发布到本地：把一份技能（slug/description/body）打包成 .skill 落盘到
-   * 数据目录/skills/<slug>.skill，使其成为「已安装技能」清单里的一条、可再上传观雅集。
-   *
-   * 此前唯一「发布」按钮只发到远程观雅集，本地没有任何「从零造一个可用技能包」的入口
-   * —— 技能只能从观雅集下载或手动丢 .skill 文件（后者要求用户自己会打包 zip）。
-   *
-   * @param input body 为 SKILL.md 正文（不含 frontmatter，自动包 name/description）。
-   * @param overwrite slug 已存在时是否覆盖（默认 true；防误覆盖可传 false）。
-   */
-  publishLocalSkill(input: { slug: string; description?: string; body: string }, overwrite = true): LocalPublishResult {
-    if (!isSkillSlug(input.slug)) {
-      return { ok: false, reason: `slug「${String(input.slug)}」非法（须 1-64 位字母数字/._-，无 / 与 ..）` };
-    }
-    const target = path.join(getDataDir(), SKILLS_DIR_NAME, `${input.slug}.skill`);
-    if (!overwrite && fs.existsSync(target)) {
-      return { ok: false, reason: `本地已存在 ${input.slug}.skill（已开启防覆盖）` };
-    }
-    const built = assembleSkillBytes({
-      slug: input.slug,
-      description: input.description || '',
-      body: input.body || '',
-    });
-    if (!built.ok) return { ok: false, reason: built.reason };
-    try {
-      const dir = path.dirname(target);
-      fs.mkdirSync(dir, { recursive: true });
-      // 同目录临时文件 + rename：写一半崩溃不留下半截 .skill 覆盖好的。
-      const tmp = path.join(dir, `.${input.slug}.skill.tmp`);
-      fs.writeFileSync(tmp, built.bytes);
-      fs.renameSync(tmp, target);
-      return { ok: true, reason: `${input.slug}.skill 已发布到本地（${built.bytes.length} 字节）`, path: target };
-    } catch (err) {
-      return { ok: false, reason: `写盘失败：${(err as Error).message}` };
     }
   }
 

@@ -514,10 +514,6 @@ const orchdesk = {
   uninstallSkill: (slug: string): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:skill-uninstall', slug),
 
-  /** 发布到本地：把一份技能（slug/description/body）打包 .skill 落盘数据目录 skills/。 */
-  publishLocalSkill: (input: { slug: string; description?: string; body: string }): Promise<{ ok: boolean; reason?: string; path?: string }> =>
-    ipcRenderer.invoke('orchdesk:skill-publish-local', input),
-
   // ---- T-P6-2 OrchClaw Hub 联调（配对凭据经 safeStorage 加密存储） ----
   /** 当前配对状态。 */
   hubStatus: (): Promise<{ paired: boolean; url?: string; agentName?: string }> =>

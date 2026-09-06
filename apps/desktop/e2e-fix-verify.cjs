@@ -161,7 +161,6 @@ async function run() {
     window.__composeCalls = [];
     window.__uninstallCalls = [];
     window.__mcpSaveCalls = [];
-    window.__publishLocalCalls = [];
     window.orchdesk = {
       // 启动路径要求 loadSessions 返回数组（remote.length 判断）。默认返回对象
       // （走 wizard「首次运行」路径，前 13 组依赖该行为）；组 14 reload 前设置
@@ -206,11 +205,6 @@ async function run() {
       uninstallSkill: (slug) => {
         try { window.__uninstallCalls.push(String(slug || '')); } catch (e) { /* ignore */ }
         return Promise.resolve({ ok: true });
-      },
-      // 发布到本地：mock 记录调用，返回成功（真实链路经主进程打包，e2e 只验 UI 接线）。
-      publishLocalSkill: (input) => {
-        try { window.__publishLocalCalls.push({ slug: input && input.slug, desc: input && input.description, hasBody: !!(input && input.body) }); } catch (e) { /* ignore */ }
-        return Promise.resolve({ ok: true, path: 'C:/mock/skills/' + (input && input.slug) + '.skill' });
       },
       // MCP（真接入）：真实形状。两条——一条已连接带工具，一条连接失败。
       // 「能力」TAB 的 MCP 分组必须读它，不能再用写死的 4 个插件名冒充连接。
@@ -1372,25 +1366,6 @@ async function run() {
   const installedRows = await page.locator('.is-row').count();
   await assert(installedRows === 2, `已安装技能清单渲染 2 条（count=${installedRows}）`);
   await assert(/已启用/.test(await page.locator('.is-row').first().innerText()), '已安装技能行显示状态');
-
-  // 发布到本地：从零填一份技能 → 打包 .skill（e2e 验 UI 接线：模态开、字段采集、桥调用、清单刷新）
-  await page.evaluate(() => { window.__publishLocalCalls = []; });
-  const pubBtn = page.locator('[data-action="skill-publish-local"]').first();
-  await pubBtn.scrollIntoViewIfNeeded();
-  await assert(await pubBtn.count() === 1, '技能市场有「发布到本地」按钮');
-  await pubBtn.click();
-  await page.waitForTimeout(300);
-  const slugInp = page.locator('#plSlug');
-  await assert(await slugInp.count() === 1, '发布模态含 slug 输入');
-  await slugInp.fill('e2e-my-skill');
-  await page.locator('#plDesc').fill('e2e 描述');
-  await page.locator('#plBody').fill('# 标题\n\n正文内容');
-  await page.locator('[data-action="skill-publish-local-save"]').click();
-  await page.waitForTimeout(400);
-  const calls = await page.evaluate(() => window.__publishLocalCalls || []);
-  await assert(calls.length === 1 && calls[0].slug === 'e2e-my-skill' && calls[0].hasBody,
-    `发布调用被派发（slug/正文正确）：${JSON.stringify(calls)}`);
-  await assert(await page.locator('#plSlug').count() === 0, '发布成功后模态关闭');
 
   // ================================================================
   // 测试组 13：本地插件市场（PRD FR-3）

@@ -278,7 +278,6 @@
       // 本地已安装技能：无桥 → ok:false（UI 标注「未接入」），不能用空数组冒充「已扫描但没装」
       listInstalledSkills: () => Promise.resolve({ ok: false, items: [], reason: '主进程未接入' }),
       uninstallSkill: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
-      publishLocalSkill: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
       hubStatus: () => Promise.resolve({ paired: false }),
       hubPair: () => Promise.resolve({ ok: false, reason: '未配对' }),
       hubSend: () => Promise.resolve({ ok: false, reason: '未配对' }),
@@ -1840,11 +1839,7 @@
               <td style="text-align:right"><button class="btn sm primary" data-action="guanji-install" data-slug="${esc(s.slug)}">安装</button></td>
             </tr>`).join('')}
           </table>
-          <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-            <button class="btn sm primary" data-action="skill-publish-local">+ 发布技能到本地</button>
-            <button class="btn sm" data-action="guanji-publish">发布到观雅集（需已打包）</button>
-            <span class="faint" style="font-size:11px">本地发布：从零填一份技能（slug/描述/正文）→ 自动打包 .skill 进「已安装」，可再上传观雅集</span>
-          </div>
+          <div class="row" style="margin-top:10px"><button class="btn sm" data-action="guanji-publish">发布技能到观雅集</button></div>
           ${state.installedSkills.length ? `<div class="sec-title" style="margin-top:14px;font-size:12px">已安装（${state.installedSkills.length}）</div>
           <div class="installed-skills">` + state.installedSkills.map((s) => {
             const on = s.enabled !== false;
@@ -4474,44 +4469,6 @@
             render();
           },
         });
-        break;
-      }
-      case 'skill-publish-local': {
-        // 发布到本地：从零填一份技能 → 打包 .skill 进数据目录 skills/。
-        // 表单用 openModal + id 采集（与 mcp-add / 提示词编辑同套路）。
-        openModal(`<div class="mh">${ic('zap', 18)}<b>发布技能到本地</b></div>
-          <div class="mb">
-            <div class="faint" style="margin-bottom:8px">填一份技能的元信息与正文，点「打包并发布」→ 自动生成 <span class="mono">.skill</span> 放进<b>数据目录 skills/</b>，成为「已安装技能」并可再上传观雅集。正文建议含 YAML frontmatter 之外的行为说明（怎么写参考你本机 <span class="mono">~/.workbuddy/skills/</span> 下的现成技能）。</div>
-            <div class="mb-row"><label>slug（目录名 / 文件名）</label><input id="plSlug" class="inp" placeholder="如 my-skill，须字母数字 . _ -（无 /）"></div>
-            <div class="mb-row"><label>description（会写进 SKILL.md frontmatter）</label><input id="plDesc" class="inp" placeholder="一句话说明这个技能做什么、何时用"></div>
-            <div class="mb-row"><label>正文（SKILL.md 内容，不含 ---frontmatter---）</label><textarea id="plBody" class="inp" rows="10" style="font-family:monospace;font-size:12px;line-height:1.5" placeholder="# 技能名&#10;&#10;触发词：…&#10;&#10;## 步骤&#10;1. …&#10;2. …"></textarea></div>
-          </div>
-          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button>
-            <button class="btn primary" data-action="skill-publish-local-save">打包并发布</button></div>`);
-        const slugInp = $('#plSlug'); if (slugInp) slugInp.focus();
-        break;
-      }
-      case 'skill-publish-local-save': {
-        const slug = ($('#plSlug') && $('#plSlug').value || '').trim();
-        const description = ($('#plDesc') && $('#plDesc').value || '').trim();
-        const body = ($('#plBody') && $('#plBody').value || '');
-        if (!slug) { toast('slug 必填', 'warn'); return; }
-        if (!body.trim()) { toast('正文为空', 'warn'); return; }
-        try {
-          const r = typeof bridge.publishLocalSkill === 'function'
-            ? await bridge.publishLocalSkill({ slug, description, body })
-            : { ok: false, reason: '主进程未接入' };
-          if (r && r.ok) {
-            toast(`已发布「${slug}」到本地 ${r.path || ''}`, 'ok');
-            closeModal();
-            await refreshInstalledSkills();
-            render();
-          } else {
-            toast(`发布失败：${(r && r.reason) || '未知错误'}`, 'danger');
-          }
-        } catch (err) {
-          toast(`发布异常：${(err && err.message) || err}`, 'danger');
-        }
         break;
       }
       case 'skill-toggle': { const s = state.installedSkills.find((x) => x.slug === el.dataset.n); if (s) { s.enabled = !s.enabled; render(); } break; }
