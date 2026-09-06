@@ -161,6 +161,7 @@ async function run() {
     window.__composeCalls = [];
     window.__uninstallCalls = [];
     window.__mcpSaveCalls = [];
+    window.__publishLocalCalls = [];
     window.orchdesk = {
       // 启动路径要求 loadSessions 返回数组（remote.length 判断）。默认返回对象
       // （走 wizard「首次运行」路径，前 13 组依赖该行为）；组 14 reload 前设置
@@ -205,6 +206,11 @@ async function run() {
       uninstallSkill: (slug) => {
         try { window.__uninstallCalls.push(String(slug || '')); } catch (e) { /* ignore */ }
         return Promise.resolve({ ok: true });
+      },
+      // 发布到本地：mock 记录调用，返回成功（真实链路经主进程打包，e2e 只验 UI 接线）。
+      publishLocalSkill: (input) => {
+        try { window.__publishLocalCalls.push({ slug: input && input.slug, desc: input && input.description, hasBody: !!(input && input.body) }); } catch (e) { /* ignore */ }
+        return Promise.resolve({ ok: true, path: 'C:/mock/skills/' + (input && input.slug) + '.skill' });
       },
       // MCP（真接入）：真实形状。两条——一条已连接带工具，一条连接失败。
       // 「能力」TAB 的 MCP 分组必须读它，不能再用写死的 4 个插件名冒充连接。
@@ -399,6 +405,14 @@ async function run() {
         for (const k of Object.keys(c.values)) c.values[k] = '';
         window.__conn.audit.push({ id: c.id, ts: Date.now(), action: 'clear', message: '凭证已清除' });
         return Promise.resolve({ ok: true, state: Object.assign({}, c.state) });
+      },
+      // 连接器自动发现：mock github 命中「git-credentials」可用源，其余不中。
+      // 验证 UI「自动发现」按钮能把发现的 token 回填进表单（用户再点保存才落盘）。
+      connectorDiscover: (id) => {
+        if (id === 'github') {
+          return Promise.resolve({ found: true, cred: { connectorId: 'github', source: '~/.git-credentials', secret: 'ghp_discovered', identity: 'e2e-user', usable: true } });
+        }
+        return Promise.resolve({ found: false, reason: '该连接器在本机没有标准 CLI 登录态' });
       },
       connectorTest: (id) => {
         const c = window.__conn.items.find((x) => x.id === id);
@@ -1290,6 +1304,26 @@ async function run() {
   await assert(/连接器注册表未接入/.test(await page.locator('.main-inner').innerText()),
     '桥不可用时显「未接入」');
 
+  // ---- 连接器自动发现（2026-09-06）：github 有「自动发现」按钮，点击回填发现的 token ----
+  // 恢复连接器桥（上一段删了 getConnectors），回到插件页找 github 卡片。
+  await page.evaluate(() => { window.orchdesk.getConnectors = (window.__origGetConnectors || (() => Promise.resolve({ items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 } }))); });
+  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await page.waitForTimeout(300);
+  await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+  await page.waitForTimeout(700);
+  const discBtn = page.locator('[data-action="conn-discover"][data-id="github"]').first();
+  await assert(await discBtn.count() === 1, 'github 连接器有「自动发现」按钮');
+  // 只对 github 显示自动发现（其它无本地 CLI 登录态，不展示假按钮）
+  const nonGhDisc = await page.locator('[data-action="conn-discover"]').count();
+  await assert(nonGhDisc === 1, `自动发现按钮只出现在 github（实际 ${nonGhDisc} 个）`);
+  await discBtn.click();
+  await page.waitForTimeout(500);
+  // 找到后应展开配置并回填 token（mock 返回 ghp_discovered）
+  const ghTokenInp = page.locator('#connf-github-token');
+  await assert(await ghTokenInp.count() === 1, '自动发现后展开 github 配置表单');
+  const tokVal = await ghTokenInp.inputValue();
+  await assert(tokVal === 'ghp_discovered', `发现的 token 已回填（实际 ${tokVal}）`);
+
   // ================================================================
   // 测试组 12b：插件页搜索（2026-09-06，前端即时过滤内置插件卡片）
   // 内置卡片渲染 data-search（名称/描述/能力/标识小写），input 事件运行时切换
@@ -1338,6 +1372,25 @@ async function run() {
   const installedRows = await page.locator('.is-row').count();
   await assert(installedRows === 2, `已安装技能清单渲染 2 条（count=${installedRows}）`);
   await assert(/已启用/.test(await page.locator('.is-row').first().innerText()), '已安装技能行显示状态');
+
+  // 发布到本地：从零填一份技能 → 打包 .skill（e2e 验 UI 接线：模态开、字段采集、桥调用、清单刷新）
+  await page.evaluate(() => { window.__publishLocalCalls = []; });
+  const pubBtn = page.locator('[data-action="skill-publish-local"]').first();
+  await pubBtn.scrollIntoViewIfNeeded();
+  await assert(await pubBtn.count() === 1, '技能市场有「发布到本地」按钮');
+  await pubBtn.click();
+  await page.waitForTimeout(300);
+  const slugInp = page.locator('#plSlug');
+  await assert(await slugInp.count() === 1, '发布模态含 slug 输入');
+  await slugInp.fill('e2e-my-skill');
+  await page.locator('#plDesc').fill('e2e 描述');
+  await page.locator('#plBody').fill('# 标题\n\n正文内容');
+  await page.locator('[data-action="skill-publish-local-save"]').click();
+  await page.waitForTimeout(400);
+  const calls = await page.evaluate(() => window.__publishLocalCalls || []);
+  await assert(calls.length === 1 && calls[0].slug === 'e2e-my-skill' && calls[0].hasBody,
+    `发布调用被派发（slug/正文正确）：${JSON.stringify(calls)}`);
+  await assert(await page.locator('#plSlug').count() === 0, '发布成功后模态关闭');
 
   // ================================================================
   // 测试组 13：本地插件市场（PRD FR-3）

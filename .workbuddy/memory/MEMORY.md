@@ -61,6 +61,23 @@
   握手/列工具/调工具各自超时（15s/15s/120s）；id 走 `isMcpId` 白名单防穿越。
   IPC：`mcp-list/save/delete/set-enabled/probe/call-tool`。
 
+## 技能(.skill)与连接器发现（2026-09-06）
+- **.skill 真实格式**：ZIP 且**根目录 = `<slug>/SKILL.md`**（不是 SKILL.md 在 zip 根！），
+  可含 references/scripts/ 子目录；SKILL.md 顶 YAML frontmatter(name/description) `---` 分隔。
+  应用内 .skill **从不被解压执行**——是分发产物，只管理（列/删/上传）。
+- **零依赖 STORE zip 打包器** `skill-pack.ts`：不引 adm-zip/jszip（零依赖纪律）。
+  CRC32 多项式 0xEDB88320。手写 zip 必须用**系统 python zipfile 跨语言读回**验证
+  （自己写自己读都对、别人读不了 = 最大风险）。
+- **skill 本地发布**：`guanji.publishLocalSkill`（slug/desc/body → skills/<slug>.skill，
+  临时文件+rename 防半截）。UI 技能市场「+ 发布技能到本地」表单。
+- **连接器自动发现** `connector-discover.ts`：parseGitCredentials → github.com 明文 token
+  优先；gh hosts.yml 仅作「已登录」信号（token 混淆不可读，诚实返 usable=false）。
+  自动发现**只回填不写盘**，用户点「保存并测试」才落盘（诚实预填 + 保存即探测兜底）。
+  UI 只给有真实源的连接器（github）显示「自动发现」按钮，不硬凑假按钮。
+- **本机 git-credentials 遮蔽坑（跨功能复发预警）**：`~/.git-credentials` 里过期
+  x-access-token 常排在有效 token 前，任何「取第一条 github 凭据」的逻辑都会拿到坏 token
+  （connector-discover 就命中了这条）。安全网靠「保存即探测」让真实 probe 401 暴露。
+
 ## 工具与 skill（本机）
 - `impeccable`（UI/UX 审查）：不在 `~/.workbuddy/skills/` 但在 **`~/.workbuddy/skills-marketplace/skills/` 缓存**
   （31 个纯 md、零脚本）→ `cp -r` 装上即可，不用去观雅集/GitHub 搜。审查方法见其 `references/audit.md`。

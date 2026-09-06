@@ -37,6 +37,7 @@ import {
   type ConnectorAuditEntry,
   type ConnectorFile,
 } from './connector-registry';
+import { discoverConnector } from './connector-discover';
 import { hubClient } from './hub';
 import {
   aggregateUsage,
@@ -3292,6 +3293,19 @@ ipcMain.handle('orchdesk:connector-test', async (_e, id: unknown) => {
   return { ok: probe.ok, message: probe.message, manual: probe.manual, state: connectorFile.states[id] || null };
 });
 
+/**
+ * 连接器自动发现：从本机 CLI 登录态识别该连接器是否已可用。
+ * 只「找到」不写入——返回的 secret 供渲染层回填到表单，是否保存由用户点
+ * 「保存并测试」决定（避免把用户没授权存的 token 悄悄落盘）。
+ */
+ipcMain.handle('orchdesk:connector-discover', async (_e, id: unknown) => {
+  if (!isConnectorId(id)) return { ok: false, reason: `未知连接器: ${String(id)}` };
+  let home = '';
+  try { home = os.homedir(); } catch { /* ignore */ }
+  if (!home) return { ok: false, reason: '无法定位用户主目录' };
+  return discoverConnector(String(id), { home });
+});
+
 /** 连接器审计（按连接器 / 动作 / 关键词过滤）。 */
 ipcMain.handle('orchdesk:connector-audit', async (_e, query: unknown) => {
   const q = (query || {}) as Parameters<typeof searchConnectorAudit>[1];
@@ -3483,6 +3497,16 @@ ipcMain.handle('orchdesk:guanji-publish', async (_e, input: { slug: string; alia
 // ok=false = 扫描失败，与「已扫描但没装」区分，UI 分别标注「未接入」与「暂无」。
 ipcMain.handle('orchdesk:skills-installed', () => guanjiClient.listInstalledSkills());
 ipcMain.handle('orchdesk:skill-uninstall', async (_e, slug: string) => guanjiClient.uninstallSkill(String(slug || '')));
+// 发布到本地：把一份技能（slug/description/body）打包 .skill 落盘数据目录 skills/。
+// 输入字段都来自渲染层表单，必须二次校验（防穿越 / 超大 body）。
+ipcMain.handle('orchdesk:skill-publish-local', async (_e, input: unknown) => {
+  const obj = (input && typeof input === 'object' ? input as Record<string, unknown> : {});
+  const slug = typeof obj.slug === 'string' ? obj.slug : '';
+  const description = typeof obj.description === 'string' ? obj.description : '';
+  const body = typeof obj.body === 'string' ? obj.body : '';
+  if (body.length > 512 * 1024) return { ok: false, reason: '正文过大（上限 512KB）' };
+  return guanjiClient.publishLocalSkill({ slug, description, body });
+});
 
 // ---------------------------------------------------------------------------
 // T-P6-2 OrchClaw Hub 联调桥（配对凭据经 safeStorage 加密存储）

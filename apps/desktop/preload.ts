@@ -176,6 +176,11 @@ const orchdesk = {
     ok: boolean; message?: string; manual?: boolean; state?: Record<string, unknown> | null; reason?: string;
   }> => ipcRenderer.invoke('orchdesk:connector-test', id),
 
+  /** 连接器自动发现：从本机 CLI 登录态找该连接器是否已可用。只找不写盘。 */
+  connectorDiscover: (id: string): Promise<{
+    found: boolean; cred?: { connectorId: string; source: string; secret: string; identity?: string; usable: boolean; note?: string } | null; reason?: string;
+  }> => ipcRenderer.invoke('orchdesk:connector-discover', id),
+
   /** 连接器审计。 */
   getConnectorAudit: (query?: Record<string, unknown>): Promise<{
     entries: Array<Record<string, unknown>>; stats: Record<string, unknown>; total: number; max: number;
@@ -508,6 +513,10 @@ const orchdesk = {
   /** 卸载本地技能包（真删文件；slug 走目录名白名单，防路径穿越）。 */
   uninstallSkill: (slug: string): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke('orchdesk:skill-uninstall', slug),
+
+  /** 发布到本地：把一份技能（slug/description/body）打包 .skill 落盘数据目录 skills/。 */
+  publishLocalSkill: (input: { slug: string; description?: string; body: string }): Promise<{ ok: boolean; reason?: string; path?: string }> =>
+    ipcRenderer.invoke('orchdesk:skill-publish-local', input),
 
   // ---- T-P6-2 OrchClaw Hub 联调（配对凭据经 safeStorage 加密存储） ----
   /** 当前配对状态。 */
