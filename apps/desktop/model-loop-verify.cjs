@@ -797,6 +797,20 @@ function lastAssistant(sessionId) {
     assert.ok(evs[1].tok && evs[1].tok.p === 120, '事件也应带 token 用量');
   });
 
+  await check('R4b 非消息 canonical 事件不落本地消息流（task.*/tool.* 只走 SSE/WS）', () => {
+    // Phase 8 回归：emitCanonicalEvent 曾把 task.created 也转成 kind='user' 写进
+    // events/<sid>.ndjson，在真实 user 事件前多插一条 → 分叉点/回放整体错位。
+    // 消息流必须只含 user/assistant/fork-origin，且条数与「一轮对话」一致。
+    const evFile = path.join(HOME, 'events', 's-usage.ndjson');
+    const evs = fs.readFileSync(evFile, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+    const kinds = evs.map((e) => e.kind);
+    assert.ok(
+      kinds.every((k) => k === 'user' || k === 'assistant' || k === 'fork-origin'),
+      '本地消息流只应含 user/assistant/fork-origin，实际: ' + JSON.stringify(kinds),
+    );
+    assert.strictEqual(evs.length, 2, `一轮对话应恰好 2 条消息事件（实际 ${evs.length} 条：${kinds}）`);
+  });
+
   await check('R5 orchdesk:session-events IPC → event-log 源时间线', async () => {
     const r = await ipcHandlers.get('orchdesk:session-events')(null, 's-usage');
     assert.strictEqual(r.source, 'event-log', '应从事件流取，实际 ' + r.source);

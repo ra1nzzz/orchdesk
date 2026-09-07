@@ -66,8 +66,24 @@ function toSessionEventKind(type: string, actorType: string): SessionEventKind {
   if (type.startsWith('session.user_message')) return 'user';
   if (type.startsWith('session.assistant_turn')) return 'assistant';
   if (type.startsWith('session.forked')) return 'fork-origin';
-  // 非 session 事件按 actor 推断：user→user，agent→assistant，其余→assistant
+  // 兜底（正常走不到：非消息事件已由 isMessageEvent 挡在本地流之外）
   return actorType === 'user' ? 'user' : 'assistant';
+}
+
+/**
+ * 是否落本地 SessionEvent 消息流。
+ *
+ * SessionEvent NDJSON 是**消息事件流**，分叉点计数与回放时间线都建立在
+ * 「只含 user / assistant / fork-origin」这个前提上。task.created、tool.result
+ * 这类非消息事件若也双写进来，会在流里多出一条 kind 相同的记录，把后续事件
+ * 整体挤位 —— 分叉点与回放的输入就不再可信（model-loop R4 实测回归）。
+ *
+ * 故：非消息事件只走 Canonical 通道（SSE/WS 消费者照常收到），不污染本地消息流。
+ */
+function isMessageEvent(type: string): boolean {
+  return type.startsWith('session.user_message')
+    || type.startsWith('session.assistant_turn')
+    || type.startsWith('session.forked');
 }
 
 function sessionEventFromEnvelope(ev: CanonicalEnvelope): SessionEvent {
@@ -92,8 +108,9 @@ function sessionEventFromEnvelope(ev: CanonicalEnvelope): SessionEvent {
 /**
  * 发射 Canonical Event（双写）。
  *
- * 1. 追加本地 SessionEvent NDJSON（保留现有 append-only 不变量）
- * 2. 产出 CanonicalEnvelope 并推送给注册的消费者（SSE/WS）
+ * 1. 追加本地 SessionEvent NDJSON —— **仅消息类事件**（见 isMessageEvent）；
+ *    非消息事件写进去会破坏分叉/回放依赖的消息流前提
+ * 2. 产出 CanonicalEnvelope 并推送给注册的消费者（SSE/WS）—— 所有事件都推
  *
  * @param type   canonical 事件类型（如 `task.created`、`tool.result`）
  * @param actor  触发者
@@ -110,9 +127,9 @@ export async function emitCanonicalEvent(
 ): Promise<void> {
   const ev = envelope(type, actor, subject, opts?.context || {}, payload);
 
-  // 1) 本地双写（失败仅 warn，不抛错）
+  // 1) 本地双写（失败仅 warn，不抛错）—— 只写消息类事件
   try {
-    if (opts?.file) {
+    if (opts?.file && isMessageEvent(type)) {
       const se = sessionEventFromEnvelope(ev);
       const w = await appendEvents(opts.file, [se]);
       if (!w.ok) console.warn(`[orchdesk] canonical event 本地写入失败: ${w.reason}`);

@@ -68,14 +68,14 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
   console.log('== Phase 8: Event Emission 验证 ==\n');
 
   // ---- A. emitCanonicalEvent 双写 ----
-  await check('emitCanonicalEvent 产出 CanonicalEnvelope 且字段完整', () => {
+  await check('emitCanonicalEvent 产出 CanonicalEnvelope 且字段完整', async () => {
     let captured = null;
     setEnvelopeConsumer((env) => { captured = env; });
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-ev-'));
     const file = path.join(dir, 's1.ndjson');
 
-    emitCanonicalEvent(
+    await emitCanonicalEvent(
       'task.created',
       { type: 'user', id: 'user-1' },
       { type: 'Session', id: 's1' },
@@ -93,23 +93,52 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     assert(captured.context.sessionId === 's1', 'context 应一致');
     assert(captured.payload.text === 'hello', 'payload 应一致');
 
-    // 本地 SessionEvent NDJSON 双写
-    const content = fs.readFileSync(file, 'utf-8');
-    const lines = content.split('\n').filter(Boolean);
-    assert(lines.length === 1, `应写入 1 行 SessionEvent，实际 ${lines.length}`);
-    const se = JSON.parse(lines[0]);
-    assert(se.kind === 'user', `SessionEvent.kind 应为 user，实际 ${se.kind}`);
-    assert(se.text === 'hello', 'SessionEvent.text 应一致');
+    // 非消息事件（task.* / tool.*）**不**落本地消息流 —— 见下方专项用例
+    assert(!fs.existsSync(file), 'task.created 不应写本地 SessionEvent 消息流');
   });
 
-  await check('emitCanonicalEvent 无 consumer 时不抛错（fail-open）', () => {
+  await check('消息事件落本地 SessionEvent 流（session.user_message / assistant_turn）', async () => {
+    setEnvelopeConsumer(() => {});
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-ev-'));
+    const file = path.join(dir, 's1b.ndjson');
+
+    await emitCanonicalEvent(
+      'session.user_message', { type: 'user', id: 'u' }, { type: 'Session', id: 's1b' },
+      { text: '用户说了什么', model: 'm1' }, { file, context: { sessionId: 's1b' } },
+    );
+    await emitCanonicalEvent(
+      'session.assistant_turn', { type: 'agent', id: 'a' }, { type: 'Session', id: 's1b' },
+      { text: '助手回答', model: 'm1' }, { file, context: { sessionId: 's1b' } },
+    );
+
+    const lines = fs.readFileSync(file, 'utf-8').split('\n').filter(Boolean);
+    assert(lines.length === 2, `消息事件应双写 2 行，实际 ${lines.length}`);
+    const kinds = lines.map((l) => JSON.parse(l).kind);
+    assert(kinds[0] === 'user' && kinds[1] === 'assistant', 'kind 顺序应为 user/assistant，实际 ' + JSON.stringify(kinds));
+  });
+
+  await check('非消息事件不污染消息流（分叉/回放前提 · 回归锁）', async () => {
+    // Phase 8 回归：task.created 曾被写成 kind='user' 落进 events/<sid>.ndjson，
+    // 在真实 user 事件前多插一条 → 分叉点计数与回放时间线整体错位（model-loop R4）。
+    setEnvelopeConsumer(() => {});
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-ev-'));
+    const file = path.join(dir, 's1c.ndjson');
+
+    for (const t of ['task.created', 'tool.result', 'task.completed']) {
+      await emitCanonicalEvent(t, { type: 'agent', id: 'a' }, { type: 'Session', id: 's1c' },
+        { text: '不该落盘' }, { file, context: { sessionId: 's1c' } });
+    }
+    assert(!fs.existsSync(file), `非消息事件不应创建/写入本地消息流（实际存在: ${file}）`);
+  });
+
+  await check('emitCanonicalEvent 无 consumer 时不抛错（fail-open）', async () => {
     setEnvelopeConsumer(null);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-ev-'));
     const file = path.join(dir, 's2.ndjson');
     // 不应抛错
-    emitCanonicalEvent('task.created', { type: 'user', id: 'u2' }, { type: 'Session', id: 's2' }, {}, { file });
+    await emitCanonicalEvent('session.user_message', { type: 'user', id: 'u2' }, { type: 'Session', id: 's2' }, { text: 'x' }, { file });
     const content = fs.readFileSync(file, 'utf-8');
-    assert(content.includes('"kind":"user"'), '本地双写仍应执行');
+    assert(content.includes('"kind":"user"'), '消息事件本地双写仍应执行');
   });
 
   // ---- B. CanonicalEnvelope 结构 ----
@@ -159,7 +188,9 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
   });
 
   // ---- E. SSE 流式解析（模拟）----
-  await check('SSE 流式解析：多行 data: 正确产出 envelope', () => {
+  // 回调内用了 await（reader.read()），必须是 async —— 原写法在 CJS 下直接
+  // 抛 SyntaxError（await is only valid in async functions），整个脚本跑不起来。
+  await check('SSE 流式解析：多行 data: 正确产出 envelope', async () => {
     const events = [];
     const consumer = new sseConsumer.SSEConsumer({
       url: 'http://localhost:9999/events',
@@ -169,7 +200,11 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     });
     // 模拟解析器（不实际连接网络）
     const chunks = [`data: {"id":"1","type":"task.created","actor":{"type":"user","id":"u"},"subject":{"type":"Session","id":"s"},"timestamp":"2026-09-07T00:00:00.000Z","context":{},"payload":{}}\n`];
-    const stream = Readable.from(chunks);
+    // Node 的 Readable.from() 是 Node 流，没有 Web Streams 的 getReader()；
+    // 用 Readable.toWeb() 转 Web ReadableStream 后再取 reader。
+    // 注意：chunks 必须是 Buffer 而非字符串 —— 否则 decoder.decode() 收到字符串会报
+    // "must be an instance of SharedArrayBuffer, ArrayBuffer or ArrayBufferView"。
+    const stream = Readable.toWeb(Readable.from(chunks.map((c) => Buffer.from(c, 'utf-8'))));
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -194,20 +229,38 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
   // ---- F. WS 消息解析（模拟）----
   await check('WS 消息解析：envelope 类型正确提取', () => {
     const events = [];
-    const consumer = new wsConsumer.WSConsumer({
-      url: 'ws://localhost:9999/ws',
-      token: 'tok',
-      onEvent: (e) => events.push(e),
-      onError: () => {},
-    });
-    // 直接调用 onmessage handler（模拟 WebSocket 消息）
-    const msg = { type: 'envelope', envelope: { id: '1', type: 'task.completed', actor: { type: 'agent', id: 'a' }, subject: { type: 'Session', id: 's' }, timestamp: '', context: {}, payload: {} } };
-    if (consumer.ws && consumer.ws.onmessage) {
-      consumer.ws.onmessage({ data: JSON.stringify(msg) });
+    // Node 下没有真实 WS 服务端，且原用例未调 start()（consumer.ws 恒为 null → 0 条）。
+    // 这里 stub 全局 WebSocket：捕获实例后手动触发 onmessage，验证解析分支。
+    const sockets = [];
+    const OrigWS = globalThis.WebSocket;
+    globalThis.WebSocket = class {
+      constructor(url) { this.url = url; sockets.push(this); }
+      close() { /* noop */ }
+    };
+    try {
+      const consumer = new wsConsumer.WSConsumer({
+        url: 'ws://localhost:9999/ws',
+        token: 'tok',
+        onEvent: (e) => events.push(e),
+        onError: () => {},
+      });
+      consumer.start();
+      const ws = sockets[0];
+      assert(ws, '应创建 WebSocket 实例（token 应拼进 url）');
+      assert(String(ws.url).includes('token=tok'), 'url 应带 token 查询参数：' + ws.url);
+
+      const msg = { type: 'envelope', envelope: { id: '1', type: 'task.completed', actor: { type: 'agent', id: 'a' }, subject: { type: 'Session', id: 's' }, timestamp: '', context: {}, payload: {} } };
+      ws.onmessage({ data: JSON.stringify(msg) });
+      assert(events.length === 1, `应解析 1 条，实际 ${events.length}`);
+      assert(events[0].type === 'task.completed');
+
+      // 非 envelope 类型应被忽略（不产出事件、不抛错）
+      ws.onmessage({ data: JSON.stringify({ type: 'ping' }) });
+      assert(events.length === 1, '非 envelope 消息不应产出事件');
+      consumer.stop();
+    } finally {
+      globalThis.WebSocket = OrigWS;
     }
-    assert(events.length === 1, `应解析 1 条，实际 ${events.length}`);
-    assert(events[0].type === 'task.completed');
-    consumer.stop();
   });
 
   // ---- 输出结果 ----
