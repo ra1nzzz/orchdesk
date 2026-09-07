@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-08
+
+### Added
+- **phase8**: Canonical event emission + SSE/WS consumer + docs
+
+### Fixed
+- **events**: 非消息 canonical 事件不落本地消息流（修复 Phase 8 回归）
+
+
 ## [0.15.1] - 2026-09-07
 
 ### Fixed
