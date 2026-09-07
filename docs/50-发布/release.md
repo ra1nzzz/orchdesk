@@ -113,6 +113,32 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
   4. 附：Git Bash 下 curl 的 `--data-binary @/tmp/x.json` 读不到文件，必须用 Windows 路径 `C:/Users/.../AppData/Local/Temp/x.json`。
 - **伴随发现（未处理，待裁决）**：GitHub 上**每个历史版本都有 2 个重复 release**（v0.15.0 / v0.14.0 / v0.13.2 / v0.13.1 / v0.13.0，各一个 1 资产 + 一个 3 资产，多为 draft），系历史发布流程重复创建所致。删除属破坏性操作，需人工确认后再清理。
 
+## v0.16.0（2026-09-06）
+
+- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.16.0
+- release commit `a96a1e4`（同时删除误提交的 `apps/desktop/package-lock.json`，见下），tag `v0.16.0` 本地 + 远端均已就位（遵守「打包之后打 tag」顺序铁律；`git ls-remote` 已确认 `refs/tags/v0.16.0` 在远端）。
+- 资产：`OrchDesk-Setup-0.16.0.exe`（nsis，87,665,653 B）+ `OrchDesk-0.16.0.exe`（portable，87,320,456 B）+ `latest.yml`（347 B）；成功输出目录 `release-v0160-r8/`。资产名与 `latest.yml` 一致（连字符命名）。
+- GitHub Release id `384229097`，`draft=false`（已转正）；3 资产 size 与本地逐一核对一致。
+- 内容（CHANGELOG 0.16.0）：Phase 8 接入 + 修复 events 回归。
+- 验证：`tsc` EXIT=0；全量 verify 全绿；asar 含 `dist/event-emit.js`（Phase 8 修复）、`main.js`、`preload.js`；`@deepseek-ai`（7 个包）位于 `win-unpacked/node_modules/@deepseek-ai`；`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node` 已解包就位。
+
+**打包踩坑（v0.16.0，重要，会复发）**：
+1. **electron-builder 在「searching for node modules」阶段报 `No JSON content found in output`** —— 根因两层：
+   - (a) `apps/desktop/package-lock.json` 被误提交（tracked），`detectPackageManagerByFile` 见 >1 lockfile → 误判 **NPM**（非 pnpm）；NPM collector 跑 `npm list` 在污染环境下取不到 JSON。→ 已删 `package-lock.json`（commit `a96a1e4`）。
+   - (b) 即便强制 `npm_config_user_agent='pnpm/...'`，electron-builder 在 win32 把 PM 命令包进 `powershell.exe -EncodedCommand`（`& 'pnpm' ...`）；**`pnpm.cmd` 在 PowerShell `&` 下输出 0 字节** → pnpm collector 拿空 JSON 同样报错。
+   - **修复**：patch 已安装的 `node_modules/.pnpm/app-builder-lib@26.15.3*/out/node-module-collector/nodeModulesCollector.js` 的 `streamCollectorCommandToFile`，改用 `childProcess.spawn(command, args, { cwd, shell: true, env: { COREPACK_ENABLE_STRICT: "0", ...stripSensitiveEnvVars(process.env) } })`（用 `cmd.exe` 解析 `.cmd`，正确捕获 stdout）。patch 后 build r8 一次通过。
+   - ⚠️ **该 patch 在 `node_modules` 内、不随 git 提交**；换机器 / 重跑 `pnpm install` 后须**重新应用**，否则再命中 (b)。建议固化成 `scripts/patch-electron-builder.cjs` 在打包前自动打上（见下「待办」）。
+2. **`packageManager` 字段无效**：曾在 `package.json` 加 `"packageManager":"pnpm@11.8.0"` 想改 wrapper 检测，结果 `determinePackageManagerEnv` 仍走 env 探测，无效且引入 corepack 风险，已回退。最终靠 `npm_config_user_agent` env 强制 pnpm。
+3. 下载阶段 TLS 断连、asar 句柄泄漏等沿用既有结论（换全新输出目录 + 重试循环）。
+
+**GitHub Release 踩坑（v0.16.0）**：
+- 见上方「GitHub Release 认证（token）」：**`Bearer` 现返回 401，必须改用 `Basic base64("ra1nzzz:TOKEN")`**。其余沿用 v0.15.1 三铁律（POST 创建不进重试循环 / 逐资产核对 size / `uploads.github.com` + python urllib 上传）。
+- 创建后先核对返回 `tag_name` 已正确关联 `v0.16.0`（非 `untagged-<sha>`），再 `PATCH {"draft":false}` 转正。
+
+**待办（建议，未做）**：
+- 把 electron-builder collector 的 `shell:true` patch 固化为 `scripts/patch-electron-builder.cjs`，在 `dist:win` / 打包命令前自动应用，避免新环境重新踩坑。
+- v0.16.0 尚未在 99-归档 登记（版本/commit/制品哈希/冒烟），且实机冒烟（GUI/PTY/CDP）仍待桌面会话回勾。
+
 ## 版本策略
 
 - 语义化版本 `MAJOR.MINOR.PATCH`；预发布用 `-alpha.N` / `-beta.N`。
