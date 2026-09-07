@@ -25,6 +25,10 @@
 packages:
   - 'packages/*/*'
   - 'apps/*'
+  - 'references/deepseek-harness/packages/*/*'
+  - 'references/deepseek-harness/vendor/*'
+  - 'references/deepseek-harness/native/landlock-run/packages/*'
+  - 'references/deepseek-harness/apps/*'
 
 # pnpm 11 配置移入本文件（.npmrc 不再读取）。
 # 关闭 peer 自动补装：@deepseek-ai/dsh-* 的 peer 链含公网不存在的
@@ -38,3 +42,4 @@ autoInstallPeers: false
 # ERR_PNPM_IGNORED_BUILDS 且打不出包。
 allowBuilds:
   electron: true
+  esbuild: true

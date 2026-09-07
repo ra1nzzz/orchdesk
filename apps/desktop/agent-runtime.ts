@@ -22,18 +22,26 @@ import { BROWSER_TOOL_DEFS, BROWSER_TOOL_PRIMARY_ARG } from './browser-tools';
 // 类型
 // ---------------------------------------------------------------------------
 
+/** 工具调用（参数态，无调用 id）。
+ * @canonical ToolCall — name + arguments 对应 Canonical ToolCall。
+ */
 export interface ToolCall {
   name: string;
   arguments: Record<string, unknown>;
 }
 
-/** 带调用 id 的工具调用（原生 function calling 才有 id）。 */
+/** 带调用 id 的工具调用（原生 function calling 才有 id）。
+ * @canonical NativeToolCall — 继承 ToolCall，id/rawArguments 对应 Canonical ToolCall.id + raw schema。
+ */
 export interface NativeToolCall extends ToolCall {
   id: string;
   /** 原始 arguments 字符串（回传 assistant 消息时原样保留，避免二次序列化丢精度）。 */
   rawArguments: string;
 }
 
+/** 模型单回合回复。
+ * @canonical ModelReply — content/toolCalls/source/usage 对应 Canonical ModelReply（tool_calls 归一化后的产物）。
+ */
 export interface ModelReply {
   /** 模型正文（可能为空，当只有工具调用时）。 */
   content: string;
@@ -59,13 +67,18 @@ export interface ModelReply {
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }
 
+/** 工具执行结果。
+ * @canonical ToolResult — name/result/error 对应 Canonical ToolResult（status 由 error 存在推断）。
+ */
 export interface ToolResult {
   name: string;
   result: string;
   error?: string;
 }
 
-/** 送往模型的一条消息（兼容 OpenAI chat 规范的超集）。 */
+/** 送往模型的一条消息（兼容 OpenAI chat 规范的超集）。
+ * @canonical ApiMessage — role/content/name/tool_call_id 对应 Canonical Message（assistant 消息含 tool_calls）。
+ */
 export interface ApiMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content?: string;

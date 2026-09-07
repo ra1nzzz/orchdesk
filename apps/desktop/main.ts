@@ -60,6 +60,7 @@ import {
   timelineFromLabeled,
   type SessionEvent,
 } from './session-events';
+import { emitCanonicalEvent, setEnvelopeConsumer } from './event-emit';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, listMarketPlugins, setMarketPluginEnabled, startupMarketPlugins, marketDir } from './dsh-runtime';
 import { normalizeEnabledMap } from './plugin-market';
 import { getHostServices } from './host-services';
@@ -1391,6 +1392,15 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
     store[sessionId] = { id: sessionId, msgs: [], created: new Date().toISOString(), updated: new Date().toISOString() };
   }
 
+  // Phase 8: emit task.created（双写：本地 SessionEvent + Canonical envelope）
+  void emitCanonicalEvent(
+    'task.created',
+    { type: 'user', id: text.slice(0, 64) }, // 用户输入截断作为 actor id
+    { type: 'Session', id: sessionId },
+    { text, model },
+    { file: eventFileFor(dataDir(), sessionId), context: { sessionId, turn: 0 } },
+  );
+
   // 历史：只取 user/assistant 正文（tool 步骤消息是 UI 记录，不回灌模型）。
   const sessionMsgs = (store[sessionId] as { msgs?: Array<{ role?: string; text?: string }> } | undefined)?.msgs || [];
   const apiMessages: ApiMessage[] = sessionMsgs
@@ -1492,6 +1502,14 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
         const result = await executeTool(tc, { sessionId });
         toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
         notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
+        // Phase 8: emit tool.result
+        void emitCanonicalEvent(
+          'tool.result',
+          { type: 'agent', id: sessionId },
+          { type: 'ToolCall', id: tc.id || tc.name },
+          { name: tc.name, result: result.result, error: result.error, sessionId },
+          { file: eventFileFor(dataDir(), sessionId), context: { sessionId, step: stepCount } },
+        );
         // OpenAI 规范：工具结果用 role='tool' + tool_call_id 回传。
         apiMessages.push(buildToolResultMessage(tc, result, 'native'));
       }
@@ -1518,6 +1536,14 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
       const result = await executeTool(tc, { sessionId });
       toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
       notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
+      // Phase 8: emit tool.result
+      void emitCanonicalEvent(
+        'tool.result',
+        { type: 'agent', id: sessionId },
+        { type: 'ToolCall', id: tc.name },
+        { name: tc.name, result: result.result, error: result.error, sessionId },
+        { file: eventFileFor(dataDir(), sessionId), context: { sessionId, step: stepCount } },
+      );
       // 文本兜底模式下 assistant 消息里没有 tool_calls，
       // 此时若强行发 role='tool' 会被多数网关判定为非法 → 用 user 角色回传。
       apiMessages.push(buildToolResultMessage({ name: tc.name }, result, 'text'));
@@ -1586,6 +1612,16 @@ async function runAgentTurn(sessionId: string, text: string, opts: { models?: st
   // BUG（全盘死挂点扫描）：此前返回值只有 { text, intent }，渲染层收不到本回合工具
   // 轨迹 → doSend 从不写 m.tools，renderMsg 里「N 步 · M 个动作」的展示形态永远为空
   // （工具实时推送 tool-step 虽有订阅，state.toolSteps 存了却无人读取 = 存而不显）。
+
+  // Phase 8: emit task.completed（双写：本地 SessionEvent + Canonical envelope）
+  void emitCanonicalEvent(
+    'task.completed',
+    { type: 'agent', id: sessionId },
+    { type: 'Session', id: sessionId },
+    { text: finalReply, tools: toolSteps, steps: stepCount, model },
+    { file: eventFileFor(dataDir(), sessionId), context: { sessionId, turn: stepCount } },
+  );
+
   return { text: finalReply, intent: 'ACT', tools: toolSteps, steps: stepCount };
 }
 

@@ -87,6 +87,7 @@ export const PLUGIN_NAMES = [
 export type PluginName = (typeof PLUGIN_NAMES)[number];
 
 export interface PluginLoadResult {
+  /** @canonical Plugin.name — 对应 Canonical Plugin 标识。 */
   name: PluginName;
   ok: boolean;
   /** fiber.state === 2 视为已激活 */
@@ -94,6 +95,9 @@ export interface PluginLoadResult {
   error?: string;
 }
 
+/** OrchDesk 运行时壳（DSH Context + 宿主服务 + 插件列表）。
+ * @canonical OrchDeskRuntime — ctx=DSH Runtime；plugins=Plugin[] 映射 Canonical Plugin 装配态。
+ */
 export interface OrchDeskRuntime {
   ctx: Context;
   host: HostServices | null;
@@ -251,7 +255,9 @@ export function getRuntime(): OrchDeskRuntime | null {
 
 // ---- 记忆持久化（第七死挂点修复：此前 serializeDomains/dataRoot 无 host 接管，记忆仅进程内存，重启即清零）----
 
-/** memory 插件 provide 的服务面（宿主持久化只依赖这两个方法）。 */
+/** memory 插件 provide 的服务面（宿主持久化只依赖这两个方法）。
+ * @canonical MemoryPersistApi — serializeDomains/hydrateDomains 对应 Canonical Memory.persistence seam。
+ */
 export interface MemoryPersistApi {
   serializeDomains(): Record<string, unknown[]>;
   hydrateDomains(snapshot: Record<string, unknown[]>): void;
@@ -318,7 +324,9 @@ export function hydrateMemory(api: MemoryPersistApi): boolean {
 
 // ---- 授权白名单持久化（PRD FR-9「永久（操作类型+路径白名单，可查看可撤销）」）----
 
-/** authz 插件 provide 的服务面（宿主持久化只依赖这两个方法）。 */
+/** authz 插件 provide 的服务面（宿主持久化只依赖这两个方法）。
+ * @canonical GrantPersistApi — serializeGrants/hydrateGrants 对应 Canonical Approval 持久化 seam。
+ */
 export interface GrantPersistApi {
   serializeGrants(): unknown[];
   hydrateGrants(list: unknown): void;
@@ -369,7 +377,9 @@ function scheduleMemoryPersist(api: MemoryPersistApi): void {
   memorySaveTimer.unref?.();
 }
 
-/** 单个插件的当前状态（供 UI 展示，不伪造）。 */
+/** 单个插件的当前状态（供 UI 展示，不伪造）。
+ * @canonical PluginState — name/active/available 对应 Canonical Plugin 运行态快照。
+ */
 export interface PluginState {
   name: PluginName;
   active: boolean;

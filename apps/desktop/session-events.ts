@@ -20,15 +20,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-/** 事件种类。user/assistant 是「消息事件」（计入分叉点计数），fork-origin 是血缘标记。 */
+/** 事件种类。user/assistant 是「消息事件」（计入分叉点计数），fork-origin 是血缘标记。
+ * @canonical SessionEventKind — 与 Canonical SessionEvent.kind 对齐（user/assistant/fork-origin）。
+ */
 export type SessionEventKind = 'user' | 'assistant' | 'fork-origin';
 
+/** 单条工具步骤（assistant 事件内的工具调用子条目）。
+ * @canonical SessionToolStep — 映射到 Canonical ToolCall + ToolResult（phase/result 对应 execution status）。
+ */
 export interface SessionToolStep {
   name: string;
   phase: 'running' | 'done' | 'error';
   result?: string;
 }
 
+/** 会话事件（append-only NDJSON 单行）。
+ * @canonical SessionEvent — 投影 DSH Session 事件日志（seq=单调序号，kind=事件类型，text=内容，tools=工具链，tok=用量）。
+ */
 export interface SessionEvent {
   /** 会话内单调递增序号（从 1 起）。 */
   seq: number;
