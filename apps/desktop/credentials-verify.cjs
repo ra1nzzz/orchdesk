@@ -339,6 +339,32 @@ const cred = require('./dist/credentials.js');
     assert.ok(out.error, '应被路径白名单拒绝，实际: ' + JSON.stringify(out));
   });
 
+  // ---- M4：沙箱模式在工具执行层真实强制（安全审查 M2：此前 mode 只活在审批门）----
+  await check('M4 read-only 模式：file_write 被模式门拒绝（不经过授权门）', async () => {
+    const out = await runToolProbe('file_write', { path: '__DATA__/ro.txt', content: 'x' }, { readOnly: true });
+    assert.ok(out.error && out.error.includes('只读'), 'read-only 下写文件应被拒，实际: ' + JSON.stringify(out).slice(0, 200));
+  });
+  await check('M4 read-only 模式：shell_command 被模式门拒绝', async () => {
+    const out = await runToolProbe('shell_command', { command: 'echo hi' }, { readOnly: true });
+    assert.ok(out.error && out.error.includes('只读'), 'read-only 下命令应被拒，实际: ' + JSON.stringify(out).slice(0, 200));
+  });
+  await check('M4 read-only 模式：file_read 仍放行（只读模式不挡读）', async () => {
+    // 读一个必然存在的小文件：数据目录本身
+    const out = await runToolProbe('file_list', { path: '__DATA__' }, { readOnly: true });
+    assert.ok(!out.error, 'read-only 下读目录不应被拒，实际: ' + JSON.stringify(out).slice(0, 200));
+  });
+  await check('M4 read-only 模式：set_cwd 被模式门拒绝', async () => {
+    const out = await runToolProbe('set_cwd', { path: '__DATA__' }, { readOnly: true });
+    assert.ok(out.error && out.error.includes('只读'), 'read-only 下切换工作目录应被拒，实际: ' + JSON.stringify(out).slice(0, 200));
+  });
+  await check('M4 workspace-write（默认）：写白名单窄于读白名单（读根内的非写路径拒写）', async () => {
+    // narrowData 夹具：dataDir=<HOME>/dd，home/userData 仍是读根。
+    const okOut = await runToolProbe('file_write', { path: '__DD__/narrow-ok.txt', content: 'x' }, { approve: true, narrowData: true });
+    assert.ok(!okOut.error, '数据目录内应可写，实际: ' + JSON.stringify(okOut).slice(0, 200));
+    const badOut = await runToolProbe('file_write', { path: '__UDATA__/proj/x.txt', content: 'x' }, { approve: true, narrowData: true });
+    assert.ok(badOut.error && badOut.error.includes('不在允许范围'), '读白名单内的非写路径应被拒，实际: ' + JSON.stringify(badOut).slice(0, 200));
+  });
+
   // -------------------------------------------------------------------------
   console.log('\n' + log.join('\n'));
   console.log(`\n结果: ${passed} 通过, ${failed} 失败, 共 ${passed + failed} 项\n`);
@@ -355,6 +381,9 @@ const cred = require('./dist/credentials.js');
       const path = require('path'), fs = require('fs'), os = require('os');
       const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'orchdesk-tool-'));
       process.env.ORCHDESK_HOME = HOME;
+      // narrowData 选项：把数据目录压到 <HOME>/dd 子目录，使「写根 ⊂ 读根」可判定
+      // （默认夹具里 dataDir==HOME，整个 home 都是写根，区分不出窄化）。
+      if (${!!opts.narrowData}) process.env.ORCHDESK_HOME = path.join(HOME, 'dd');
       const { makeElectronStub } = require(${JSON.stringify(path.join(__dirname, '..', '..', 'scripts', 'verify-kit.cjs'))});
       const stub = makeElectronStub({
         home: HOME,
@@ -366,8 +395,13 @@ const cred = require('./dist/credentials.js');
       require('${path.join(__dirname, 'dist', 'main.js').replace(/\\/g, '\\\\')}');
       const args0 = ${JSON.stringify({ name: toolName, arguments: args })};
       // __DATA__ 占位 → 子进程数据目录（ORCHDESK_HOME，必在路径白名单内）
+      // __DD__ 占位 → narrowData 夹具里的窄数据目录 <HOME>/dd
+      // __UDATA__ 占位 → stub 的 userData 根（读白名单内、写白名单外）
       if (args0.arguments && args0.arguments.path) {
-        args0.arguments.path = String(args0.arguments.path).replace(/__DATA__/g, HOME);
+        args0.arguments.path = String(args0.arguments.path)
+          .replace(/__DATA__/g, HOME)
+          .replace(/__DD__/g, path.join(HOME, 'dd'))
+          .replace(/__UDATA__/g, path.join(HOME, 'st', 'userData'));
       }
       (async () => {
         // 等 bootRuntime 完成（plugin-runtime handler 注册早于运行时就绪，直接 kick 会竞态）
@@ -379,6 +413,12 @@ const cred = require('./dist/credentials.js');
           }
           await new Promise((r) => setTimeout(r, 50));
         }
+        // M4：readOnly 选项 → 运行时就绪后把全局沙箱模式切成 read-only
+        // （就绪前 getService 返回 undefined，?. 会静默跳过——模式门必须真生效）。
+        if (${!!opts.readOnly}) {
+          const rt = require('${path.join(__dirname, 'dist', 'dsh-runtime.js').replace(/\\/g, '\\\\')}');
+          rt.getService('sandboxPolicy')?.setSandboxMode({}, 'read-only');
+        }
         ${opts.approve ? "await ipc.get('orchdesk:load-sessions')(null);" : ''}
         const kick = ipc.get('orchdesk:tool-execute')(null, args0);
         ${opts.approve ? `
@@ -387,8 +427,9 @@ const cred = require('./dist/credentials.js');
           approvalReq = stub.webSent.find((w) => w.ch === 'orchdesk:authz-approval-request');
           if (!approvalReq) await new Promise((r) => setTimeout(r, 20));
         }
-        if (!approvalReq) { console.log('ERR: 审批请求未发出'); process.exit(1); }
-        stub.ipcListeners.get('orchdesk:authz-submit-decision')(null, approvalReq.payload.id, 'allowed-once');
+        // 等不到审批请求 ≠ 失败：模式门/路径白名单可能在审批前就拒了（M4），
+        // 此时 kick 本身会带 error 返回，交由断言检查。
+        if (approvalReq) stub.ipcListeners.get('orchdesk:authz-submit-decision')(null, approvalReq.payload.id, 'allowed-once');
         ` : ''}
         const r = await kick;
         // PRD FR-8：可选地把沙箱日志一并返回（验证「判定真的被记下来」而非只存在代码里）

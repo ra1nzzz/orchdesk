@@ -122,13 +122,60 @@ function allowedRoots(): string[] {
   return cachedAllowedRoots ?? [];
 }
 
-/** 安全沙箱：限制可访问的目录 */
+/**
+ * M4：PRD FR-8 沙箱模式在工具执行层真实强制。
+ * resolve 失败 / 策略未注入 / 未知模式 → 一律 read-only（fail-safe，不静默放宽）。
+ */
+function currentSandboxMode(sessionId?: string): 'workspace-write' | 'read-only' {
+  try {
+    const policy = getHostServices()?.sandboxPolicy;
+    const resolved = policy?.resolve?.(sessionId ? { session: { id: sessionId } } : undefined);
+    return resolved?.mode === 'workspace-write' ? 'workspace-write' : 'read-only';
+  } catch {
+    return 'read-only';
+  }
+}
+
+/** M4：read-only 模式下拒绝的变更类工具（读操作不受影响）。 */
+const MUTATING_TOOLS: Record<string, SandboxLogEntry['kind']> = {
+  file_write: 'path',
+  shell_command: 'command',
+  set_cwd: 'path',
+  browser_click: 'browser',
+  browser_type: 'browser',
+  browser_eval: 'browser',
+};
+
+/** M4：写/变更类工具的统一模式门（在授权门之前——模式不对就没必要问用户）。 */
+function denyIfReadOnly(name: string, sessionCtx?: { sessionId?: string }): ToolResult | null {
+  const kind = MUTATING_TOOLS[name];
+  if (!kind) return null;
+  if (currentSandboxMode(sessionCtx?.sessionId) !== 'read-only') return null;
+  recordSandbox({ tool: name, kind, target: name, decision: 'denied', reason: '沙箱为只读模式（read-only）', sessionId: sessionCtx?.sessionId });
+  return { name, result: '', error: '沙箱为只读模式（read-only），变更类操作被拒绝。可在设置页「沙箱」切换为工作区可写。' };
+}
+
+/** 安全沙箱：读操作路径白名单（home/userData/temp/数据目录/会话绑定工作区）。
+ * M4：移除 process.cwd() 隐式根——以任意目录为启动 cwd 就让它变成可读写根，
+ * 等于把安装目录/用户碰巧 cd 进的任何目录拖进沙箱（安全审查 M2）。 */
 function isPathAllowed(p: string): boolean {
   const resolved = path.resolve(p);
   // BUG-023：会话工作区（用户在 GUI 里绑定的项目目录）也是白名单根——
   // 否则 cwd 切到 D 盘项目后，file_*/set_cwd 全被沙箱拒绝，「工作区」名存实亡。
   // sessionCwds 只能经 set-session-cwd（用户驱动）写入，Agent 无法借此扩权。
-  const roots = [...allowedRoots(), dataDir(), process.cwd(), ...sessionCwds.values()];
+  const roots = [...allowedRoots(), dataDir(), ...sessionCwds.values()];
+  return roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
+}
+
+/**
+ * M4：写操作路径白名单（workspace-write 模式下的 file_write / set_cwd）。
+ * 比读白名单更窄：只有会话绑定工作区 + 数据目录 + 临时目录可写——
+ * PRD FR-8「文件写入限定白名单目录」；home 仅可读（否则 ~/.ssh、
+ * Startup 启动项都在同一个"白名单"里，与授权门叠加也只是双确认而非边界）。
+ */
+function isWritePathAllowed(p: string): boolean {
+  const resolved = path.resolve(p);
+  const roots = [...sessionCwds.values(), dataDir(), ...(getAppPath('temp') ? [path.resolve(getAppPath('temp')!)] : [])];
   return roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
 }
 
@@ -315,6 +362,9 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
   const { name, arguments: args } = tool;
   const cwd = sessionCwd(sessionCtx?.sessionId);
   try {
+    // M4：变更类工具先过沙箱模式门（read-only 直接拒，不打扰授权门）。
+    const modeDenied = denyIfReadOnly(name, sessionCtx);
+    if (modeDenied) return modeDenied;
     switch (name) {
       case 'file_read': {
         const filePath = path.resolve(cwd, String(args.path || ''));
@@ -346,7 +396,8 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
         const filePath = path.resolve(cwd, String(args.path || ''));
         const content = String(args.content || '');
         const sid = sessionCtx?.sessionId;
-        if (!isPathAllowed(filePath)) {
+        // M4：写路径白名单比读白名单更窄（会话工作区 + 数据目录 + temp）。
+        if (!isPathAllowed(filePath) || !isWritePathAllowed(filePath)) {
           recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
           return { name, result: '', error: '路径不在允许范围内' };
         }
@@ -564,7 +615,7 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
       case 'set_cwd': {
         const resolved = path.resolve(String(args.path || ''));
         const sid = sessionCtx?.sessionId;
-        if (!isPathAllowed(resolved)) {
+        if (!isPathAllowed(resolved) || !isWritePathAllowed(resolved)) {
           recordSandbox({ tool: name, kind: 'path', target: resolved, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
           return { name, result: '', error: '路径不在允许范围内' };
         }
