@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none';">
 <title>OrchDesk · 会话优先的本地 Agent 工作台</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="vendor/xterm/xterm.css">
@@ -60,6 +60,8 @@
 <div id="fileRoot" class="fullscreen-panel hidden"></div>
 
 <script src="vendor/marked.min.js"></script>
+<!-- M-3：DOMPurify——renderMD 的 HTML 消毒从正则白名单升级为真解析器消毒（防属性注入绕过） -->
+<script src="vendor/dompurify.min.js"></script>
 <!-- 终端（P2-10）与文件（P2-11）的 vendored 依赖：加载失败时 app.js 显式降级 -->
 <script src="vendor/xterm/xterm.js"></script>
 <script src="vendor/xterm/addon-fit.js"></script>

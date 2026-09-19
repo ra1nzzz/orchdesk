@@ -2021,15 +2021,15 @@
             </div>`).join('')}
           </div>
           <div class="sec-title" style="margin:16px 0 8px">网络域名白名单</div>
-          <div class="faint" style="margin-bottom:6px">一行一个域名（如 <span class="mono">github.com</span>），<span class="mono">*</span> 表示不限；非白名单域名的抓取经补偿层二次确认（fail-closed）。</div>
-          <textarea class="inp mono" id="net-allow" rows="3" style="width:100%;font-size:11.5px">${esc((state.sandbox.networkAllow || ['*']).join('\n'))}</textarea>
+          <div class="faint" style="margin-bottom:6px">一行一个域名（如 <span class="mono">github.com</span>），<span class="mono">*</span> 表示不限。<b>留空 = 全部拒绝</b>（fail-closed）：web_fetch / browser_open 命中不了白名单即直接拒绝。内网/云元数据端点另受 SSRF 防护拦截。</div>
+          <textarea class="inp mono" id="net-allow" rows="3" style="width:100%;font-size:11.5px">${esc((state.sandbox.networkAllow || []).join('\n'))}</textarea>
           <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="sandbox-save-net">保存白名单</button><span class="faint" id="net-allow-tip"></span></div>
           <div class="sec-title" style="margin:16px 0 8px">L0-L4 分级</div>
           <div class="levels">
             ${state.authLevels.length ? state.authLevels.map((l) => `<div class="lv"><span class="lv-n">L${l.level}</span><span class="lv-l">${l.label}</span><span class="faint">${l.scope}</span>${l.requiresApproval ? '<span class="badge warn">需授权</span>' : ''}</div>`).join('') : '<div class="faint">分级定义加载中…</div>'}
           </div>
           <div class="sec-title" style="margin:16px 0 8px">授权白名单（可查看可撤销）</div>
-          <div class="faint" style="margin-bottom:6px">粒度分「会话 / 永久」，规则 = 操作类型 + 目标模式（仅 <span class="mono">*</span> 通配，整串匹配）。命中即放行并计入审计；<b>偏执模式下白名单不生效</b>（切到偏执 = 全锁）。</div>
+          <div class="faint" style="margin-bottom:6px">粒度分「会话 / 永久」，规则 = 操作类型 + 目标模式（仅 <span class="mono">*</span> 通配，整串匹配）。命中即放行并计入审计；<b>偏执模式下白名单不生效</b>（切到偏执 = 全锁）。<b>永久粒度不允许</b>「任意操作」或 <span class="mono">*</span> 目标（一次点击不该等于永久免审一切）。</div>
           <div class="grant-add">
             <select id="grant-tool" class="inp" style="width:150px">
               ${(state.grantTools.length ? state.grantTools : ['*', 'file_write', 'shell_command', 'web_fetch']).map((t) => `<option value="${t}">${t === '*' ? '任意操作' : t}</option>`).join('')}
@@ -2385,15 +2385,32 @@
   }
 
   /* ---------- Markdown 渲染器（基于 marked.js） ---------- */
+  // M-3：marked 产物的 HTML 消毒。历史实现是正则白名单过滤——`\b` 边界使
+  // `<a/href="…">` 之类畸形标签逃过转义，属性注入可绕过（当时只有 CSP 单点防御）。
+  // 现改为 DOMPurify 真解析器消毒 + 显式标签/属性白名单；DOMPurify 加载失败时
+  // 退化为「全量转义」（宁可显示纯文本，不冒 XSS 风险）。
   function renderMD(md) {
     if (!md) return '';
+    let raw;
     try {
-      const raw = typeof marked !== 'undefined' ? marked.parse(md, { gfm: true, breaks: false }) : esc(md);
-      // marked 输出可能含 HTML 标签，仅对非代码部分转义
-      // 简单策略：对 < 标签做白名单过滤（只保留 marked 生成的 HTML 标签）
-      return raw.replace(/<(?!\/?(pre|code|h[1-6]|ul|ol|li|p|br|strong|b|em|i|a|blockquote|table|thead|tbody|tr|td|th|sup|sub|hr|del|s|strike)\b)[^>]*>/gi, '&lt;$0').replace(/&lt;\/(pre|code|h[1-6]|ul|ol|li|p|strong|b|em|i|a|blockquote|table|thead|tbody|tr|td|th|sup|sub|del|s|strike)>/, '</$1>');
+      raw = typeof marked !== 'undefined' ? marked.parse(md, { gfm: true, breaks: false }) : esc(md);
     } catch {
       return esc(md);
+    }
+    try {
+      if (typeof DOMPurify === 'undefined' || !DOMPurify.sanitize) return esc(raw);
+      return DOMPurify.sanitize(raw, {
+        ALLOWED_TAGS: ['pre', 'code', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+          'ul', 'ol', 'li', 'p', 'br', 'strong', 'b', 'em', 'i', 'a', 'blockquote',
+          'table', 'thead', 'tbody', 'tr', 'td', 'th', 'sup', 'sub', 'hr', 'del', 's', 'strike',
+          'span', 'div', 'details', 'summary'],
+        ALLOWED_ATTR: ['href', 'title', 'class'],
+        ALLOW_DATA_ATTR: false,
+        FORBID_TAGS: ['style', 'script', 'form', 'input'],
+        FORBID_ATTR: ['style', 'srcset', 'onerror', 'onload', 'onclick'],
+      });
+    } catch {
+      return esc(raw);
     }
   }
 
@@ -4219,10 +4236,13 @@
         const ta = document.getElementById('net-allow');
         const list = String((ta && ta.value) || '').split('\n').map((s) => s.trim()).filter(Boolean);
         const tip = document.getElementById('net-allow-tip');
-        bridge.setNetworkAllow(list.length ? list : ['*']).then((r) => {
+        // 空列表 = 全部拒绝（fail-closed），不再回落 ['*'] 悄悄放开全网。
+        bridge.setNetworkAllow(list).then((r) => {
           if (r && r.ok) {
-            state.sandbox.networkAllow = r.networkAllow || ['*'];
-            if (tip) tip.textContent = `已保存（${state.sandbox.networkAllow.join('、')}）`;
+            state.sandbox.networkAllow = r.networkAllow || [];
+            if (tip) tip.textContent = state.sandbox.networkAllow.length
+              ? `已保存（${state.sandbox.networkAllow.join('、')}）`
+              : '已保存（空 = 全部拒绝）';
             toast('沙箱：网络域名白名单已更新', 'ok');
           } else {
             if (tip) tip.textContent = `保存失败：${(r && r.reason) || '未知原因'}`;

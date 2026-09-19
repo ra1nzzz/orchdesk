@@ -51,7 +51,7 @@ function sandboxFile(): string {
 }
 
 function loadSandbox(): SandboxState {
-  const base: SandboxState = { mode: 'workspace-write', sessionModes: {}, networkAllow: ['*'], audit: [] };
+  const base: SandboxState = { mode: 'workspace-write', sessionModes: {}, networkAllow: [], audit: [] };
   try {
     const f = sandboxFile();
     if (!fs.existsSync(f)) return base;
@@ -67,23 +67,26 @@ function loadSandbox(): SandboxState {
   }
 }
 
-/** 归一化域名白名单：非法项丢弃；空数组回落 ['*']（不限），避免误配导致全网被封死。 */
+/** 归一化域名白名单：非法项丢弃；**空数组 = 全部拒绝**（fail-closed，安全审查 B-2）。
+ * 历史实现空数组回落 ['*']（全网放开）是「误配导致全网被封死」的便利性倒逼安全让步——
+ * 默认安全（PRD §7 本地优先）优先：不配白名单就不放行，用户显式加 '*' 才放开。 */
 export function normalizeNetworkAllow(list: unknown): string[] {
-  if (!Array.isArray(list)) return ['*'];
+  if (!Array.isArray(list)) return [];
   const cleaned = list
     .map((d) => String(d || '').trim().toLowerCase())
     .filter((d) => d.length > 0 && d.length < 256 && !/[\s/]/.test(d));
-  return cleaned.length ? cleaned : ['*'];
+  return cleaned;
 }
 
 /**
  * PRD FR-8：网络请求域名白名单判定。
  * 白名单含 '*' → 放行全部；否则 host 命中任一项（精确或后缀 .domain）→ 放行。
- * 无法解析的 URL 一律拒绝（fail-closed）。
+ * 白名单为空或 URL 无法解析 → 一律拒绝（fail-closed）。
  */
 export function isDomainAllowed(url: string): boolean {
   const allow = normalizeNetworkAllow(loadSandbox().networkAllow);
   if (allow.includes('*')) return true;
+  if (!allow.length) return false;
   let host = '';
   try {
     host = new URL(String(url || '')).hostname.toLowerCase();
@@ -92,6 +95,47 @@ export function isDomainAllowed(url: string): boolean {
   }
   if (!host) return false;
   return allow.some((d) => (d.startsWith('*.') ? host === d.slice(2) || host.endsWith(d.slice(1)) : host === d || host.endsWith('.' + d)));
+}
+
+// ---------------------------------------------------------------------------
+// SSRF 防护（安全审查 B-2）：白名单管「域名准不准出」，这里管「目标危不危险」。
+// 两类必须拦的目标：① 私网/回环/链路本地/CGNAT 的 IP 字面量（云元数据 169.254.169.254、
+// 本机服务 127.0.0.1、内网管理端）；② 已知元数据主机名。与白名单独立生效——
+// 用户显式 '*' 放开域名时不改变这里的拒绝。
+// ---------------------------------------------------------------------------
+
+const BLOCKED_HOSTNAME_EXACT = new Set([
+  'localhost', 'metadata', 'metadata.google.internal', 'instance-data',
+]);
+const IPV4_BLOCKED: RegExp[] = [
+  /^0\./,                       // 0.0.0.0/8
+  /^127\./,                     // IPv4 回环
+  /^10\./,                      // 私网 10/8
+  /^192\.168\./,                // 私网 192.168/16
+  /^172\.(1[6-9]|2\d|3[01])\./, // 私网 172.16/12
+  /^169\.254\./,                // 链路本地（含云元数据端点）
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, // CGNAT 100.64/10
+];
+
+/** URL 主机是否属于必须拒绝的内网/元数据目标。URL 无法解析 → true（fail-closed）。 */
+export function isBlockedHost(url: string): boolean {
+  let host = '';
+  try {
+    host = new URL(String(url || '')).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    return true;
+  }
+  if (!host) return true;
+  if (BLOCKED_HOSTNAME_EXACT.has(host)) return true;
+  if (host.endsWith('.localhost') || host.endsWith('.internal') || host.endsWith('.local')) return true;
+  if (host.includes(':')) { // IPv6 字面量
+    if (host === '::1') return true;
+    if (/^f[cd]/.test(host)) return true; // fc00::/7 ULA
+    if (/^fe[89ab]/.test(host)) return true; // fe80::/10 链路本地
+    return false;
+  }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return IPV4_BLOCKED.some((re) => re.test(host));
+  return false;
 }
 
 function saveSandbox(state: SandboxState): void {

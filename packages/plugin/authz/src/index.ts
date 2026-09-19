@@ -157,9 +157,20 @@ export interface GrantInput {
 }
 
 /**
+ * shell 元字符（与 apps/desktop/agent-runtime.ts 的 hasShellMetachars 同口径）。
+ * matchGrantRule 用它阻止「命令拼接搭车」：用户为一个 `git *` 目标点过允许后，
+ * Agent 发出 `git log && cmd /c calc` —— 整串 target 仍命中该规则即可永久免审。
+ * canonical 拒绝在 shell_command 执行层；这里是白名单匹配侧的对称防护。
+ */
+const SHELL_METACHARS = /(?:&&|\|\||[&|;<>$`\n\r])/;
+
+/**
  * 归一化并校验一条白名单规则。
  * 非法入参一律拒绝并给 reason —— 白名单是安全边界，静默丢弃会让用户
  * 以为「已经记住了」但实际没生效。
+ * B-4（安全审查）：permanent 粒度禁止 `tool='*'` 或 `pattern='*'`——
+ * 「永久记住全部工具/全部目标」使授权语义完全失效（一次点击 = 永久免审一切）。
+ * session 粒度允许 '*'（随会话失效），命中侧仍有 SHELL_METACHARS 防护。
  */
 export function normalizeGrant(input: unknown): { ok: boolean; rule?: GrantInput; reason?: string } {
   if (!input || typeof input !== 'object') return { ok: false, reason: '白名单规则缺失' };
@@ -170,6 +181,9 @@ export function normalizeGrant(input: unknown): { ok: boolean; rule?: GrantInput
   if (!pattern) return { ok: false, reason: '缺少目标模式（pattern）；不限目标请填 *' };
   if (grantPatternToRegExp(pattern) === null) return { ok: false, reason: `目标模式非法：${pattern}` };
   if (!isGrantScope(raw.scope)) return { ok: false, reason: `授权粒度非法：${String(raw.scope)}（应为 session 或 permanent）` };
+  if (raw.scope === 'permanent' && (tool === '*' || pattern === '*')) {
+    return { ok: false, reason: '永久授权不允许通配全部工具或全部目标（tool/pattern 均需具体值）' };
+  }
   const sessionId = String(raw.sessionId ?? '').trim();
   if (raw.scope === 'session' && !sessionId) return { ok: false, reason: '会话级白名单必须指定 sessionId' };
   const note = String(raw.note ?? '').trim().slice(0, 120);
@@ -189,6 +203,8 @@ export function normalizeGrant(input: unknown): { ok: boolean; rule?: GrantInput
  * 在规则集中找第一条命中的白名单。
  * 判定顺序：工具名（精确或 '*'）→ 粒度（session 需会话 ID 相等）→ 目标模式（整串锚定）。
  * 目标缺失时只有 '*' 模式能命中 —— 无目标的请求不该被真实路径规则放行。
+ * B-4：shell_command 目标含 shell 元字符时不匹配任何规则——
+ * 白名单授权的是「这条命令」，不是「这条命令 + 后随拼接的任意命令」。
  */
 export function matchGrantRule(
   rules: readonly GrantRule[],
@@ -198,6 +214,7 @@ export function matchGrantRule(
   if (!tool) return null;
   const target = String(q?.target ?? '').trim();
   const sessionId = String(q?.sessionId ?? '').trim();
+  if (tool === 'shell_command' && SHELL_METACHARS.test(target)) return null;
   for (const r of rules) {
     if (r.tool !== '*' && r.tool !== tool) continue;
     if (r.scope === 'session') {

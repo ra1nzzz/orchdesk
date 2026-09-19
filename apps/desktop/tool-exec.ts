@@ -9,6 +9,7 @@ import {
   ALLOWED_COMMANDS,
   FILE_READ_RESULT_MAX,
   WEB_FETCH_RESULT_MAX,
+  hasShellMetachars,
   type ToolCall,
   type ToolResult,
 } from './agent-runtime';
@@ -32,13 +33,13 @@ import {
 } from './browser-cdp';
 import { getService } from './dsh-runtime';
 import { FILE_READ_MAX_BYTES } from './file-panel';
-import { getHostServices } from './host-services';
+import { getHostServices, isBlockedHost } from './host-services';
 import type { SandboxLogEntry } from './sandbox-log';
 
 export type ToolExecHost = {
   dataDir: () => string;
   getAppPath: (name: 'home' | 'userData' | 'temp') => string | undefined;
-  approvalGate: (toolName: string, reason: string, sessionId?: string, target?: string) => Promise<string | null>;
+  approvalGate: (toolName: string, reason: string, sessionId?: string, target?: string, signal?: AbortSignal) => Promise<string | null>;
   outboundGate: (text: string, sessionId?: string) => Promise<string | null>;
   recordSandbox: (input: {
     tool: string;
@@ -69,8 +70,8 @@ function dataDir(): string { return requireHost().dataDir(); }
 function getAppPath(name: 'home' | 'userData' | 'temp'): string | undefined {
   return requireHost().getAppPath(name);
 }
-function approvalGate(toolName: string, reason: string, sessionId?: string, target?: string): Promise<string | null> {
-  return requireHost().approvalGate(toolName, reason, sessionId, target);
+function approvalGate(toolName: string, reason: string, sessionId?: string, target?: string, signal?: AbortSignal): Promise<string | null> {
+  return requireHost().approvalGate(toolName, reason, sessionId, target, signal);
 }
 function outboundGate(text: string, sessionId?: string): Promise<string | null> {
   return requireHost().outboundGate(text, sessionId);
@@ -168,7 +169,7 @@ function browserTargetOf(name: string, args: Record<string, unknown>): string {
   return where;
 }
 
-async function executeBrowserTool(name: string, args: Record<string, unknown>, sessionId?: string): Promise<ToolResult> {
+async function executeBrowserTool(name: string, args: Record<string, unknown>, sessionId?: string, signal?: AbortSignal): Promise<ToolResult> {
   const parsed = normalizeBrowserArgs(name, args);
   if (!parsed.ok) {
     recordSandbox({ tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'error', reason: parsed.error, sessionId });
@@ -185,8 +186,14 @@ async function executeBrowserTool(name: string, args: Record<string, unknown>, s
       const policy = getHostServices()?.sandboxPolicy;
       const allowed = policy?.isDomainAllowed ? policy.isDomainAllowed(v.url) : true;
       if (!allowed) {
-        const denied = await outboundGate(`访问网页 ${v.url}`, sessionId);
-        if (denied) return fail(`域名不在白名单：${denied}`, 'denied');
+        // B-3：与 web_fetch 同口径——域名白名单 fail-closed 直接拒绝，
+        // 不再走「补偿服务缺失即放行」的外发确认门。
+        recordSandbox({ tool: name, kind: 'network', target: v.url, decision: 'denied', reason: '域名不在白名单（fail-closed）', sessionId });
+        return fail('域名不在白名单（fail-closed）。请在设置页「沙箱」的网络域名白名单中添加该域名，或显式添加 "*" 放开全部。', 'denied');
+      }
+      if (isBlockedHost(v.url)) {
+        recordSandbox({ tool: name, kind: 'network', target: v.url, decision: 'denied', reason: '目标为内网/回环/链路本地/云元数据地址（SSRF 防护）', sessionId });
+        return fail('目标地址为内网/回环/链路本地/云元数据端点，已被 SSRF 防护拒绝', 'denied');
       }
       try {
         const st = await cdpOpenBrowser(v.url, { waitUntil: v.waitUntil, timeoutMs: v.timeoutMs });
@@ -225,7 +232,7 @@ async function executeBrowserTool(name: string, args: Record<string, unknown>, s
     case 'browser_click': {
       const st = getBrowserState();
       if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const denied = await approvalGate('browser_click', `在网页上点击 ${v.selector}`, sessionId, st.url || '');
+      const denied = await approvalGate('browser_click', `在网页上点击 ${v.selector}`, sessionId, st.url || '', signal);
       if (denied) return fail(denied, 'denied');
       const wait = await evalInPage(buildWaitForSelectorExpression(v.selector, v.timeoutMs));
       if (!wait.ok) return fail(wait.error || `等待元素 ${v.selector} 超时`);
@@ -241,7 +248,7 @@ async function executeBrowserTool(name: string, args: Record<string, unknown>, s
     case 'browser_type': {
       const st = getBrowserState();
       if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const denied = await approvalGate('browser_type', `在网页输入框填入 ${v.text.length} 个字符`, sessionId, st.url || '');
+      const denied = await approvalGate('browser_type', `在网页输入框填入 ${v.text.length} 个字符`, sessionId, st.url || '', signal);
       if (denied) return fail(denied, 'denied');
       const r = await evalInPage(buildTypeExpression(v.selector, v.text, { clear: v.clear, pressEnter: v.pressEnter }));
       if (!r.ok) return fail(r.error || '填入失败');
@@ -271,7 +278,7 @@ async function executeBrowserTool(name: string, args: Record<string, unknown>, s
       if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
       const risks = scanScriptRisks(v.expression);
       const reason = `执行脚本${risks.length ? `（涉及：${risks.join('、')}）` : ''}：${v.expression.slice(0, 160)}`;
-      const denied = await approvalGate('browser_eval', reason, sessionId, st.url || '');
+      const denied = await approvalGate('browser_eval', reason, sessionId, st.url || '', signal);
       if (denied) return fail(denied, 'denied');
       const r = await evalInPage(v.expression, v.timeoutMs);
       if (!r.ok) {
@@ -302,7 +309,7 @@ async function executeBrowserTool(name: string, args: Record<string, unknown>, s
   }
 }
 
-export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }): Promise<ToolResult> {
+export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string; signal?: AbortSignal }): Promise<ToolResult> {
   const { name, arguments: args } = tool;
   const cwd = sessionCwd(sessionCtx?.sessionId);
   try {
@@ -373,6 +380,15 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
         const cmdName = (cmd.split(/[\s/\\]+/)[0] || '').toLowerCase();
         const sid = sessionCtx?.sessionId;
         if (!cmdName) return { name, result: '', error: '命令为空' };
+        // B-2：shell 元字符一律拒绝——`&&`/`|`/`;`/`$()` 等拼接可让「白名单首词 +
+        // 任意后随命令」整条执行，是命令白名单被结构绕过的唯一入口。
+        if (hasShellMetachars(cmd)) {
+          recordSandbox({
+            tool: name, kind: 'command', target: cmd, decision: 'denied',
+            reason: '命令含 shell 元字符（& | ; < > $ ` 或换行），已拒绝', sessionId: sid,
+          });
+          return { name, result: '', error: '命令不得包含 & | ; < > $ ` 或换行等 shell 元字符（防命令拼接绕过白名单）。请拆成多条独立命令。' };
+        }
         if (!ALLOWED_COMMAND_SET.has(cmdName)) {
           recordSandbox({
             tool: name, kind: 'command', target: cmd, decision: 'denied',
@@ -381,8 +397,8 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
           return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${ALLOWED_COMMANDS.slice(0, 20).join(', ')}...` };
         }
         // ---- 授权门（PRD L3/L4 / T-P3-2）：命令执行必须过审批 ----
-        // 此前审批 UI 已建但工具链路从不触发（与 intent/trace 同款死挂点，BUG-021 修复）。
-        const denied = await approvalGate('shell_command', cmd, sessionCtx?.sessionId, cmd);
+        // 白名单只挡「明显无害」命令；真正的安全边界是此授权门 + 沙箱日志。
+        const denied = await approvalGate('shell_command', cmd, sessionCtx?.sessionId, cmd, sessionCtx?.signal);
         if (denied) {
           recordSandbox({ tool: name, kind: 'approval', target: cmd, decision: 'denied', reason: denied, sessionId: sid });
           return { name, result: '', error: denied };
@@ -415,6 +431,12 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
               resolve(`${stdout || ''}${stderr ? '\n[stderr]\n' + stderr : ''}`);
             });
             child.on('error', reject);
+            // M-8：回合中止时 kill 子进程——否则「已停止」后 shell 写盘/外发照常完成。
+            const onAbort = () => { try { child.kill(); } catch { /* 可能已退出 */ } reject(new Error('已中止（回合被用户停止）')); };
+            if (sessionCtx?.signal) {
+              if (sessionCtx.signal.aborted) onAbort();
+              else sessionCtx.signal.addEventListener('abort', onAbort, { once: true });
+            }
           });
           recordSandbox({ tool: name, kind: 'approval', target: cmd, decision: 'allowed', sessionId: sid });
           return { name, result: output.slice(0, 50000) };
@@ -433,20 +455,48 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
           recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: 'URL 必须以 http(s) 开头', sessionId: sid });
           return { name, result: '', error: 'URL 必须以 http(s) 开头' };
         }
-        // PRD FR-8：网络请求域名白名单。非白名单域名 = 边界外外发 → 补偿层二次确认。
-        // 此前 v0.9.1 以「只读 GET 无不可逆外发」为由跳过，与 FR-12 明文冲突（外发即边界外 emission）。
+        // B-3：域名白名单 fail-closed——非白名单直接拒绝，不再走「会自动放行的外发确认」。
+        // 历史实现把未命中域名转 outboundGate（补偿服务缺失即 WARN 放行），使设置页里的
+        // 「网络域名白名单」从不真正阻断（安全审查 B-2 / 架构 M1）。
         const policy = getHostServices()?.sandboxPolicy;
-        const allowed = policy?.isDomainAllowed ? policy.isDomainAllowed(url) : true;
-        if (!allowed) {
-          const denied = await outboundGate(`请求接口 ${url}`, sessionCtx?.sessionId);
-          if (denied) {
-            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: `域名不在白名单：${denied}`, sessionId: sid });
-            return { name, result: '', error: `域名不在白名单：${denied}` };
-          }
-          recordSandbox({ tool: name, kind: 'outbound', target: url, decision: 'allowed', reason: '非白名单域名经外发二次确认后放行', sessionId: sid });
+        const domainAllowed = policy?.isDomainAllowed ? policy.isDomainAllowed(url) : true;
+        if (!domainAllowed) {
+          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: '域名不在白名单（fail-closed）', sessionId: sid });
+          return { name, result: '', error: '域名不在白名单（fail-closed，不再自动放行外发）。请在设置页「沙箱」的网络域名白名单中添加该域名，或显式添加 "*" 放开全部。' };
+        }
+        // SSRF：白名单命中也不能打内网/元数据端点（与白名单独立，B-2）。
+        if (isBlockedHost(url)) {
+          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: '目标为内网/回环/链路本地/云元数据地址（SSRF 防护）', sessionId: sid });
+          return { name, result: '', error: '目标地址为内网/回环/链路本地/云元数据端点，已被 SSRF 防护拒绝' };
         }
         try {
-          const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+          // 手动跟随重定向：每一跳都重新过域名白名单 + SSRF 判定，
+          // 防止 302 跳到白名单外地址或内网元数据端点。
+          const MAX_REDIRECTS = 5;
+          let current = url;
+          let res: Response | null = null;
+          for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+            res = await fetch(current, {
+              redirect: 'manual',
+              signal: sessionCtx?.signal
+                ? AbortSignal.any([sessionCtx.signal, AbortSignal.timeout(15000)])
+                : AbortSignal.timeout(15000),
+            });
+            if (![301, 302, 303, 307, 308].includes(res.status)) break;
+            const loc = res.headers.get('location');
+            if (!loc) break;
+            const next = new URL(loc, current).toString();
+            if (policy?.isDomainAllowed && !policy.isDomainAllowed(next)) {
+              recordSandbox({ tool: name, kind: 'network', target: next, decision: 'denied', reason: '重定向目标不在白名单（fail-closed）', sessionId: sid });
+              return { name, result: '', error: `重定向目标域名不在白名单：${next}` };
+            }
+            if (isBlockedHost(next)) {
+              recordSandbox({ tool: name, kind: 'network', target: next, decision: 'denied', reason: '重定向目标为内网/元数据地址（SSRF 防护）', sessionId: sid });
+              return { name, result: '', error: '重定向目标为内网/回环/链路本地/云元数据端点，已被 SSRF 防护拒绝' };
+            }
+            current = next;
+          }
+          if (!res) throw new Error('请求未能建立');
           // 响应体积护栏：承诺只回传 WEB_FETCH_RESULT_MAX（30KB），但不能因此整读超大响应进内存（防 OOM / 主进程阻塞）。
           // content-length 预检 + 流式读满上限即停，两重保险。
           const MAX_FETCH_BYTES = 1 * 1024 * 1024;
@@ -484,7 +534,7 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
       case 'browser_screenshot':
       case 'browser_eval':
       case 'browser_close':
-        return await executeBrowserTool(name, args, sessionCtx?.sessionId);
+        return await executeBrowserTool(name, args, sessionCtx?.sessionId, sessionCtx?.signal);
       case 'memory_save': {
         // dsh memory 服务（global 域）落地——「记住 X」从口头应答变成真实持久化
         const content = String(args.content || '').trim();
