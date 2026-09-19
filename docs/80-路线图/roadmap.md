@@ -15,6 +15,7 @@ updated: 2026-09-02
 
 **Minke 对照增强（2026-08-31 ~ 09-02 已交付）**：工程基建（ADR-0010）→ 浏览器工具（ADR-0011）→ 终端 PTY + 文件面板（ADR-0012）→ 文件编辑/diff（ADR-0013），verify 24 套件 814 项全绿（计数以 [CHECKPOINT](../00-项目/CHECKPOINT.md)「验证套件」行为准）。剩余收口：v0.13.0 发版（changelog → tag → dist 链）与真机 GUI 冒烟（终端/文件面板实机点击，须用户桌面会话）。
 
+**Electron 运行时升级（2026-09-20 评估，暂缓执行）**：当前锁定 electron 36.9.5，最新 stable 44.4.3（差 8 个 major，已出 Electron 支持窗口）。评估结论——**不在本 agent 环境盲升**：Chromium 大版本跳跃改变 CSP/contextIsolation/permission 行为与 node-pty native ABI，唯一可信的验证是正常 Windows 桌面实机冒烟，而本环境受 BUG-W02 门控无法启动 Electron GUI；把未经冒烟的新运行时发给用户违反「不伪造验证」纪律。升级 is 一个门控任务：① 用户桌面可用时先把冒烟清单（浏览器工具/终端 PTY/模型调用/授权弹窗/自动更新）跑绿并归档；② 升 major（建议 36→38→44 两步走，每步 rebuild + node-pty ABI 重编）；③ electron-builder 同步升（26.15.3 对 44 的支持矩阵需实测，27.0.0-alpha 不用于生产）；④ 全链 verify + 打包 smoke（见 [build.md 4b](../30-开发/build.md) 的 pnpm 收集器注意事项）。
 ## 中期（P6 之后）
 
 | 方向 | 说明 | 来源 |
