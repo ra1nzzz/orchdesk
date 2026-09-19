@@ -36,6 +36,10 @@ import {
 } from './session-events';
 import { emitCanonicalEvent, setEnvelopeConsumer } from './event-emit';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, startupMarketPlugins } from './dsh-runtime';
+import { registerAuthzIpc, pendingApprovals, nextApprovalId, type AuthzServiceLike, type GrantRuleLike } from './ipc-authz';
+import { registerMemoryIpc, loadPromotionLog, setMemorySummarizeSeam, type MemoryServiceLike } from './ipc-memory';
+import { registerPromptIpc } from './ipc-prompt';
+import { registerPluginCapabilityIpc, type CompensationServiceLike } from './ipc-plugins';
 import { getHostServices } from './host-services';
 import {
   normalizeSandboxLog,
@@ -824,37 +828,9 @@ ipcMain.handle('orchdesk:models-test', async (_e, providerId: string, model: str
 // 关键修复：此前这里传入占位 ctx（{get: () => undefined}），导致 authzService
 // 恒为 null，L0–L4 矩阵 / 审计日志 / 审批弹窗 / 模式切换四块 UI 全部空转。
 // ---------------------------------------------------------------------------
-type AuthzServiceLike = {
-  getMode(sessionId?: string): Promise<string>;
-  setMode(mode: string, sessionId?: string): Promise<{ ok: boolean; reason?: string }>;
-  getLevels(): Array<{ level: number; label: string; scope: string; requiresApproval: boolean }>;
-  getAuditLog(): Array<{ kind: string; ts: number; mode?: string; outcome?: string; toolName?: string; reason?: string; sessionId?: string }>;
-  setUiAnswerer(fn: ((req: { toolName: string; reason?: string; sessionId?: string }) => Promise<string>) | null): void;
-  getModes?(): Array<{ id: string; label: string; sandboxMode: string; approvalPolicy: string; blurb: string }>;
-  getGrantTools?(): readonly string[];
-  subscribe?(cb: (evt: unknown) => void): () => void;
-  // ---- PRD FR-9：会话 / 永久授权白名单 ----
-  listGrants?(): GrantRuleLike[];
-  grant?(input: unknown): { ok: boolean; rule?: GrantRuleLike; reason?: string };
-  revoke?(id: string): boolean;
-  revokeAll?(): number;
-  matchGrant?(q: { toolName?: string; target?: string; sessionId?: string }): GrantRuleLike | null;
-};
 
-export interface GrantRuleLike {
-  id: string;
-  tool: string;
-  pattern: string;
-  scope: 'session' | 'permanent';
-  sessionId?: string;
-  createdAt: number;
-  hits: number;
-  note?: string;
-}
 
 let authzService: AuthzServiceLike | null = null;
-const pendingApprovals = new Map<string, { resolve: (o: string) => void; timer: NodeJS.Timeout }>();
-let approvalSeq = 0;
 
 /**
  * 启动 dsh 运行时并把 GUI 应答方 / SubAgent 运行器注入宿主服务。
@@ -878,7 +854,7 @@ async function bootRuntime(): Promise<void> {
         // 审批弹窗不可能被应答，与其等满超时不如立即拒绝（与 host-services
         // 「无应答方」同语义的快路径）。
         if (!rendererReady || !bootDesktop.mainWindow || bootDesktop.mainWindow.isDestroyed()) return 'unavailable';
-        const id = `apr-${++approvalSeq}`;
+        const id = nextApprovalId();
         return new Promise<string>((resolve) => {
           const timer = setTimeout(() => {
             pendingApprovals.delete(id);
@@ -921,7 +897,7 @@ async function bootRuntime(): Promise<void> {
     //    （摘要是增强不是必需，绝不能让整批转储蒸发）。
     const memoryApi = getService<MemoryServiceLike>('memory');
     if (memoryApi?.setSummarize) {
-      memoryApi.setSummarize(async (messages) => {
+      memoryApi.setSummarize(async (messages: unknown[]) => {
         const cfg = loadModelConfig();
         const provider = cfg.providers[0];
         // 没配模型就直接抛 —— 让插件走兜底，而不是在这塞一句「（未配置模型）」
@@ -935,7 +911,7 @@ async function bootRuntime(): Promise<void> {
         );
         return clampSummary(reply.content);
       });
-      memorySummarizeSeam = true;
+      setMemorySummarizeSeam(true);
       console.log('[orchdesk] 记忆摘要已接入 LLM（FR-10，未配置模型时回落抽取式兜底）');
     } else {
       console.warn('[orchdesk] memory 服务不可用，自动转储将全部走抽取式兜底');
@@ -969,78 +945,7 @@ async function bootRuntime(): Promise<void> {
   }
 }
 
-ipcMain.handle('orchdesk:authz-get-mode', async () => {
-  if (!authzService) return { mode: 'default' };
-  try { return { mode: await authzService.getMode() }; } catch { return { mode: 'default' }; }
-});
-ipcMain.handle('orchdesk:authz-set-mode', async (_e, mode: string) => {
-  if (!authzService) return { ok: false, reason: '授权服务未加载' };
-  try { return await authzService.setMode(mode); } catch { return { ok: false, reason: '切换异常' }; }
-});
-ipcMain.handle('orchdesk:authz-get-levels', async () => {
-  if (!authzService) return [];
-  try { return authzService.getLevels(); } catch { return []; }
-});
-// ④M-1：授权模式卡 / 白名单工具下拉数据化（canonical = packages/plugin/authz AUTHZ_MODES + GRANT_TOOLS）。
-// 此前渲染层 app.js 硬编码 AUTH_MODES（trusted 文案已漂移，丢了「仍受 SandboxMode 约束」），
-// getModes() 在 AuthzServiceLike 已声明却从未接 IPC —— 半接线残留。此处补齐透传通道。
-ipcMain.handle('orchdesk:authz-get-modes', async () => {
-  if (!authzService?.getModes) return { modes: [], grantTools: [] };
-  try {
-    return {
-      modes: authzService.getModes(),
-      grantTools: authzService.getGrantTools?.() ?? ['*'],
-    };
-  } catch {
-    return { modes: [], grantTools: ['*'] };
-  }
-});
-ipcMain.handle('orchdesk:authz-get-audit', async () => {
-  if (!authzService) return [];
-  try { return authzService.getAuditLog(); } catch { return []; }
-});
 
-// ---------------------------------------------------------------------------
-// PRD FR-9：授权白名单（操作类型 + 路径白名单，可查看可撤销）
-// ---------------------------------------------------------------------------
-// 粒度三选一此前只实现了「单次」——每次写同一个文件都要重新点确认。
-// 这里补 session / permanent 两种记住粒度；持久化走 dsh-runtime 写穿落盘
-// （authz-grants.json），撤销立即生效并全部入审计。
-ipcMain.handle('orchdesk:authz-list-grants', async () => {
-  if (!authzService?.listGrants) return [];
-  try { return authzService.listGrants(); } catch { return []; }
-});
-
-ipcMain.handle('orchdesk:authz-grant', async (_e, input: unknown) => {
-  if (!authzService?.grant) return { ok: false, reason: '授权服务未加载' };
-  const res = authzService.grant(input);
-  if (res.ok) persistGrants();
-  else log('WARN', 'authz', `白名单规则被拒：${res.reason}`);
-  return { ...res, grants: authzService.listGrants?.() ?? [] };
-});
-
-ipcMain.handle('orchdesk:authz-revoke-grant', async (_e, id: string) => {
-  if (!authzService?.revoke) return { ok: false, reason: '授权服务未加载' };
-  const ok = authzService.revoke(String(id || ''));
-  if (ok) persistGrants();
-  return { ok, grants: authzService.listGrants?.() ?? [] };
-});
-
-ipcMain.handle('orchdesk:authz-revoke-all-grants', async () => {
-  if (!authzService?.revokeAll) return { ok: false, reason: '授权服务未加载' };
-  const revoked = authzService.revokeAll();
-  persistGrants();
-  return { ok: true, revoked, grants: authzService.listGrants?.() ?? [] };
-});
-
-/** 写穿落盘（白名单数量少、变更罕见，不走记忆那套 20s 轮询）。 */
-function persistGrants(): void {
-  try {
-    if (!persistGrantsNow()) log('WARN', 'authz', '授权白名单落盘失败（本次会话仍生效，重启后丢失）');
-  } catch (err) {
-    log('WARN', 'authz', `授权白名单落盘异常：${(err as Error).message}`);
-  }
-}
 
 // ---- TRACE 上报开关（TOKEN 加密内置于包内；用户仅可开关，默认开）----
 // enabled=false → dsh-runtime 装载 trace 时 repoUrl 置空 → 只缓冲不上传（观测照旧）。
@@ -1140,15 +1045,6 @@ ipcMain.handle(
   },
 );
 
-ipcMain.on('orchdesk:authz-submit-decision', (_e, id: string, outcome: string) => {
-  const pending = pendingApprovals.get(id);
-  if (!pending) return;
-  clearTimeout(pending.timer);
-  pendingApprovals.delete(id);
-  const allowed = ['allowed-once', 'rejected', 'cancelled', 'unavailable'];
-  pending.resolve(allowed.includes(outcome) ? outcome : 'unavailable'); // 归一化非法值 → unavailable
-});
-
 // ---------------------------------------------------------------------------
 // T-P4/T-P5 智能层 + 补偿 + 自进化桥
 // ----------------------------------------------------------------------------
@@ -1164,362 +1060,34 @@ function unavailable(reason: string): { ok: false; unavailable: true; reason: st
 }
 
 // ---- 分层记忆（memory 插件）----
-interface MemoryServiceLike {
-  getStats(): unknown;
-  dump(sessionId: string, msgs: unknown[], opts?: unknown): Promise<unknown>;
-  /** 语义召回（TF-IDF Top-K 余弦，同步）；插件 provide 的原始形态。 */
-  recall?(query: string, opts?: { domain?: string; k?: number }): unknown;
-  listDomain?(domain: string): unknown;
-  record?(domain: string, text: string, source: { origin: string }): unknown;
-  /**
-   * 晋升（异步：worker 出域要 await Director 过滤）。
-   * 返回 { ok, reason }；reason 形如 `promoted:worker->director` /
-   * `director-rejected:<原因>` / `brain-filter-unavailable` / `entry-not-found`。
-   */
-  promote?(id: string, from: string, to: string): Promise<{ ok: boolean; reason: string }>;
-  /** 注入 LLM 摘要实现（FR-10 seam；未注入时插件走抽取式兜底）。 */
-  setSummarize?(fn: (messages: unknown[]) => Promise<string>): void;
-}
-/** FR-10：摘要 seam 是否已由宿主注入（设置页据此显示当前摘要方式）。 */
-let memorySummarizeSeam = false;
 
-ipcMain.handle('orchdesk:memory-stats', () => {
-  const svc = getService<MemoryServiceLike>('memory');
-  return svc ? svc.getStats() : null;
-});
-/**
- * 当前摘要方式（可观测性）：seam 注入了 + 配置了模型才走 LLM，
- * 否则自动转储一律走抽取式兜底 —— 这个值就是判断依据，避免「以为在用
- * LLM 摘要，其实一直在兜底」这种无从发现的降级。
- */
-ipcMain.handle('orchdesk:memory-summarize-status', () => {
-  let providerName = '';
-  let model = '';
-  try {
-    const cfg = loadModelConfig();
-    const p = cfg.providers[0];
-    providerName = p?.name ? String(p.name) : '';
-    // 没有提供商就**不要**拿 cfg.defaultModel 顶上（默认是 'qwen3:14b'）——
-    // 那会让「一个模型都没配」显示成「正在用 qwen3:14b 做 LLM 摘要」，
-    // 恰恰是这个功能最需要避免的假象（用 mock 网关跑真链路时抓到的）。
-    model = p ? String((p.models || [])[0] || cfg.defaultModel || '') : '';
-  } catch { /* 配置读取失败按「未配置」处理，不阻断设置页渲染 */ }
-  const ready = memorySummarizeSeam && !!model;
-  return { seam: memorySummarizeSeam, provider: providerName, model, mode: ready ? 'llm' : 'extractive' };
-});
 
-// ---------------------------------------------------------------------------
-// PRD FR-10：分层记忆晋升（第十四个死挂点）
-// ---------------------------------------------------------------------------
-// 插件里 promote() 的实现是完整的 —— worker→director 走 brain 过滤、fail-closed、
-// 默认拒绝，全都写好了。但全项目**零调用方**：没有任何代码、没有任何按钮调用它。
-// 后果是 Worker 域的条目进来就出不去，四域实际退化为「global 域 + 三个摆设」，
-// PRD 那句「Worker 输出须经 Director 过滤才能晋升上层」等于没落地。
-//
-// 这里补的是调用链（桥），不是能力本身：
-//   - 单条晋升：用户在设置页点，方向任意，worker 出域必过 Director 过滤。
-//   - 批量晋升：一次性把 worker 域的结论过一遍 Director（见 PROMOTE_BATCH_MAX 注释）。
-//   - 晋升审计：成功与失败都记，写穿落盘（PRD「须显式操作并写审计」）。
-// ---------------------------------------------------------------------------
 
-let promotionLog: PromotionEntry[] = [];
 
-function promotionFile(): string {
-  return path.join(dataDir(), DATA_FILE_NAMES.promotions);
-}
 
-/** 启动装载：坏文件 / 缺文件 → 空审计（与沙箱日志同策略，不猜内容）。 */
-function loadPromotionLog(): number {
-  try {
-    promotionLog = normalizePromotionLog(JSON.parse(fs.readFileSync(promotionFile(), 'utf-8')));
-  } catch {
-    promotionLog = [];
-  }
-  return promotionLog.length;
-}
-
-/** 写穿落盘（与沙箱日志同节奏）。落盘失败只 WARN —— 审计不是安全门，
- *  绝不能因为记不下来就回滚已经完成的晋升（那样 UI 会显示失败但实际已生效）。 */
-function persistPromotionLog(): boolean {
-  try {
-    const file = promotionFile();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(promotionLog, null, 2), 'utf-8');
-    return true;
-  } catch (err) {
-    log('WARN', 'memory', `晋升审计落盘失败（不影响晋升结果）: ${(err as Error).message}`);
-    return false;
-  }
-}
-
-/** 取条目正文做审计摘要。取不到留空 —— 预览缺失不该让审计整条丢掉。 */
-function promotionPreview(svc: MemoryServiceLike | null, domain: string, id: string): string {
-  try {
-    const list = (svc?.listDomain?.(domain) as Array<{ id?: string; text?: string }> | undefined) || [];
-    const hit = list.find((e) => e && e.id === id);
-    return String(hit?.text || '');
-  } catch {
-    return '';
-  }
-}
-
-/** 记一条晋升审计（成功与失败都记：被拦下的晋升比成功的更有追溯价值）。 */
-function recordPromotion(input: {
-  from: string;
-  to: string;
-  memoryId: string;
-  preview: string;
-  ok: boolean;
-  reason: string;
-  actor: 'user' | 'auto';
-}): void {
-  if (!isMemoryDomain(input.from) || !isMemoryDomain(input.to)) return;
-  const before = promotionLog.length;
-  promotionLog = appendPromotionLog(promotionLog, { ...input, ts: Date.now() });
-  if (promotionLog.length !== before) {
-    persistPromotionLog();
-    log('INFO', 'memory', `记忆晋升${input.ok ? '成功' : '被拦'}：${input.from}→${input.to} · ${input.reason}（${input.actor}）`);
-  }
-}
-
-/** 列出某域条目（渲染层展示用；正文字段原样透传，截断由 UI 决定）。 */
-ipcMain.handle('orchdesk:memory-list', async (_e, domain: string) => {
-  const svc = getService<MemoryServiceLike>('memory');
-  if (!svc?.listDomain) return null;
-  if (!isMemoryDomain(domain)) return null;
-  try {
-    const list = (svc.listDomain(domain) as Array<unknown> | undefined) || [];
-    return list.map((e) => {
-      const r = e as { id?: string; text?: string; source?: { origin?: string; agent?: string }; createdAt?: number };
-      return {
-        id: String(r.id || ''),
-        text: String(r.text || ''),
-        origin: String(r.source?.origin || ''),
-        agent: String(r.source?.agent || ''),
-        createdAt: Number(r.createdAt) || 0,
-      };
-    });
-  } catch {
-    return null;
-  }
-});
-
-/** 单条晋升。domain 非法 / 服务缺失 → 拒绝且不入审计（参数错误不值得留痕）。 */
-ipcMain.handle('orchdesk:memory-promote', async (_e, input: unknown) => {
-  const r = (input || {}) as { id?: string; from?: string; to?: string };
-  const svc = getService<MemoryServiceLike>('memory');
-  if (!svc?.promote) return { ok: false, reason: 'memory-service-unavailable' };
-  if (!isMemoryDomain(r.from) || !isMemoryDomain(r.to)) return { ok: false, reason: 'bad-domain' };
-  const id = String(r.id || '').trim();
-  if (!id) return { ok: false, reason: 'bad-id' };
-
-  const preview = promotionPreview(svc, r.from, id);
-  let result: { ok: boolean; reason: string };
-  try {
-    result = await svc.promote(id, r.from, r.to);
-  } catch (err) {
-    result = { ok: false, reason: `error:${(err as Error).message}` };
-  }
-  recordPromotion({
-    from: r.from, to: r.to, memoryId: id, preview,
-    ok: result.ok, reason: result.reason, actor: 'user',
-  });
-  return result;
-});
-
-/**
- * 批量晋升 worker 域 → director（自动通道：每条都要过 Director 过滤）。
- *
- * 为什么设上限：promote 是异步的，worker 出域要 await brain 过滤（默认 5s 超时）。
- * worker 域理论上限 200 条，不设上限最坏情况是 UI 卡死十几分钟且无法中途取消。
- * 一次处理 PROMOTE_BATCH_MAX 条（按时间正序，先处理最早的），剩下的报 remaining，
- * 用户想继续再点一次 —— 宁可多按几下，也不要一个点不动的按钮。
- */
-const PROMOTE_BATCH_MAX = 20;
-
-ipcMain.handle('orchdesk:memory-promote-worker', async (_e, input: unknown) => {
-  const r = (input || {}) as { to?: string };
-  const svc = getService<MemoryServiceLike>('memory');
-  if (!svc?.promote || !svc?.listDomain) return { ok: false, reason: 'memory-service-unavailable' };
-  const to = isMemoryDomain(r.to) ? r.to : 'director';
-  const list = ((svc.listDomain('worker') as Array<{ id?: string; text?: string; createdAt?: number }> | undefined) || [])
-    .filter((e) => e && String(e.id || ''))
-    .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
-
-  const batch = list.slice(0, PROMOTE_BATCH_MAX);
-  const out = { ok: true, total: list.length, attempted: batch.length, promoted: 0, rejected: 0, remaining: Math.max(0, list.length - batch.length), reasons: [] as Array<{ id: string; ok: boolean; reason: string }> };
-  for (const item of batch) {
-    const id = String(item.id || '');
-    let result: { ok: boolean; reason: string };
-    try {
-      result = await svc.promote(id, 'worker', to);
-    } catch (err) {
-      result = { ok: false, reason: `error:${(err as Error).message}` };
-    }
-    if (result.ok) out.promoted++;
-    else out.rejected++;
-    out.reasons.push({ id, ok: result.ok, reason: result.reason });
-    recordPromotion({
-      from: 'worker', to, memoryId: id, preview: String(item.text || ''),
-      ok: result.ok, reason: result.reason, actor: 'auto',
-    });
-  }
-  return out;
-});
-
-/** 晋升审计可查（关键词 / 源域 / 目标域 / 成功失败 四维过滤）。 */
-ipcMain.handle('orchdesk:memory-promotions', async (_e, query: unknown) => {
-  const q = (query || {}) as PromotionLogQuery;
-  return {
-    entries: searchPromotionLog(promotionLog, q),
-    stats: promotionStats(promotionLog),
-    total: promotionLog.length,
-    max: PROMOTION_LOG_MAX,
-  };
-});
-
-/** 外链白名单：渲染层 <a href> 会导航整个窗口，必须走 shell.openExternal；且只放行 http/https。 */
-ipcMain.handle('orchdesk:open-external', async (_e, url: unknown) => {
-  const u = String(url || '');
-  if (!/^https?:\/\//i.test(u)) return { ok: false, reason: '仅允许 http/https 链接' };
-  try { await shell.openExternal(u); return { ok: true }; }
-  catch (err) { return { ok: false, reason: (err as Error).message }; }
-});
 
 // --- 面板 IPC：见 ipc-browser.ts / ipc-terminal.ts / ipc-file-panel.ts ---
 registerBrowserIpc(ipcMain, { dataDir, notify: sendToRenderer });
+// M2：授权 IPC（模式/白名单/审批应答）抽至 ipc-authz.ts——组合根只做编排。
+registerAuthzIpc(ipcMain, { getAuthz: () => authzService, sendToRenderer });
+// M2：记忆/提示词/插件能力 IPC 抽至独立模块——组合根只保留编排与注册。
+registerMemoryIpc(ipcMain, { dataDir, loadModelConfig });
+registerPromptIpc(ipcMain);
+registerPluginCapabilityIpc(ipcMain);
 registerTerminalIpc(ipcMain, { notify: sendToRenderer });
 registerFilePanelIpc(ipcMain);
 
-ipcMain.handle('orchdesk:memory-promotions-clear', async () => {  const cleared = promotionLog.length;
-  promotionLog = [];
-  persistPromotionLog();
-  return { ok: true, cleared };
-});
+
 
 registerConnectorIpc(ipcMain);
 registerMcpIpc(ipcMain);
 registerMarketIpc(ipcMain);
 
-// ---- 系统提示词库（prompt 插件）----
-interface PromptServiceLike {
-  list(): unknown;
-  get(id: string): unknown;
-  create(input: unknown): unknown;
-  update(id: string, patch: unknown): unknown;
-  remove(id: string): unknown;
-  mergeForAgent(agentId: string): unknown;
-}
-ipcMain.handle('orchdesk:prompt-list', () => {
-  const svc = getService<PromptServiceLike>('promptLib');
-  return svc ? svc.list() : [];
-});
-ipcMain.handle('orchdesk:prompt-merge', (_e, agentId: string) => {
-  const svc = getService<PromptServiceLike>('promptLib');
-  return svc ? svc.mergeForAgent(String(agentId || '')) : { sections: [], conflicts: [] };
-});
-ipcMain.handle('orchdesk:prompt-save', (_e, input: unknown) => {
-  const svc = getService<PromptServiceLike>('promptLib');
-  if (!svc) return unavailable('提示词库插件未接入');
-  try {
-    const doc = input as { id?: string } & Record<string, unknown>;
-    return doc.id ? svc.update(String(doc.id), doc) : svc.create(doc);
-  } catch (err) {
-    return { ok: false, reason: (err as Error).message };
-  }
-});
-ipcMain.handle('orchdesk:prompt-delete', (_e, id: string) => {
-  const svc = getService<PromptServiceLike>('promptLib');
-  if (!svc) return unavailable('提示词库插件未接入');
-  return svc.remove(String(id || ''));
-});
 
-// ---- 边界外补偿层（compensation 插件）----
-interface CompensationServiceLike {
-  classify(text: string): unknown;
-  requiresWithhold(category: string): unknown;
-  withhold(text: string): Promise<unknown> | unknown;
-  compensate(text: string, note?: string): unknown;
-  getAudit(): unknown;
-}
-ipcMain.handle('orchdesk:comp-withhold', async (_e, text: string) => {
-  const svc = getService<CompensationServiceLike>('compensation');
-  if (!svc) return unavailable('补偿层插件未接入');
-  // 契约修正（第九死挂点）：插件 withhold(text: string)，此前主进程包成 { text }
-  // 传给正则匹配 → 恒为 'other' →「不可撤销」警示条与二次确认从未触发。
-  return svc.withhold(String(text || ''));
-});
-ipcMain.handle('orchdesk:comp-compensate', (_e, text: string, note?: string) => {
-  const svc = getService<CompensationServiceLike>('compensation');
-  if (!svc) return unavailable('补偿层插件未接入');
-  // 契约修正：插件 compensate(text, note)，此前只收首参，note 被丢弃。
-  return svc.compensate(String(text || ''), note ? String(note) : undefined);
-});
-ipcMain.handle('orchdesk:comp-audit', () => {
-  const svc = getService<CompensationServiceLike>('compensation');
-  return svc ? svc.getAudit() : [];
-});
 
-// ---- 自进化（evolution 插件）----
-interface EvolutionServiceLike {
-  createTempPlugin(spec: unknown, opts?: unknown): Promise<unknown>;
-  list(): unknown;
-  disposeTempPlugin(id: string): Promise<unknown>;
-  getAudit(): unknown;
-}
-ipcMain.handle('orchdesk:evol-create', async (_e, spec: unknown, opts: unknown) => {
-  const svc = getService<EvolutionServiceLike>('evolution');
-  if (!svc) return unavailable('自进化插件未接入');
-  // BUG（全盘死挂点扫描）：原实现透传 opts（无 agent 字段）→ evolution 插件的
-  // requireConfirm=true 授权门（默认值）在「缺 agent 句柄」时恒返「授权门控未通过」，
-  // 设置页「新建临时插件」按钮恒失败，UI 却写着「创建后在此列出」。桌面宿主无 dsh
-  // Agent 句柄，但审批实际走 UI 弹窗（approval.request 不读 agent 字段，见 host-services
-  // 的 uiAnswerer 通道）——补最小占位即可让用户点击 → 真实审批弹窗 → 放行后创建。
-  const base = (opts && typeof opts === 'object' ? opts : {}) as Record<string, unknown>;
-  const merged = { ...base, agent: base.agent ?? { id: 'orchdesk-desktop', meta: { origin: 'ui' } } };
-  return svc.createTempPlugin(spec, merged);
-});
-ipcMain.handle('orchdesk:evol-list', () => {
-  const svc = getService<EvolutionServiceLike>('evolution');
-  return svc ? svc.list() : [];
-});
-ipcMain.handle('orchdesk:evol-dispose', async (_e, id: string) => {
-  const svc = getService<EvolutionServiceLike>('evolution');
-  if (!svc) return false;
-  return svc.disposeTempPlugin(String(id || ''));
-});
 
-// ---- 编排目录（multi 插件）：替换渲染层硬编码的 8 专家 + 3 团 ----
-interface OrchestrationServiceLike {
-  getCatalog(): unknown;
-  getDelegationTree(rootId?: string): unknown;
-  /** CEO→Director→Worker 三层编排（后台经 agentRunner 跑真实 LLM，耗时较长）。 */
-  composeTeam?(teamId: string, task: string): Promise<unknown>;
-}
-ipcMain.handle('orchdesk:orchestration-catalog', () => {
-  const svc = getService<OrchestrationServiceLike>('orchestration');
-  return svc ? svc.getCatalog() : null;
-});
-ipcMain.handle('orchdesk:compose-team', async (_e, teamId: string, task: string) => {
-  const svc = getService<OrchestrationServiceLike>('orchestration');
-  if (!svc?.composeTeam) return { error: '编排服务未就绪（multi 插件未激活）' };
-  try {
-    return await svc.composeTeam(String(teamId || 'team-custom'), String(task || ''));
-  } catch (err) {
-    return { error: `编排失败: ${(err as Error).message}` };
-  }
-});
 
-// ---- 插件运行时状态（供设置页状态条与插件页展示真实数据，替代硬编码常量）----
-ipcMain.handle('orchdesk:plugin-runtime', () => {
-  const rt = getRuntime();
-  return {
-    ready: !!rt,
-    activeCount: rt?.activeCount ?? 0,
-    total: rt?.plugins.length ?? 0,
-    plugins: getPluginStates(),
-  };
-});
+
 
 // ---------------------------------------------------------------------------
 // T-P6-1 观雅集技能市场桥（复用 guanji SKILL API 约定；TOKEN 由用户配置）
@@ -1943,8 +1511,7 @@ app.whenReady().then(async () => {
 
   // PRD FR-10：晋升审计装载（同样在 migrateLegacyData 之后，审计随目录迁移）。
   try {
-    const n = loadPromotionLog();
-    if (n > 0) log('INFO', 'memory', `晋升审计已装载：${n} 条（${promotionFile()}）`);
+    const n = loadPromotionLog(dataDir);
   } catch (err) {
     console.warn('[orchdesk] 晋升审计装载失败:', (err as Error).message);
   }
