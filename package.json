@@ -13,8 +13,9 @@
     "desktop": "pnpm --filter @orchdesk/desktop run start",
     "build:desktop": "pnpm --filter @orchdesk/desktop run build",
     "lint": "pnpm -r run lint --if-present",
-    "typecheck": "pnpm -r run typecheck --if-present",
-    "test": "pnpm -r run test --if-present"
+    "typecheck": "pnpm --filter @orchdesk/desktop run typecheck",
+    "verify": "pnpm --filter @orchdesk/desktop run verify",
+    "test": "pnpm run verify"
   },
   "devDependencies": {
     "typescript": "^5.6.0"

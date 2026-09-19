@@ -1,23 +1,16 @@
-name: CI/CD - Build & Release
+name: CI
 
 on:
+  pull_request:
   push:
-    tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      bump:
-        description: 'Version bump type'
-        required: false
-        default: 'patch'
-        type: choice
-        options: [patch, minor, major]
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    name: Build & Release
+  verify:
+    name: Typecheck & Verify
     runs-on: windows-latest
 
     steps:
@@ -59,7 +52,6 @@ jobs:
           git checkout --force FETCH_HEAD
           cd ../..
 
-
       - name: Build dsh libs
         shell: bash
         run: |
@@ -90,77 +82,16 @@ jobs:
             (cd "$d" && npx tsc -p tsconfig.json)
           done
 
-      - name: Extract version from tag
-        id: version
-        shell: bash
-        run: |
-          TAG=${GITHUB_REF_NAME#refs/tags/}
-          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
-            TAG="v$(node -e "console.log(require('./apps/desktop/package.json').version)")"
-          fi
-          VERSION=${TAG#v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Bump version in package.json
-        shell: bash
-        run: |
-          cd apps/desktop
-          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version=process.argv[1];fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')" "${{ steps.version.outputs.version }}"
-
-      # BUG-W04：conventional-changelog 链路坏（git-raw-commits 无 -hash- 分隔符 → 全历史被吞）。
-      # 用零依赖自研脚本；--from 取 HEAD 前最近 tag（HEAD 本身就是本次 tag，默认取会得到空区间）。
-      - name: Update CHANGELOG.md
-        shell: bash
-        run: |
-          FROM_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -n "$FROM_TAG" ]; then
-            node scripts/changelog.mjs --from "$FROM_TAG" --version "${{ steps.version.outputs.version }}" --write
-          else
-            echo "（无更早 tag，跳过 changelog 生成）"
-          fi
-
       - name: Build Electron (TypeScript)
         run: |
           cd apps/desktop
           npx tsc -p tsconfig.json
 
-      # 物化 dsh 包 + 插件产物进 apps/desktop（asar 可解析的实路径），必须在 electron-builder 前跑。
-      - name: Vendor dsh runtime & plugins
+      # e2e-fix-verify 需要本机 Chromium。
+      - name: Install Playwright Chromium
         run: |
           cd apps/desktop
-          node scripts/vendor-dsh.cjs
+          npx playwright install chromium
 
-      # electron-builder 认 GH_TOKEN（不认 GITHUB_TOKEN）。
-      # TRACE TOKEN 不进 CI：无内置文件时应用安全降级为「只缓冲不上传」。
-      - name: Package (electron-builder)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd apps/desktop
-          npx electron-builder --win nsis portable --publish always
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build
-          path: apps/desktop/release/*
-          retention-days: 30
-
-      - name: Generate Release Notes
-        id: notes
-        shell: bash
-        run: |
-          cd apps/desktop
-          if [ -f CHANGELOG.md ]; then
-            HEADER="## [Unreleased]\n\n"
-            NOTES=$(sed -n "/## \[${{ steps.version.outputs.version }}\]/,/## \[/p" CHANGELOG.md | sed '$d' | tail -n +2)
-            if [ -z "$NOTES" ]; then
-              NOTES="Version ${{ steps.version.outputs.version }}"
-            fi
-            echo "notes<<EOF" >> $GITHUB_OUTPUT
-            echo "$NOTES" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
-          echo "notes=Version ${{ steps.version.outputs.version }}" >> $GITHUB_OUTPUT
+      - name: Verify
+        run: pnpm --filter @orchdesk/desktop run verify
