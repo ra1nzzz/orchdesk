@@ -222,6 +222,8 @@
       loadSessions: () => Promise.resolve([]),
       persistSessions: (arr) => Promise.resolve({ ok: false, reason: '未连接主进程' }),
       runAgentTurn: (sessionId, text, opts) => Promise.resolve({ text: '未连接主进程运行时，无法调用模型。请在设置中配置模型提供商。', intent: 'CONFIRM' }),
+      abortAgentTurn: () => Promise.resolve({ ok: false, reason: '未连接主进程' }),
+      onAgentDelta: () => () => {},
       // 授权
       getAuthMode: () => Promise.resolve({ mode: 'default' }),
       setAuthMode: () => Promise.resolve({ ok: false }),
@@ -323,6 +325,8 @@
     feedback: new Set(), authMode: 'default',
     // 思考链展开态（本轮 UI 重构）：key = `${sid}|${msg.t}`，存已展开「思考中」详情的消息。
     thinkExpanded: new Set(),
+    /** 进行中的模型回合 sessionId；非空时 composer 显示「停止」。 */
+    turnBusy: null,
     authLevels: [], authAudit: [],
     // ④M-1：授权模式卡 / 白名单工具下拉数据化（canonical = authz 插件 AUTHZ_MODES / GRANT_TOOLS）
     authModes: [], grantTools: [],
@@ -937,14 +941,16 @@
       const liveSteps = (sid && Array.isArray(state.toolSteps[sid]) && state.toolSteps[sid].length)
         ? state.toolSteps[sid]
         : null;
+      const streamed = String(raw || '');
+      const streamHtml = streamed ? `<div class="stream-partial">${esc(streamed)}</div>` : '';
       if (!liveSteps) {
-        txt = '<span class="faint">思考中…</span>';
+        txt = streamHtml ? streamHtml + '<span class="faint">生成中…</span>' : '<span class="faint">思考中…</span>';
       } else {
         // 本轮 UI 重构：思考链默认折叠（只显示最近一步，不让工具流刷屏），
         // 右侧箭头可展开/收起完整明细。key 用 sid|t 唯一定位这条 typing 消息。
         const key = `${sid}|${m.t}`;
         const open = state.thinkExpanded.has(key);
-        txt = `<div class="think-head"><span class="faint">思考中 · 正在执行 ${liveSteps.length} 个工具…</span>`
+        txt = streamHtml + `<div class="think-head"><span class="faint">思考中 · 正在执行 ${liveSteps.length} 个工具…</span>`
           + `<button class="think-toggle${open ? ' open' : ''}" data-action="think-toggle" data-k="${esc(key)}"`
           + ` title="${open ? '收起' : '展开'}思考链详情" aria-expanded="${open}">${ic('chevDown', 13)}</button></div>`
           + (open
@@ -1386,6 +1392,15 @@
       </div></div>`;
   }
 
+  function buildMsgListHtml(s) {
+    const fork = FORK ? FORK.normalizeFork(s.fork) : null;
+    const msgs = s.msgs || [];
+    const atTail = !!fork && fork.atIndex >= msgs.length;
+    return msgs
+      .map((m, i) => (fork && i === fork.atIndex ? renderForkNode(fork, atTail) : '') + renderMsg(m, s.id))
+      .join('') + (atTail ? renderForkNode(fork, true) : '');
+  }
+
   const VIEWS = {};
   VIEWS.session = {
     side() { return renderSideSession(); },
@@ -1405,11 +1420,7 @@
 
       // 血缘提示 + 消息流中的分叉点节点标记（FR-6）
       const fork = FORK ? FORK.normalizeFork(s.fork) : null;
-      const msgs = s.msgs || [];
-      const atTail = !!fork && fork.atIndex >= msgs.length;
-      const msgHtml = msgs
-        .map((m, i) => (fork && i === fork.atIndex ? renderForkNode(fork, atTail) : '') + renderMsg(m, s.id))
-        .join('') + (atTail ? renderForkNode(fork, true) : '');
+      const msgHtml = buildMsgListHtml(s);
 
       return `<div style="flex:1;overflow-y:auto" id="msgScroll">
         <div style="max-width:760px;margin:0 auto;padding:18px 16px 10px">
@@ -1423,7 +1434,7 @@
           </div>
           ${fork ? `<div class="fork-origin">${ic('fork', 13)} 分支自 <span class="mono">#${esc(fork.from)}</span>${fork.fromTitle ? `「${esc(fork.fromTitle)}」` : ''} · 继承前 ${fork.atIndex} 条 · ${esc(new Date(fork.at).toLocaleString('zh-CN'))}</div>` : ''}
           <div id="confirmZone"></div>
-          ${msgHtml}
+          <div id="msgList">${msgHtml}</div>
         </div></div>
       ${renderComposer(s)}`;
     },
@@ -2290,6 +2301,15 @@
     }
   }
 
+  function updateMsgList() {
+    const list = $('#msgList');
+    const s = (state.page === 'session' && state.sel) ? state.sessions[state.sel] : null;
+    if (!list || !s) { render(); return; }
+    list.innerHTML = buildMsgListHtml(s);
+    hardenActions(list);
+    const sc = $('#msgScroll'); if (sc) sc.scrollTop = sc.scrollHeight;
+  }
+
   /* ---------- P1 键盘可达（/harden，2026-09-06） ----------
    * 在委托层为 div[data-action] 统一补无障碍属性，取代「逐个补」——
    * 逐个补会在每次新增交互元素时漏一个（此前全项目 tabindex=0 即是证据）。
@@ -2460,10 +2480,39 @@
     render();
   }
 
+  function patchComposerSend(sending) {
+    const btn = document.querySelector('.composer .right [data-action="send"], .composer .right [data-action="abort-send"]');
+    if (!btn) return;
+    if (sending) {
+      btn.setAttribute('data-action', 'abort-send');
+      btn.textContent = '停止';
+      btn.classList.remove('primary');
+    } else {
+      btn.setAttribute('data-action', 'send');
+      btn.textContent = '发送';
+      btn.classList.add('primary');
+    }
+  }
+
+  async function doAbortSend() {
+    const sid = state.turnBusy;
+    if (!sid) return;
+    if (typeof bridge.abortAgentTurn !== 'function') {
+      toast('当前运行时不支持停止', 'warn');
+      return;
+    }
+    try {
+      await bridge.abortAgentTurn(sid);
+    } catch (err) {
+      toast('停止失败', 'danger');
+    }
+  }
+
   async function doSend() {
     const c = $('#composer'); if (!c) return;
     const text = c.value.trim();
     if (!text) { toast('输入为空', 'warn'); return; }
+    if (state.turnBusy) { toast('请先停止当前生成，或等待完成', 'warn'); return; }
     if (state.selectedModels.length === 0) {
       // 配置可能在「设置 → 模型」刚更新过，或上一次 getModelConfig 请求失败，
       // 发送前再自动选择一次；仍为空才拦截（并给出可达的路径，而非死胡同）。
@@ -2483,7 +2532,10 @@
     // runAgentTurn 返回的 tools/steps 静态写入该条 agent 消息（renderMsg 的「N 步 · M 个
     // 动作」展示形态随即生效）。
     state.toolSteps[s.id] = [];
-    render();
+    state.turnBusy = s.id;
+    c.value = '';
+    updateMsgList();
+    patchComposerSend(true);
     try {
       const res = await bridge.runAgentTurn(s.id, text, { models: state.selectedModels, thinkLevel: state.thinkLevel });
       const tsteps = (res && Array.isArray(res.tools) && res.tools.length) ? res.tools : undefined;
@@ -2492,15 +2544,21 @@
         tools: tsteps,
         steps: tsteps ? tsteps.length : (Number(res && res.steps) || undefined),
       };
-      touch(s); persist(); render();
+      touch(s); persist();
+      updateMsgList();
+      render(); // 回合结束刷新侧栏标题/待办；工具步骤过程中不走全页 render
       // typing 消息已被静态消息替换（tools 已随消息落库展示），live 轨迹不再需要
       delete state.toolSteps[s.id];
-      toast(`已入会话日志 · ${state.selectedModels.length} 模型 · 思维 ${thinkLabel(state.thinkLevel)}`, 'ok');
+      if (res && res.aborted) toast('已停止生成', 'warn');
+      else toast(`已入会话日志 · ${state.selectedModels.length} 模型 · 思维 ${thinkLabel(state.thinkLevel)}`, 'ok');
     } catch (err) {
       s.msgs[typingIdx] = { r: 'agent', t: nowTime(), x: '（模型回合失败：' + (err && err.message ? err.message : err) + '）' };
       delete state.toolSteps[s.id];
-      render();
+      updateMsgList();
       toast('模型回合失败', 'danger');
+    } finally {
+      if (state.turnBusy === s.id) state.turnBusy = null;
+      patchComposerSend(false);
     }
   }
 
@@ -4024,6 +4082,7 @@
 
       /* composer */
       case 'send': doSend(); break;
+      case 'abort-send': doAbortSend(); break;
       case 'skill-add': openSkillPicker(); break;
       case 'expert-add': openExpertPicker(); break;
       case 'skill-attach': toast(`已加载技能「${el.dataset.n}」（注册为 effect，离开会话即卸载）`, 'ok'); closeModal(); break;
@@ -5277,13 +5336,13 @@
     // 订阅工具执行步骤（此前主进程发 orchdesk:tool-step 但无人订阅 → 步骤条永远为空）
     try {
       if (typeof bridge.onToolStep === 'function') {
-        // 渲染节流：文本兜底模式可一次解析多个工具连发 running/done，若每事件都全量
-        // render()，毫秒窗口内会触发 2N 次整页重建。合并到 ≤150ms 一次——工具步骤通常
-        // 秒级间隔不受影响，连发窗口期 typing 实时行仍平滑刷新。
-        let toolRenderTimer = null;
-        const scheduleRender = () => {
-          if (toolRenderTimer) return;
-          toolRenderTimer = setTimeout(() => { toolRenderTimer = null; render(); }, 150);
+        // 渲染节流：文本兜底模式可一次解析多个工具连发 running/done，若每事件都刷新
+        // 消息列表，毫秒窗口内会触发 2N 次 DOM 替换。合并到 ≤150ms 一次——只增量
+        // 更新 #msgList，不整页 render（避免重建 composer / 侧栏）。
+        let liveRenderTimer = null;
+        const scheduleLiveRender = () => {
+          if (liveRenderTimer) return;
+          liveRenderTimer = setTimeout(() => { liveRenderTimer = null; updateMsgList(); }, 150);
         };
         bridge.onToolStep((step) => {
           const s = state.sessions[step.sessionId];
@@ -5297,8 +5356,18 @@
             if (rec) { rec.ph = step.ph; rec.result = step.result || ''; }
             else list.push({ n: step.name, ph: step.ph, result: step.result || '' });
           }
-          if (state.sel === step.sessionId) scheduleRender();
+          if (state.sel === step.sessionId) scheduleLiveRender();
         });
+        if (typeof bridge.onAgentDelta === 'function') {
+          bridge.onAgentDelta((delta) => {
+            const s = state.sessions[delta && delta.sessionId];
+            if (!s || !delta || !delta.text) return;
+            const typing = [...s.msgs].reverse().find((m) => (m.r === 'agent' || m.role === 'agent') && m.typing);
+            if (!typing) return;
+            typing.x = (typing.x || '') + delta.text;
+            if (state.sel === delta.sessionId) scheduleLiveRender();
+          });
+        }
       }
     } catch (err) { console.warn('[init] 工具步骤订阅失败:', err); }
 
