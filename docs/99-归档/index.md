@@ -2,7 +2,7 @@
 id: orch-ach-001
 title: OrchDesk 归档索引
 status: canonical
-updated: 2026-08-17
+updated: 2026-09-18
 ---
 
 # 归档索引
@@ -47,3 +47,12 @@ OrchStar 是 OrchDesk 的前身（本地多 Agent 工作台，Node.js+Hono+SQLit
 ## D. 已关闭的决策/缺口
 
 （随项目推进，将已解决的 ADR 替代项、已修复的 BUG 从活跃页移入此处，保留裁决理由与日期。）
+
+## E. CHECKPOINT / current-state 减肥归档（2026-09-18）
+
+对外版本口径统一到桌面权威版本 `0.16.0` 时，从入口文档迁出的历史日记：
+
+| 文档 | 说明 |
+|---|---|
+| [CHECKPOINT 版本日记 v0.4–v0.15](CHECKPOINT-version-diary-0.4-0.15.md) | 从 CHECKPOINT 迁出的 v0.4.1 起超长版本日记 |
+| [current-state P0–P6 日记](current-state-P0-P6.md) | 从 current-state 迁出的 P0–P6 阶段日记与同页原载后续历史 |

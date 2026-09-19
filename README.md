@@ -2,58 +2,44 @@
 
 本地优先的多 Agent 编排桌面工作台（Electron + Node.js）。
 
-## 当前版本：v0.3.0
+当前版本：v0.16.0
 
-### 核心功能
+权威版本以 [`apps/desktop/package.json`](apps/desktop/package.json) 为准。
 
-- **模型调用管线**：统一 `callModel()` 入口，支持 Ollama 本地模型 + OpenAI 兼容 API
-- **Agent Runtime 引擎**：模型循环调用工具，支持 function-calling，默认最大 200 步迭代
-- **5 个内置工具**：`file_read`、`file_write`、`file_list`、`shell_command`、`web_fetch`
-- **模型管理**：多提供商配置（Ollama / OpenAI 兼容），选择持久化（localStorage），settings UI 滑块调节迭代上限
-- **会话管理**：项目/任务分组、会话归档/分叉/删除、右侧面板（待办/产物/文件/能力）
-  - 「能力」= 使用中的插件（`pluginRuntime` 真实装载）+ 技能（数据目录 `skills/*.skill` 真实扫描）+ MCP 连接
-- **版本治理**：conventional-changelog + bumpp + electron-updater（GitHub Releases）
+## 定位
 
-### 安装
+OrchDesk 把多 Agent 编排放进本地桌面：会话是一等公民，模型循环调用工具，插件 / 技能 / MCP 作为能力装入同一运行时。数据优先落在本机，不把云端当作默认后端。
 
-- Windows：GitHub Releases（NSIS Setup / portable）
+## 开发
 
-### 开发
+仓库使用 pnpm workspace，桌面应用在 `apps/desktop`。
 
 ```bash
-cd apps/desktop
 pnpm install
-pnpm run build:main   # TypeScript 编译
-pnpm run dist         # 构建 + electron-builder --publish never
+pnpm --filter @orchdesk/desktop run start
+pnpm --filter @orchdesk/desktop run build:main
+pnpm --filter @orchdesk/desktop run verify
 ```
 
-### E2E 测试
+| 命令 | 作用 |
+|------|------|
+| `start` | 编译主进程并启动 Electron |
+| `build:main` | 仅 `tsc` 编译主进程 |
+| `verify` | 桌面 verify 链（含 e2e / event-emit 等套件） |
 
-```bash
-cd apps/desktop
-node e2e-fix-verify.cjs   # Playwright 验证（29 项）
-```
+## 文档
 
-### 架构
+知识库入口：[docs/README.md](docs/README.md)
 
-```
-apps/desktop/
-├── main.ts              # Electron 主进程（IPC handlers、模型管线、工具执行）
-├── renderer/
-│   ├── index.html       # 入口 HTML
-│   ├── app.js           # 渲染层（~2100 行单文件，事件委托驱动）
-│   └── vendor/
-│       └── marked.min.js  # Markdown 渲染
-├── build/
-│   └── icon.png         # 应用图标
-├── package.json
-└── tsconfig.json
-```
+项目接续入口：[docs/00-项目/CHECKPOINT.md](docs/00-项目/CHECKPOINT.md)
 
-### 技术栈
+## 安装
 
-- **框架**：Electron 36
-- **语言**：TypeScript 5.6（主进程），JavaScript（渲染层）
-- **构建**：electron-builder 26（NSIS + portable）
-- **测试**：Playwright 1.62
-- **模型**：Ollama（本地） / OpenAI 兼容（远程 API）
+Windows 安装包与 portable 见 [GitHub Releases](https://github.com/ra1nzzz/orchdesk/releases)。
+
+## 技术栈
+
+- **壳**：Electron 36
+- **语言**：TypeScript（主进程），JavaScript（渲染层）
+- **包管理**：pnpm workspace
+- **打包**：electron-builder（NSIS + portable）
