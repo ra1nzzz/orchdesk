@@ -5,6 +5,7 @@
  */
 import type { IpcMain } from 'electron';
 import { getService, getRuntime, getPluginStates } from './dsh-runtime';
+import { log } from './logger';
 
 export interface CompensationServiceLike {
   classify(text: string): unknown;
@@ -36,14 +37,14 @@ export function registerPluginCapabilityIpc(ipc: IpcMain): void {
   // ---- 边界外补偿层（compensation 插件）----
   ipc.handle('orchdesk:comp-withhold', async (_e, text: string) => {
     const svc = getService<CompensationServiceLike>('compensation');
-    if (!svc) return unavailable('补偿层插件未接入');
+    if (!svc) { log('WARN', 'compensation', '补偿层插件未接入，外发预判不可用'); return unavailable('补偿层插件未接入'); }
     // 契约修正（第九死挂点）：插件 withhold(text: string)，此前主进程包成 { text }
     // 传给正则匹配 → 恒为 'other' →「不可撤销」警示条与二次确认从未触发。
     return svc.withhold(String(text || ''));
   });
   ipc.handle('orchdesk:comp-compensate', (_e, text: string, note?: string) => {
     const svc = getService<CompensationServiceLike>('compensation');
-    if (!svc) return unavailable('补偿层插件未接入');
+    if (!svc) { log('WARN', 'compensation', '补偿层插件未接入，补偿动作不可用'); return unavailable('补偿层插件未接入'); }
     // 契约修正：插件 compensate(text, note)，此前只收首参，note 被丢弃。
     return svc.compensate(String(text || ''), note ? String(note) : undefined);
   });
@@ -55,7 +56,7 @@ export function registerPluginCapabilityIpc(ipc: IpcMain): void {
   // ---- 自进化（evolution 插件）----
   ipc.handle('orchdesk:evol-create', async (_e, spec: unknown, opts: unknown) => {
     const svc = getService<EvolutionServiceLike>('evolution');
-    if (!svc) return unavailable('自进化插件未接入');
+    if (!svc) { log('WARN', 'evolution', '自进化插件未接入，创建被拒'); return unavailable('自进化插件未接入'); }
     // BUG（全盘死挂点扫描）：原实现透传 opts（无 agent 字段）→ evolution 插件的
     // requireConfirm=true 授权门（默认值）在「缺 agent 句柄」时恒返「授权门控未通过」，
     // 设置页「新建临时插件」按钮恒失败，UI 却写着「创建后在此列出」。桌面宿主无 dsh
@@ -86,6 +87,7 @@ export function registerPluginCapabilityIpc(ipc: IpcMain): void {
     try {
       return await svc.composeTeam(String(teamId || 'team-custom'), String(task || ''));
     } catch (err) {
+      log('WARN', 'orchestration', `编排失败: ${(err as Error).message}`);
       return { error: `编排失败: ${(err as Error).message}` };
     }
   });

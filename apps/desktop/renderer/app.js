@@ -2144,7 +2144,7 @@
             <button class="btn sm" style="margin-left:auto" data-action="mem-refresh" ${state.memory.busy ? 'disabled' : ''}>刷新</button>
           </div>
           <div class="faint" style="margin-bottom:8px;font-size:11.5px">${esc(MEM_DOMAIN_DESC[state.memory.domain])}</div>
-          ${state.memory.domain === 'worker' ? `<div class="row" style="margin-bottom:8px"><button class="btn sm primary" data-action="mem-promote-worker" ${(state.memory.busy || !state.memory.items.length) ? 'disabled' : ''}>批量晋升本域（逐条过 Director 过滤）</button><span class="faint" style="font-size:11px">一次最多 20 条，按时间正序</span></div>` : ''}
+          ${state.memory.domain === 'worker' ? `<div class="row" style="margin-bottom:8px"><button class="btn sm primary" data-action="mem-promote-worker" ${(state.memory.busy || !state.memory.items.length) ? 'disabled' : ''}>批量晋升本域（逐条过 Director 过滤）</button><span class="faint" style="font-size:11px">一次最多 ${state.memory.promoteBatchMax || 20} 条，按时间正序</span></div>` : ''}
           <div class="mem-list">
             ${state.memory.items.length ? state.memory.items.slice().sort((a, b) => Number(b.createdAt) - Number(a.createdAt)).map((e) => {
     const to = MEM_NEXT_DOMAIN[state.memory.domain];
@@ -4007,6 +4007,9 @@
   }
   async function act_quick_weekly(el, id, e) {
  {
+        // 审查修复（P0）：共体 case 抽取后作用域里的 `a`（= el.dataset.action）不再可见，
+        // 直接引用会抛 ReferenceError。按约定从 el.dataset.action 取本动作 key。
+        const key = el?.dataset?.action || '';
         const labels = {
           'quick-weekly': '周报总结', 'quick-debug': '报错修复', 'quick-ppt': 'PPT 制作',
           'quick-idle': '闲时任务', 'quick-refactor': '项目重构', 'quick-data': '数据分析',
@@ -4022,12 +4025,12 @@
           'quick-skills': '请帮我推荐适合当前项目的技能：',
           'quick-analyze': '请帮我分析当前项目的结构和代码质量：',
         };
-        const text = prompts[a] || '';
+        const text = prompts[key] || '';
         const inp = $('#homeComposer');
         if (inp) { inp.value = text; inp.dispatchEvent(new Event('input', { bubbles: true })); }
         const sendBtn = document.querySelector('[data-action="home-send"]');
         if (sendBtn) sendBtn.click();
-        toast(`已加载「${labels[a] || a}」模板`, 'ok');}
+        toast(`已加载「${labels[key] || key}」模板`, 'ok');}
   }
   async function act_home_create_proj(el, id, e) {
  {
@@ -4207,7 +4210,7 @@
  { const id = el.dataset.id; closeModal(); bridge.submitDecision(id, 'rejected'); toast('已拒绝该操作', 'danger');}
   }
   async function act_confirm_yes(el, id, e) {
- { const z = $('#confirmZone'); z.innerHTML = ''; toast(a === 'confirm-yes' ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', a === 'confirm-yes' ? 'ok' : 'danger'); return; }
+ { const z = $('#confirmZone'); if (z) z.innerHTML = ''; const yes = el?.dataset?.action === 'confirm-yes'; toast(yes ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', yes ? 'ok' : 'danger'); return; }
 
       /* 补偿层（T-P5-1） */
       /* 沙箱日志（PRD FR-8 可检索）：检索条件变更由 input/change 监听驱动，
@@ -4260,6 +4263,7 @@
         state.memory.busy = true; render();
         bridge.promoteWorkerDomain('director').then((r) => {
           state.memory.busy = false;
+          if (typeof r.max === 'number') state.memory.promoteBatchMax = r.max;
           if (!r || !r.ok) { toast(`批量晋升失败：${(r && r.reason) || '未知原因'}`, 'warn'); render(); return; }
           // 全部被拒不是失败 —— Director 就是干这个的。只报事实，不报情绪。
           toast(`已处理 ${r.attempted} 条：晋升 ${r.promoted} · 驳回 ${r.rejected}${r.remaining ? ` · 还剩 ${r.remaining} 条，可再点一次` : ''}`, r.promoted ? 'ok' : 'warn');

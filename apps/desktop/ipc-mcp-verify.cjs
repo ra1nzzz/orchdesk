@@ -118,6 +118,21 @@ const { check, summary } = createChecker();
     assert.strictEqual((await callTool(null, 'm2', '  ', {})).ok, false, '空 toolName 应拒');
   });
 
+  await check('M4 一致性：read-only 沙箱模式下 mcp-call-tool 被模式门拒绝（远端工具必有副作用）', async () => {
+    // 先存一条可配置（命令不存在 → 探测失败无妨，call-tool 在连接前就被模式门挡下）
+    const r = await save(null, { id: 'm-ro', name: 'RO 网关', command: 'node', args: [path.join(HOME, 'nope.js')], enabled: false });
+    assert.strictEqual(r.ok, true);
+    const rt = require('./dist/dsh-runtime.js');
+    rt.getService('sandboxPolicy')?.setSandboxMode({}, 'read-only');
+    const out = await callTool(null, 'm-ro', 'any-tool', { x: 1 });
+    assert.strictEqual(out.ok, false, 'read-only 下应被拒: ' + JSON.stringify(out));
+    assert.ok(String(out.reason).includes('只读'), '拒绝原因应说明只读模式，实际: ' + JSON.stringify(out));
+    rt.getService('sandboxPolicy')?.setSandboxMode({}, 'workspace-write');
+    // 恢复后同一调用走到「配置存在但连不上」的业务错误（而非模式拒绝），证明门已让路
+    const out2 = await callTool(null, 'm-ro', 'any-tool', { x: 1 });
+    assert.ok(!String(out2.reason || '').includes('只读'), '恢复后不应再被模式门拒绝: ' + JSON.stringify(out2));
+  });
+
   const ok = summary();
   try { fs.rmSync(HOME, { recursive: true, force: true }); } catch { /* ignore */ }
   if (!ok) process.exit(1);

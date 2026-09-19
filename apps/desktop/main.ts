@@ -38,6 +38,7 @@ import { emitCanonicalEvent, setEnvelopeConsumer } from './event-emit';
 import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, startupMarketPlugins } from './dsh-runtime';
 import { registerAuthzIpc, pendingApprovals, nextApprovalId, type AuthzServiceLike, type GrantRuleLike } from './ipc-authz';
 import { registerMemoryIpc, loadPromotionLog, setMemorySummarizeSeam, type MemoryServiceLike } from './ipc-memory';
+import { APPROVAL_TIMEOUT_MS } from './host-services';
 import { registerPromptIpc } from './ipc-prompt';
 import { registerPluginCapabilityIpc, type CompensationServiceLike } from './ipc-plugins';
 import { getHostServices } from './host-services';
@@ -51,14 +52,6 @@ import {
   type SandboxLogQuery,
 } from './sandbox-log';
 import {
-  normalizePromotionLog,
-  appendPromotionLog,
-  searchPromotionLog,
-  promotionStats,
-  PROMOTION_LOG_MAX,
-  isMemoryDomain,
-  type PromotionEntry,
-  type PromotionLogQuery,
 } from './memory-promotion';
 import {
   buildSummarizeMessages,
@@ -859,7 +852,7 @@ async function bootRuntime(): Promise<void> {
           const timer = setTimeout(() => {
             pendingApprovals.delete(id);
             resolve('unavailable'); // fail-closed：超时不开门
-          }, 120000);
+          }, APPROVAL_TIMEOUT_MS);
           pendingApprovals.set(id, { resolve, timer });
           bootDesktop.mainWindow?.webContents.send('orchdesk:authz-approval-request', {
             id,
@@ -988,8 +981,11 @@ ipcMain.handle('orchdesk:sandbox-get', () => {
 ipcMain.handle('orchdesk:sandbox-set-network-allow', (_e, list: string[]) => {
   const policy = getHostServices()?.sandboxPolicy;
   if (!policy?.setNetworkAllow) return { ok: false, reason: '沙箱服务未就绪' };
-  policy.setNetworkAllow(Array.isArray(list) ? list : []);
-  const next = policy.getNetworkAllow ? policy.getNetworkAllow() : ['*'];
+  // 收紧/放宽白名单是安全相关变更：落盘失败必须让用户看到（否则「删了域名但没
+  // 落盘」= 内存收紧/磁盘旧宽名单双源，重启后悄悄失效——fail-open 窗口）。
+  const saved = policy.setNetworkAllow(Array.isArray(list) ? list : []);
+  if (!saved) return { ok: false, reason: '白名单已在本会话生效，但落盘失败（重启后恢复旧配置）' };
+  const next = policy.getNetworkAllow ? policy.getNetworkAllow() : [];
   // 放宽网络白名单是安全相关配置变更 → 入沙箱日志，事后可追溯「什么时候放开了哪些域名」。
   recordSandbox({
     tool: 'sandbox.network',
@@ -1077,14 +1073,9 @@ registerPluginCapabilityIpc(ipcMain);
 registerTerminalIpc(ipcMain, { notify: sendToRenderer });
 registerFilePanelIpc(ipcMain);
 
-
-
 registerConnectorIpc(ipcMain);
 registerMcpIpc(ipcMain);
 registerMarketIpc(ipcMain);
-
-
-
 
 
 
@@ -1328,7 +1319,9 @@ ipcMain.handle('orchdesk:pick-folder', async () => {
 // ---------------------------------------------------------------------------
 // BUG-013 方案 B：数据导出 / 导入（跨机器迁移 + 手动备份，单文件 JSON）
 // ----------------------------------------------------------------------------
-// 导出 = 数据目录内全部业务数据打包为一个可读 JSON（kind: orchdesk-backup）。
+// 导出 = BACKUP_SECTIONS 列出的业务数据打包为一个可读 JSON（kind: orchdesk-backup）。
+// 注意：usage / connectors / mcp / sandbox-log / promotions / desktop 等运行时数据不在导出范围
+// （迁移它们请直接复制数据目录，见设置页「数据目录 → 打开目录」）。
 // 导入 = 与启动迁移同一套「只补齐不覆盖」合并策略：
 //   sessions/models 走 merge-json（同 id 保留较新），guanji/hub 凭据类走
 //   copy-if-absent（不深合并，避免破坏密文结构），projects 按 id 补齐。
@@ -1511,7 +1504,7 @@ app.whenReady().then(async () => {
 
   // PRD FR-10：晋升审计装载（同样在 migrateLegacyData 之后，审计随目录迁移）。
   try {
-    const n = loadPromotionLog(dataDir);
+    loadPromotionLog(dataDir);
   } catch (err) {
     console.warn('[orchdesk] 晋升审计装载失败:', (err as Error).message);
   }

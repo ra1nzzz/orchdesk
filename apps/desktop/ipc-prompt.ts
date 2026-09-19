@@ -5,6 +5,7 @@
  */
 import type { IpcMain } from 'electron';
 import { getService } from './dsh-runtime';
+import { log } from './logger';
 
 interface PromptServiceLike {
   list(): unknown;
@@ -30,7 +31,7 @@ export function registerPromptIpc(ipc: IpcMain): void {
   });
   ipc.handle('orchdesk:prompt-save', (_e, input: unknown) => {
     const svc = getService<PromptServiceLike>('promptLib');
-    if (!svc) return unavailable('提示词库插件未接入');
+    if (!svc) { log('WARN', 'prompt', '提示词库插件未接入，保存被拒'); return unavailable('提示词库插件未接入'); }
     try {
       const doc = input as { id?: string } & Record<string, unknown>;
       return doc.id ? svc.update(String(doc.id), doc) : svc.create(doc);
@@ -40,7 +41,7 @@ export function registerPromptIpc(ipc: IpcMain): void {
   });
   ipc.handle('orchdesk:prompt-delete', (_e, id: string) => {
     const svc = getService<PromptServiceLike>('promptLib');
-    if (!svc) return unavailable('提示词库插件未接入');
+    if (!svc) { log('WARN', 'prompt', '提示词库插件未接入，删除被拒'); return unavailable('提示词库插件未接入'); }
     return svc.remove(String(id || ''));
   });
 }

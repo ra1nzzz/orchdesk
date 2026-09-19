@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { IpcMain } from 'electron';
 import { encryptSecret, decryptSecret } from './credentials';
 import { DATA_FILE_NAMES } from './data-dir';
+import { getHostServices } from './host-services';
 import { log } from './logger';
 import {
   callMcpTool,
@@ -220,6 +221,15 @@ export function registerMcpIpc(ipc: IpcMain): void {
     const cfg = mcpStore.servers[id];
     if (!cfg) return { ok: false, reason: '配置不存在' };
     if (typeof toolName !== 'string' || !toolName.trim()) return { ok: false, reason: 'toolName 为空' };
+    // M4 一致性（审查 P1）：MCP 工具必然有副作用（建 issue/发消息/写文件——MCP 的价值
+    // 就在「做事」），read-only 沙箱模式下不得经 IPC 触发远端变更。
+    // 它不经 executeTool（TOOL_DEFS 无 mcp-* 定义），denyIfReadOnly 管不到，故在此设门。
+    try {
+      const mode = getHostServices()?.sandboxPolicy?.resolve?.()?.mode;
+      if (mode === 'read-only') {
+        return { ok: false, reason: '沙箱为只读模式（read-only），MCP 工具调用被拒绝（可先用 mcp-probe 查看工具清单）' };
+      }
+    } catch { /* 策略不可用时放行由后续审批/授权链路兜底 */ }
     return callMcpTool(decryptMcpConfig(cfg), toolName.trim(), args);
   });
 }

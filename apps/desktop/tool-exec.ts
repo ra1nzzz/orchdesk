@@ -147,12 +147,15 @@ const MUTATING_TOOLS: Record<string, SandboxLogEntry['kind']> = {
 };
 
 /** M4：写/变更类工具的统一模式门（在授权门之前——模式不对就没必要问用户）。 */
-function denyIfReadOnly(name: string, sessionCtx?: { sessionId?: string }): ToolResult | null {
-  const kind = MUTATING_TOOLS[name];
+function denyIfReadOnly(tool: ToolCall, sessionCtx?: { sessionId?: string }): ToolResult | null {
+  const kind = MUTATING_TOOLS[tool.name];
   if (!kind) return null;
   if (currentSandboxMode(sessionCtx?.sessionId) !== 'read-only') return null;
-  recordSandbox({ tool: name, kind, target: name, decision: 'denied', reason: '沙箱为只读模式（read-only）', sessionId: sessionCtx?.sessionId });
-  return { name, result: '', error: '沙箱为只读模式（read-only），变更类操作被拒绝。可在设置页「沙箱」切换为工作区可写。' };
+  // 审计要能回答「想改什么被拒」：记具体目标（路径/命令/选择器），不只是工具名。
+  const args = (tool.arguments || {}) as Record<string, unknown>;
+  const target = String(args.path || args.command || args.selector || args.expression || args.url || tool.name).slice(0, 200);
+  recordSandbox({ tool: tool.name, kind, target, decision: 'denied', reason: '沙箱为只读模式（read-only）', sessionId: sessionCtx?.sessionId });
+  return { name: tool.name, result: '', error: '沙箱为只读模式（read-only），变更类操作被拒绝。可在设置页「沙箱」切换为工作区可写。' };
 }
 
 /** 安全沙箱：读操作路径白名单（home/userData/temp/数据目录/会话绑定工作区）。
@@ -363,7 +366,7 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
   const cwd = sessionCwd(sessionCtx?.sessionId);
   try {
     // M4：变更类工具先过沙箱模式门（read-only 直接拒，不打扰授权门）。
-    const modeDenied = denyIfReadOnly(name, sessionCtx);
+    const modeDenied = denyIfReadOnly(tool, sessionCtx);
     if (modeDenied) return modeDenied;
     switch (name) {
       case 'file_read': {
@@ -562,6 +565,7 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
           if ([301, 302, 303, 307, 308].includes(res.status)) {
             // 跳数内拿到 3xx 但无 location：视同不可跟随，显式报错而非把 3xx 空 body 当结果。
             recordSandbox({ tool: name, kind: 'network', target: current, decision: 'error', reason: '重定向响应无 location', sessionId: sid });
+            void res.body?.cancel().catch(() => { /* body 可能已空 */ });
             return { name, result: '', error: `服务器返回 ${res.status} 但无 location 头，无法跟随` };
           }
           // 响应体积护栏：承诺只回传 WEB_FETCH_RESULT_MAX（30KB），但不能因此整读超大响应进内存（防 OOM / 主进程阻塞）。
@@ -570,6 +574,7 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
           const declared = Number(res.headers.get('content-length') || '0');
           if (declared > MAX_FETCH_BYTES) {
             recordSandbox({ tool: name, kind: 'network', target: current, decision: 'denied', reason: `响应声明 ${declared} 字节超 ${MAX_FETCH_BYTES} 上限`, sessionId: sid });
+            void res.body?.cancel().catch(() => { /* body 可能已空 */ });
             return { name, result: '', error: `响应过大（${declared} 字节），超过读取上限` };
           }
           if (!res.body) {

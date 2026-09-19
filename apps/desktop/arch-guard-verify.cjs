@@ -397,6 +397,29 @@ function scanRule(rule, code, fileName) {
     assert(reads.length === 0, 'main.ts 不得读取 ORCHDESK_DATA_DIR（只允许赋值给子进程）：' + reads.join('; '));
   });
 
+  /* ---------------- R13：import 的 registerXxx 必须在 main.ts 有调用点 ---------------- */
+
+  await check("R13 main.ts import 的每个 registerXxx 都有调用点（防「导入了但没注册」的静默掉线）", () => {
+    const mainSrc = stripComments(read(path.join(APP_DIR, 'main.ts')));
+    const imported = new Set();
+    const importRe = /import\s*\{([^}]+)\}\s*from\s*'\.\/[a-z-]+';/g;
+    let m;
+    while ((m = importRe.exec(mainSrc))) {
+      for (const part of m[1].split(',')) {
+        const name = part.trim().split(/\s+as\s+/).pop()?.trim();
+        if (name && /^register[A-Z]\w*$/.test(name)) imported.add(name);
+      }
+    }
+    assert(imported.size >= 10, `main.ts import 的 registerXxx 仅 ${imported.size} 个（规则空转）`);
+    // 调用点必须在 import 结束之后（取最后一个 from 语句的换行处起的正文）
+    const lastFrom = mainSrc.lastIndexOf("from './");
+    const bodyAfter = lastFrom >= 0 ? mainSrc.slice(mainSrc.indexOf('\n', lastFrom)) : mainSrc;
+    const dangling = [...imported].filter((n) => !new RegExp('\\b' + n + '\\s*\\(').test(bodyAfter));
+    assert(dangling.length === 0,
+      '以下 registerXxx 被 import 但从未调用（IPC 模块整组掉线，tsc 不会报）：' + dangling.join(', '));
+    // 孤儿语句守卫：`(ipcMain);` 这类调用名被误删后剩下的合法表达式（本轮真实事故）
+    assert(!/^\s*\(\s*ipcMain\s*\)\s*;/m.test(mainSrc), 'main.ts 存在孤儿 `(ipcMain);` 语句（调用名被误删的特征）');
+  });
   /* -------------------- 元规则：防规则静默失效 -------------------- */
 
   console.log('== 架构守护：元规则自检（防规则失效）==');

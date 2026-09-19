@@ -324,6 +324,7 @@ async function run() {
       promoteWorkerDomain: (to) => {
         const target = window.__mem[to] ? to : 'director';
         const list = (window.__mem.worker || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+        // 与主进程 ipc-memory.ts 的 PROMOTE_BATCH_MAX 保持同步（改那边必须改这里）
         const batch = list.slice(0, 20);
         let promoted = 0;
         for (const item of batch) {
@@ -1882,12 +1883,68 @@ async function run() {
   }
 
   // ================================================================
+  // 审查回归锁死（yt-dev-review P0）：ACTIONS 共体 case 的 `a` 引用崩溃
+  // 首页 8 个 quick-* 模板按钮与 confirm-yes/no 确认按钮曾一点就抛
+  // ReferenceError（async listener 吞异常 → 用户侧「点了没反应」）。
+  // 放在尾部：这两个入口会改变页面状态（quick-* 会发送消息）。
+  // ================================================================
+  try {
+    // 确保回到 home-screen（quick 模板按钮只在欢迎页上；此前测试已导航到设置/插件页）
+    const newConv = page.locator('[data-action="newconv"]').first();
+    if (await newConv.count() > 0) await newConv.click({ force: true });
+    await waitForVisible('.home-screen');
+    const quickBtn = page.locator('[data-action="quick-weekly"]');
+    await assert(await quickBtn.count() > 0, 'quick-weekly 模板按钮存在');
+    if (await quickBtn.count() > 0) {
+      await quickBtn.click({ force: true });
+      // quick-weekly 填模板后随即发送 → 会话视图出现用户消息；
+      // 修复前这里抛 ReferenceError（pageerror fail-fast 会以退出码 1 抓住）。
+      await waitForCount('.msg.user', 1);
+      const msgs = await page.locator('.msg.user').count();
+      await assert(msgs >= 1, 'quick-weekly 点击后模板被发送（用户消息出现，无 JS 异常）');
+      const firstText = await page.evaluate(() => {
+        const el = document.querySelector('.msg.user');
+        return el ? el.textContent || '' : '';
+      });
+      await assert(firstText.includes('周报'), 'quick-weekly 模板内容正确（含「周报」），实际: ' + firstText.slice(0, 60));
+    }
+  } catch (e) {
+    await assert(false, `审查回归 quick-weekly (error: ${e.message.slice(0, 80)})`);
+  }
+
+  try {
+    // 回到 home-screen 再触发 sim-highrisk → confirmZone 出现 confirm-yes/no
+    const newConv = page.locator('[data-action="newconv"]').first();
+    if (await newConv.count() > 0) await newConv.click({ force: true });
+    await waitForVisible('.home-screen');
+    const simBtn = page.locator('[data-action="sim-highrisk"]');
+    if (await simBtn.count() > 0) {
+      await simBtn.click({ force: true });
+      await waitForVisible('#confirmZone .confirm-banner');
+      const yesBtn = page.locator('#confirmZone [data-action="confirm-yes"]');
+      await assert(await yesBtn.count() > 0, 'sim-highrisk 后 confirm-yes 按钮出现');
+      await yesBtn.click({ force: true });
+      await page.waitForTimeout(300);
+      const zoneCleared = await page.evaluate(() => {
+        const z = document.querySelector('#confirmZone');
+        return !!z && z.innerHTML.trim() === '';
+      });
+      await assert(zoneCleared, 'confirm-yes 点击后 #confirmZone 清空（无 ReferenceError）');
+    }
+  } catch (e) {
+    await assert(false, `审查回归 confirm-yes (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ================================================================
   // 总结
   // ================================================================
   console.log('\n' + results.join('\n'));
   console.log(`\n📊 结果: ${passed} 通过, ${failed} 失败, 共 ${passed + failed} 项\n`);
 
-  if (failed > 0) {
+  // 汇总口径与 fail-fast 一致：断言失败或 pageerror 都算失败
+  // （此前 exitCode=1 与「全部验证通过」文案并存，误导读日志的人）。
+  const failFast = process.exitCode === 1; // pageerror 监听只写 1；未设置时是 undefined
+  if (failed > 0 || failFast) {
     console.log('❌ 有验证失败，请检查上述 FAIL 项。');
     process.exitCode = 1;
   } else {

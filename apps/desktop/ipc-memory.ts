@@ -45,6 +45,9 @@ export function setMemorySummarizeSeam(v: boolean): void {
   memorySummarizeSeam = v;
 }
 
+/** 单次批量晋升上限（与 UI 文案/e2e 共用单源；IPC 返回值带 max 供 UI 渲染真实值）。 */
+export const PROMOTE_BATCH_MAX = 20;
+
 export interface MemoryIpcDeps {
   dataDir: () => string;
   /** 读模型配置（判断摘要 LLM 是否真的可用——没配模型就显示 extractive，不假装）。 */
@@ -64,6 +67,8 @@ export function loadPromotionLog(dataDir: () => string): number {
   } catch {
     promotionLog = [];
   }
+  // 与其他装载点（sandbox/connector/mcp）对称的启动日志：审计装载条数可见。
+  if (promotionLog.length > 0) log('INFO', 'memory', `晋升审计已装载：${promotionLog.length} 条`);
   return promotionLog.length;
 }
 
@@ -206,7 +211,6 @@ export function registerMemoryIpc(ipc: IpcMain, deps: MemoryIpcDeps): void {
    * 一次处理 PROMOTE_BATCH_MAX 条（按时间正序，先处理最早的），剩下的报 remaining，
    * 用户想继续再点一次 —— 宁可多按几下，也不要一个点不动的按钮。
    */
-  const PROMOTE_BATCH_MAX = 20;
 
   ipc.handle('orchdesk:memory-promote-worker', async (_e, input: unknown) => {
     const r = (input || {}) as { to?: string };
@@ -218,7 +222,7 @@ export function registerMemoryIpc(ipc: IpcMain, deps: MemoryIpcDeps): void {
       .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
 
     const batch = list.slice(0, PROMOTE_BATCH_MAX);
-    const out = { ok: true, total: list.length, attempted: batch.length, promoted: 0, rejected: 0, remaining: Math.max(0, list.length - batch.length), reasons: [] as Array<{ id: string; ok: boolean; reason: string }> };
+    const out = { ok: true, total: list.length, attempted: batch.length, max: PROMOTE_BATCH_MAX, promoted: 0, rejected: 0, remaining: Math.max(0, list.length - batch.length), reasons: [] as Array<{ id: string; ok: boolean; reason: string }> };
     for (const item of batch) {
       const id = String(item.id || '');
       let result: { ok: boolean; reason: string };

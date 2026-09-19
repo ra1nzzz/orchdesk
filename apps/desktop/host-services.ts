@@ -32,7 +32,8 @@ export interface SandboxPolicyLike {
   setSandboxMode(session: { id: string }, mode: string): void;
   /** PRD FR-8：网络请求域名白名单（['*'] = 不限；**空数组 = 全部拒绝**，fail-closed）。可读写。 */
   getNetworkAllow?(): string[];
-  setNetworkAllow?(list: string[]): void;
+  /** @returns 落盘是否成功（收紧白名单属安全变更，失败必须可感知）。 */
+  setNetworkAllow?(list: string[]): boolean;
   /** PRD FR-8：域名准入判定（供 web_fetch 等外发工具调用）。 */
   isDomainAllowed?(url: string): boolean;
 }
@@ -81,12 +82,12 @@ export function normalizeNetworkAllow(list: unknown): string[] {
 }
 
 /**
- * PRD FR-8：网络请求域名白名单判定。
+ * 域名白名单判定纯函数（白名单为入参，内存态/磁盘态两种调用方共用）。
  * 白名单含 '*' → 放行全部；否则 host 命中任一项（精确或后缀 .domain）→ 放行。
  * 白名单为空或 URL 无法解析 → 一律拒绝（fail-closed）。
  */
-export function isDomainAllowed(url: string): boolean {
-  const allow = normalizeNetworkAllow(loadSandbox().networkAllow);
+export function checkDomainAllowed(url: string, list: readonly string[]): boolean {
+  const allow = normalizeNetworkAllow(list);
   if (allow.includes('*')) return true;
   if (!allow.length) return false;
   let host = '';
@@ -97,6 +98,11 @@ export function isDomainAllowed(url: string): boolean {
   }
   if (!host) return false;
   return allow.some((d) => (d.startsWith('*.') ? host === d.slice(2) || host.endsWith(d.slice(1)) : host === d || host.endsWith('.' + d)));
+}
+
+/** 磁盘态域名判定（外部/verify 调用方用；热路径请用 policy.isDomainAllowed 的内存态）。 */
+export function isDomainAllowed(url: string): boolean {
+  return checkDomainAllowed(url, loadSandbox().networkAllow);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,17 +163,23 @@ export function isBlockedHost(url: string): boolean {
   return false;
 }
 
-function saveSandbox(state: SandboxState): void {
+/** 落盘返回结果：收紧白名单/切换模式是安全相关变更，失败必须可感知（fail-closed 语义）。 */
+function saveSandbox(state: SandboxState): boolean {
   try {
     fs.writeFileSync(sandboxFile(), JSON.stringify({ ...state, audit: state.audit.slice(-200) }, null, 2), 'utf-8');
+    return true;
   } catch (err) {
     console.error('[orchdesk] 沙箱状态持久化失败:', (err as Error).message);
+    return false;
   }
 }
 
 // ---------------------------------------------------------------------------
 // 审批
 // ---------------------------------------------------------------------------
+
+/** 审批超时（fail-closed 兜底）：main.ts 的 uiAnswerer 与本 service 共用同一常量，防双源漂移。 */
+export const APPROVAL_TIMEOUT_MS = 120_000;
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable';
 
@@ -274,16 +286,20 @@ export const hostServices = {
         sandbox.audit.push({ ts: Date.now(), kind: 'sandbox-mode', mode: normalized, sessionId: session?.id });
         saveSandbox(sandbox);
       },
-      // PRD FR-8：网络请求域名白名单（设置页可配，默认 ['*'] 不限）
+      // PRD FR-8：网络请求域名白名单（设置页可配；空 = 全拒 fail-closed）。
+      // setNetworkAllow 返回落盘结果——收紧白名单是安全相关变更，写盘失败必须让
+      // 调用方（IPC）感知，否则「删了域名但没落盘」= 内存收紧/磁盘仍旧宽名单。
       getNetworkAllow() {
         return normalizeNetworkAllow(sandbox.networkAllow);
       },
       setNetworkAllow(list) {
         sandbox.networkAllow = normalizeNetworkAllow(list);
-        saveSandbox(sandbox);
+        return saveSandbox(sandbox);
       },
+      // 域名判定读闭包内内存态（单源）：历史实现走 loadSandbox() 每次全量读盘，
+      // web_fetch 重定向循环里 per-hop 调用把同步 IO 放大了 6 倍，且与内存态双源。
       isDomainAllowed(url) {
-        return isDomainAllowed(url);
+        return checkDomainAllowed(url, sandbox.networkAllow);
       },
     };
 
@@ -309,7 +325,7 @@ export const hostServices = {
             resolve(o);
           };
           // 超时兜底：2 分钟无应答 → unavailable（fail-closed）
-          const timer = setTimeout(() => finish('unavailable'), 120_000);
+          const timer = setTimeout(() => finish('unavailable'), APPROVAL_TIMEOUT_MS);
           const onAbort = () => finish('cancelled');
           abortSignal?.addEventListener('abort', onAbort, { once: true });
 
