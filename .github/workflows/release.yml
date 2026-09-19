@@ -166,7 +166,7 @@ jobs:
           cd apps/desktop
           npx playwright install chromium
 
-      - name: Verify (质量门禁: 28 套件 + 版本一致性)
+      - name: 'Verify (质量门禁: 28 套件 + 版本一致性)'
         shell: bash
         run: pnpm --filter @orchdesk/desktop run verify
 

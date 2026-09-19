@@ -247,7 +247,7 @@
       // TRACE 用户反馈（PRD FR-7）
       traceFeedback: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
       // 沙箱（PRD FR-8）
-      getSandbox: () => Promise.resolve({ mode: 'workspace-write', networkAllow: ['*'] }),
+      getSandbox: () => Promise.resolve({ mode: 'workspace-write', networkAllow: [] }),
       setNetworkAllow: (list) => Promise.resolve({ ok: false, reason: '主进程未接入', networkAllow: list }),
       // PRD FR-8：沙箱日志检索（无桥时返回 null → loaded 保持 false，UI 标注未接入
       // 而不是假装「空日志」—— 这两种状态的处置完全不同）
@@ -348,7 +348,7 @@
     // 编排目录（multi 插件真实数据；null = 未接入，UI 回落兜底清单并标注）
     orchestrationCatalog: null,
     // 沙箱策略（PRD FR-8）：模式 + 网络域名白名单（null = 未拉取，UI 回落默认）
-    sandbox: { mode: 'workspace-write', networkAllow: ['*'] },
+    sandbox: { mode: 'workspace-write', networkAllow: [] },
     // 最近一次专家团派发结果（composeTeam 返回的 { rootId, nodes }）
     delegationLast: null,
     // TRACE 上报开关（默认开；bridge.traceStatus 拉取后覆盖）

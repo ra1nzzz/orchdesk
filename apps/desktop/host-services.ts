@@ -29,7 +29,7 @@ const SANDBOX_MODES: SandboxMode[] = ['read-only', 'workspace-write', 'danger-fu
 export interface SandboxPolicyLike {
   resolve(req?: { session?: { id: string } }): { mode: SandboxMode };
   setSandboxMode(session: { id: string }, mode: string): void;
-  /** PRD FR-8：网络请求域名白名单（['*'] = 不限）。可读写。 */
+  /** PRD FR-8：网络请求域名白名单（['*'] = 不限；**空数组 = 全部拒绝**，fail-closed）。可读写。 */
   getNetworkAllow?(): string[];
   setNetworkAllow?(list: string[]): void;
   /** PRD FR-8：域名准入判定（供 web_fetch 等外发工具调用）。 */
@@ -128,10 +128,27 @@ export function isBlockedHost(url: string): boolean {
   if (!host) return true;
   if (BLOCKED_HOSTNAME_EXACT.has(host)) return true;
   if (host.endsWith('.localhost') || host.endsWith('.internal') || host.endsWith('.local')) return true;
-  if (host.includes(':')) { // IPv6 字面量
+  if (host.includes(':')) { // IPv6 字面量（WHATWG URL 输出小写十六进制、无方括号）
     if (host === '::1') return true;
     if (/^f[cd]/.test(host)) return true; // fc00::/7 ULA
     if (/^fe[89ab]/.test(host)) return true; // fe80::/10 链路本地
+    // IPv4-mapped IPv6（::ffff:0:0/96）：WHATWG 归一为 ::ffff:7f00:1 形态，
+    // 不剥离会绕过全部 IPv4 规则（2026-09 二审实测 ::ffff:169.254.169.254 被放行）。
+    const mapped = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (mapped) {
+      const hi = parseInt(mapped[1]!, 16);
+      const lo = parseInt(mapped[2]!, 16);
+      const v4 = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+      if (IPV4_BLOCKED.some((re) => re.test(v4))) return true;
+    }
+    // NAT64（64:ff9b::/96）：末 32 位为 IPv4
+    const nat64 = host.match(/^64:ff9b:(?::|0:)*([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (nat64) {
+      const hi = parseInt(nat64[1]!, 16);
+      const lo = parseInt(nat64[2]!, 16);
+      const v4 = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+      if (IPV4_BLOCKED.some((re) => re.test(v4))) return true;
+    }
     return false;
   }
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return IPV4_BLOCKED.some((re) => re.test(host));

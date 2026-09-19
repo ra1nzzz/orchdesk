@@ -229,6 +229,14 @@ const { check, summary } = createChecker();
     assert.strictEqual(hs.isBlockedHost('http://100.64.0.1/'), true, 'CGNAT 应拒');
     assert.strictEqual(hs.isBlockedHost('http://metadata.google.internal/'), true, '元数据主机名应拒');
     assert.strictEqual(hs.isBlockedHost('http://localhost/'), true, 'localhost 应拒');
+    // 2026-09 二审残口：IPv4-mapped IPv6 / NAT64——WHATWG URL 归一为十六进制形态，
+    // 不剥离会绕过全部 IPv4 规则（::ffff:169.254.169.254 实测曾被放行）
+    assert.strictEqual(hs.isBlockedHost('http://[::ffff:127.0.0.1]/'), true, 'IPv4-mapped 回环应拒');
+    assert.strictEqual(hs.isBlockedHost('http://[::ffff:169.254.169.254]/'), true, 'IPv4-mapped 云元数据应拒');
+    assert.strictEqual(hs.isBlockedHost('http://[::ffff:10.0.0.1]/'), true, 'IPv4-mapped 私网应拒');
+    assert.strictEqual(hs.isBlockedHost('http://[::ffff:192.168.1.1]/'), true, 'IPv4-mapped 私网应拒');
+    assert.strictEqual(hs.isBlockedHost('http://[64:ff9b::7f00:1]/'), true, 'NAT64 回环应拒');
+    assert.strictEqual(hs.isBlockedHost('http://[64:ff9b::a9fe:a9fe]/'), true, 'NAT64 云元数据应拒');
     assert.strictEqual(hs.isBlockedHost('https://github.com/'), false, '公网域名应放行');
     assert.strictEqual(hs.isBlockedHost('not-a-url'), true, '无法解析应拒（fail-closed）');
     sp.setNetworkAllow(['*']); // 复位，避免影响后续用例

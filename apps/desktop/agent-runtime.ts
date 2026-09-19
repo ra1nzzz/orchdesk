@@ -112,22 +112,29 @@ export interface ToolDef {
 }
 
 /** 命令白名单（executeTool 与描述文案共用，避免两处漂移）。
- * 不含 cmd/powershell/pwsh/node/python/pip/npx 等可执行任意代码的万能 shell/解释器——
- * 它们以单 token 形态即可运行任意代码，白名单形同虚设（安全审查 B1）。
- * shell_command 的真正安全边界是授权门（approvalGate）+ 沙箱日志，白名单只挡「明显无害」。 */
+ * 不含 cmd/powershell/pwsh/node/python/pip/npx 等可执行任意代码的万能 shell/解释器，
+ * 也不含 curl/wget（网络出口统一走 web_fetch：域名白名单 + SSRF 防护 + 逐跳复检，
+ * shell 里的 curl 会绕开这三道门）——它们以单 token 形态即可运行任意代码/任意网络访问，
+ * 白名单形同虚设（安全审查 B-1/B-2）。
+ * shell_command 的真正安全边界是授权门（approvalGate）+ 沙箱日志，白名单只挡「明显无害」。
+ * git/npm/pnpm 保留：它们是本地开发主场景，代码执行面（如 npm run）由授权门 +
+ * 补偿层兜住，且用户在设置页对具体 pattern 建永久规则时是知情选择。
+ */
 export const ALLOWED_COMMANDS: string[] = [
   'dir', 'ls', 'cat', 'type', 'head', 'tail', 'find', 'where', 'grep',
   'echo', 'pwd', 'cd', 'mkdir', 'rmdir', 'copy', 'xcopy', 'move',
   'git', 'npm', 'pnpm',
-  'ping', 'ipconfig', 'netstat', 'tasklist', 'curl', 'wget',
+  'ping', 'ipconfig', 'netstat', 'tasklist',
   'notepad', 'code',
 ];
 
 /**
  * shell 元字符：命令串含任一枚即拒绝（agent-runtime 安全审查 B-2）。
- * `&&` / `|` / `;` 等拼接可让「白名单首词 + 任意后随命令」整条执行，
+ * `&&` / `|` / `;` / `$()` 等拼接可让「白名单首词 + 任意后随命令」整条执行，
  * 是命令白名单被结构绕过的唯一入口。授权门确认的是「用户看过这条命令」，
  * 拦不住串本身携带的第二条命令。
+ * 注意：packages/plugin/authz/src/index.ts 有一份同口径副本（插件不能 import app 代码），
+ * arch-guard R11 机械校验两份正则文本一致——改这里必须同步改那边。
  */
 const SHELL_METACHARS = /(?:&&|\|\||[&|;<>$`\n\r])/;
 export function hasShellMetachars(command: string): boolean {

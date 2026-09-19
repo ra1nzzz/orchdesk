@@ -335,11 +335,12 @@ check('hasShellMetachars：正常命令（含引号/参数/路径）不误伤', 
     assert.strictEqual(rt.hasShellMetachars(cmd), false, '不应误伤: ' + JSON.stringify(cmd));
   }
 });
-check('ALLOWED_COMMANDS 不含万能 shell/解释器（B-2 白名单收口）', () => {
-  for (const bad of ['cmd', 'powershell', 'pwsh', 'node', 'python', 'python3', 'pip', 'npx']) {
-    assert.ok(!rt.ALLOWED_COMMANDS.includes(bad), `白名单不应含 ${bad}（可执行任意代码）`);
+check('ALLOWED_COMMANDS 不含万能 shell/解释器与网络外发工具（B-2 白名单收口）', () => {
+  // 网络出口统一走 web_fetch（域名白名单 + SSRF + 逐跳复检）——shell 里的 curl/wget 会绕开这三道门
+  for (const bad of ['cmd', 'powershell', 'pwsh', 'node', 'python', 'python3', 'pip', 'npx', 'curl', 'wget']) {
+    assert.ok(!rt.ALLOWED_COMMANDS.includes(bad), `白名单不应含 ${bad}（可执行任意代码/绕开网络门）`);
   }
-  for (const keep of ['git', 'npm', 'pnpm', 'ls', 'dir', 'cat', 'curl']) {
+  for (const keep of ['git', 'npm', 'pnpm', 'ls', 'dir', 'cat', 'type', 'find', 'ping']) {
     assert.ok(rt.ALLOWED_COMMANDS.includes(keep), `白名单应保留 ${keep}`);
   }
 });

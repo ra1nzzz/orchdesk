@@ -358,6 +358,22 @@ function scanRule(rule, code, fileName) {
     }
   });
 
+  /* ---------------- R11：SHELL_METACHARS 双份定义一致（跨构建边界的正则副本） ---------------- */
+
+  await check('R11 SHELL_METACHARS 两份定义一致（agent-runtime ↔ authz 插件副本）', () => {
+    // 插件不能 import app 代码，正则物理复制两份；无机械校验则改漏一处静默漂移。
+    const grab = (p) => {
+      const src = stripComments(read(p));
+      const m = src.match(/SHELL_METACHARS\s*=\s*(\/(?:[^/\\]|\\.)+\/[a-z]*)/);
+      return m ? m[1] : null;
+    };
+    const appSide = grab(path.join(APP_DIR, 'agent-runtime.ts'));
+    const pluginSide = grab(path.join(ROOT, 'packages', 'plugin', 'authz', 'src', 'index.ts'));
+    assert(appSide, 'agent-runtime.ts 应定义 SHELL_METACHARS');
+    assert(pluginSide, 'authz 插件应定义 SHELL_METACHARS 副本');
+    assert(appSide === pluginSide, `两份正则不一致：agent-runtime=${appSide} authz=${pluginSide}`);
+  });
+
   /* -------------------- 元规则：防规则静默失效 -------------------- */
 
   console.log('== 架构守护：元规则自检（防规则失效）==');

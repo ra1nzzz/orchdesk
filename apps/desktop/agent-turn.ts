@@ -204,7 +204,12 @@ export async function runAgentTurn(
         onDelta: (chunk) => h.notifyAgentDelta(sessionId, chunk),
       });
     } catch (err) {
-      if (bail() || isAbortError(err)) break;
+      if (bail()) break;
+      // isAbortError 且非用户中止 = 120s requestSignal 超时：不是「已停止」，
+      // 文案必须可区分（此前超时被 bail 之外的路径吞成「无总结」，原因丢失）。
+      if (isAbortError(err)) {
+        return { text: `（模型调用失败）请求超时或连接中断（120s）。可重试或降低输入长度。`, intent: 'CONFIRM' };
+      }
       return { text: `（模型调用失败）${(err as Error).message}`, intent: 'CONFIRM' };
     }
     if (reply.usage) {

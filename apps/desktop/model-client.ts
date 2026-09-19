@@ -463,6 +463,8 @@ export async function callOpenAICompatible(
   let preferStream = mode === 'chat';
   // M-1：只有「明确指向工具协议」的拒绝才允许把 provider 标记为不吃工具。
   // 空 content / finish=length / 内容过滤 / 网关抖动 → 继续按普通失败爬梯，绝不毒化。
+  // 特征用严匹配：网关 400 文案偶然含 "function"（如 JS 异常堆栈）不应误判（二审收口）。
+  const TOOL_PROTOCOL_REJECT_RE = /tool|function\s*call|function calling/i;
   let toolProtocolRejected = false;
   // 轮内软降级计数：带 tools 的尝试失败次数（去掉 tools 才成功 → softToolsFallback）。
   let toolsAttemptFailed = 0;
@@ -506,7 +508,7 @@ export async function callOpenAICompatible(
       // M-1：仅当错误体明确提及 tool/function 时才记为「工具协议拒绝」；
       // 上下文超长等无关 400 不该把原生工具能力毒化掉。
       if (att.tools && [400, 404, 415, 422].includes(res.status)) {
-        if (/tool|function/i.test(txt)) toolProtocolRejected = true;
+        if (TOOL_PROTOCOL_REJECT_RE.test(txt)) toolProtocolRejected = true;
         toolsAttemptFailed++;
         continue attLoop;
       }
@@ -579,7 +581,7 @@ export async function callOpenAICompatible(
         preferStream = false;
         continue;
       }
-      if (att.tools && /tool|function\s*call|function calling/i.test(errMsg)) {
+      if (att.tools && TOOL_PROTOCOL_REJECT_RE.test(errMsg)) {
         toolProtocolRejected = true;
         toolsAttemptFailed++;
         continue attLoop;

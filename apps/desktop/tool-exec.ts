@@ -153,7 +153,9 @@ export function sessionCwd(sessionId?: string): string {
 // 浏览器工具（ADR-0011：Electron 自带 CDP，零额外依赖）
 // ---------------------------------------------------------------------------
 // 安全口径沿用既有工具：
-//   - 导航 = 边界外网络访问 → 域名白名单，非白名单过补偿层外发二次确认（同 web_fetch）
+//   - 导航 = 边界外网络访问 → 域名白名单 fail-closed（非白名单直接拒，不再有
+//     补偿层自动放行兜底）+ SSRF 防护（同 web_fetch；首跳校验，浏览器内部 302 的
+//     逐跳复检是 CDP 侧后续增强）
 //   - 点击 / 输入 / 执行脚本 = 真实改变页面（下单、发帖、删数据都可能）→ 授权门（同 file_write）
 //   - 每一次判定都进沙箱日志：事后能回答「Agent 在哪个网页上点了什么」
 // 浏览器共享用户默认 session（保留登录态）——这是能力的一半，也是为什么写操作必须过门。
@@ -469,13 +471,15 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
           recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: '目标为内网/回环/链路本地/云元数据地址（SSRF 防护）', sessionId: sid });
           return { name, result: '', error: '目标地址为内网/回环/链路本地/云元数据端点，已被 SSRF 防护拒绝' };
         }
+        // current 提升到 try 外：catch 的沙箱日志要记「实际请求到哪个落点」。
+        let current = url;
         try {
           // 手动跟随重定向：每一跳都重新过域名白名单 + SSRF 判定，
           // 防止 302 跳到白名单外地址或内网元数据端点。
           const MAX_REDIRECTS = 5;
-          let current = url;
           let res: Response | null = null;
-          for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+          let hops = 0;
+          for (;;) {
             res = await fetch(current, {
               redirect: 'manual',
               signal: sessionCtx?.signal
@@ -483,8 +487,15 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
                 : AbortSignal.timeout(15000),
             });
             if (![301, 302, 303, 307, 308].includes(res.status)) break;
+            // 3xx response body 不消费会拖住连接（undici 到 GC 才释放）——cancel 后继续。
+            void res.body?.cancel().catch(() => { /* body 可能已空 */ });
             const loc = res.headers.get('location');
             if (!loc) break;
+            if (hops >= MAX_REDIRECTS) {
+              recordSandbox({ tool: name, kind: 'network', target: current, decision: 'denied', reason: `重定向次数超过上限（${MAX_REDIRECTS}）`, sessionId: sid });
+              return { name, result: '', error: `重定向次数超过上限（${MAX_REDIRECTS}），已中止（防重定向环）` };
+            }
+            hops++;
             const next = new URL(loc, current).toString();
             if (policy?.isDomainAllowed && !policy.isDomainAllowed(next)) {
               recordSandbox({ tool: name, kind: 'network', target: next, decision: 'denied', reason: '重定向目标不在白名单（fail-closed）', sessionId: sid });
@@ -497,17 +508,22 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
             current = next;
           }
           if (!res) throw new Error('请求未能建立');
+          if ([301, 302, 303, 307, 308].includes(res.status)) {
+            // 跳数内拿到 3xx 但无 location：视同不可跟随，显式报错而非把 3xx 空 body 当结果。
+            recordSandbox({ tool: name, kind: 'network', target: current, decision: 'error', reason: '重定向响应无 location', sessionId: sid });
+            return { name, result: '', error: `服务器返回 ${res.status} 但无 location 头，无法跟随` };
+          }
           // 响应体积护栏：承诺只回传 WEB_FETCH_RESULT_MAX（30KB），但不能因此整读超大响应进内存（防 OOM / 主进程阻塞）。
           // content-length 预检 + 流式读满上限即停，两重保险。
           const MAX_FETCH_BYTES = 1 * 1024 * 1024;
           const declared = Number(res.headers.get('content-length') || '0');
           if (declared > MAX_FETCH_BYTES) {
-            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: `响应声明 ${declared} 字节超 ${MAX_FETCH_BYTES} 上限`, sessionId: sid });
+            recordSandbox({ tool: name, kind: 'network', target: current, decision: 'denied', reason: `响应声明 ${declared} 字节超 ${MAX_FETCH_BYTES} 上限`, sessionId: sid });
             return { name, result: '', error: `响应过大（${declared} 字节），超过读取上限` };
           }
           if (!res.body) {
             const buf = Buffer.from(await res.arrayBuffer());
-            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
+            recordSandbox({ tool: name, kind: 'network', target: current, decision: 'allowed', sessionId: sid });
             return { name, result: buf.toString('utf-8').slice(0, WEB_FETCH_RESULT_MAX) };
           }
           const chunks: Buffer[] = [];
@@ -518,10 +534,11 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
             if (total > MAX_FETCH_BYTES) break; // 超上限即截停，不整读
             chunks.push(b);
           }
-          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
+          // 沙箱日志记最终落点（重定向后的真实域名），而非原始 URL。
+          recordSandbox({ tool: name, kind: 'network', target: current, decision: 'allowed', sessionId: sid });
           return { name, result: Buffer.concat(chunks).toString('utf-8').slice(0, WEB_FETCH_RESULT_MAX) };
         } catch (err) {
-          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'error', reason: (err as Error).message, sessionId: sid });
+          recordSandbox({ tool: name, kind: 'network', target: current, decision: 'error', reason: (err as Error).message, sessionId: sid });
           return { name, result: '', error: (err as Error).message.slice(0, 2000) };
         }
       }
