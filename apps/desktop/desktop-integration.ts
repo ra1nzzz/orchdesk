@@ -11,6 +11,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { getDataDir } from './data-dir';
 
 // ---------------------------------------------------------------------------
 // 配置形状
@@ -88,9 +89,8 @@ export function normalizeDesktopConfig(raw: unknown): DesktopConfig {
 export const DESKTOP_FILE_NAME = 'desktop.json';
 
 export function desktopConfigFile(dir?: string): string {
-  // 惰性：真实数据目录由 main.ts 注入（避免本模块直接依赖 electron）
-  const base = dir || process.env.ORCHDESK_DATA_DIR;
-  return path.join(base || '.', DESKTOP_FILE_NAME);
+  // M3：统一走 getDataDir() 单源（不再回退 '.' 进程 cwd）。
+  return path.join(dir || getDataDir(), DESKTOP_FILE_NAME);
 }
 
 export function loadDesktopConfig(dir?: string): DesktopConfig {

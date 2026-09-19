@@ -492,12 +492,16 @@ export function resetDataDirResolver(): void {
   dataDirResolver = null;
 }
 
-/** 取统一数据目录；未注入时回退 ORCHDESK_HOME，两者皆无则抛错（避免悄悄写错位置）。 */
+/** 取统一数据目录。解析顺序：注入的解析器 → ORCHDESK_DATA_DIR → ORCHDESK_HOME → 抛错。
+ * 三者皆无则抛错——绝不静默回退到 '.'（进程 cwd，打包版即 exe 目录，会把
+ * 沙箱状态/桌面配置写进安装目录且不报错，M3 数据目录多真源的根因）。 */
 export function getDataDir(): string {
   if (dataDirResolver) return dataDirResolver();
+  const envDir = (process.env.ORCHDESK_DATA_DIR || '').trim();
+  if (envDir) return path.resolve(envDir);
   const envHome = (process.env.ORCHDESK_HOME || '').trim();
   if (envHome) return path.resolve(envHome);
-  throw new Error('[orchdesk] 数据目录解析器尚未注入（setDataDirResolver），且未设置 ORCHDESK_HOME');
+  throw new Error('[orchdesk] 数据目录解析器尚未注入（setDataDirResolver），且未设置 ORCHDESK_DATA_DIR/ORCHDESK_HOME');
 }
 
 // ---------------------------------------------------------------------------

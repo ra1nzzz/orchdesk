@@ -40,6 +40,11 @@ function rendererFiles() {
   return fs.readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => ({ name: `renderer/${f}`, abs: path.join(dir, f) }));
 }
 
+/** apps/desktop 顶层 .ts 全量（R9/R12 共用扫描面）。 */
+function desktopTsFiles() {
+  return fs.readdirSync(APP_DIR).filter((f) => f.endsWith('.ts')).map((f) => path.join(APP_DIR, f));
+}
+
 /** 纯逻辑模块白名单：零 electron 依赖、可 node 直测（ADR-0008 / 渲染层双环境方案）。 */
 const PURE_MODULES = [
   'agent-runtime.ts', 'browser-tools.ts', 'common-tools.ts', 'connector-registry.ts',
@@ -320,7 +325,7 @@ function scanRule(rule, code, fileName) {
     assert(invoked.size > 20, `preload invoke channel 仅 ${invoked.size} 个（规则空转）`);
 
     const handled = new Set();
-    const desktopTs = fs.readdirSync(APP_DIR).filter((f) => f.endsWith('.ts')).map((f) => path.join(APP_DIR, f));
+    const desktopTs = desktopTsFiles();
     assert(desktopTs.length > 10, `apps/desktop 顶层 .ts 仅 ${desktopTs.length} 个（规则空转）`);
     for (const abs of desktopTs) {
       const src = stripComments(read(abs));
@@ -372,6 +377,24 @@ function scanRule(rule, code, fileName) {
     assert(appSide, 'agent-runtime.ts 应定义 SHELL_METACHARS');
     assert(pluginSide, 'authz 插件应定义 SHELL_METACHARS 副本');
     assert(appSide === pluginSide, `两份正则不一致：agent-runtime=${appSide} authz=${pluginSide}`);
+  });
+
+  /* ---------------- R12：数据目录单源（M3）——禁止 env 直读复辟 ---------------- */
+
+  await check('R12 数据目录单源：除 data-dir.ts 与 main.ts 赋值点外禁止直读 ORCHDESK_DATA_DIR', () => {
+    const offenders = [];
+    for (const abs of desktopTsFiles()) {
+      const rel = path.relative(APP_DIR, abs).replace(/\\/g, '/');
+      if (rel === 'data-dir.ts' || rel === 'main.ts') continue;
+      const src = stripComments(read(abs));
+      if (/process\.env\.ORCHDESK_DATA_DIR/.test(src)) offenders.push(rel);
+    }
+    assert(offenders.length === 0,
+      '以下模块直读了 ORCHDESK_DATA_DIR（应统一走 getDataDir() 单源）：' + offenders.join(', '));
+    // main.ts 只允许「赋值」一处，不允许「读取」
+    const mainSrc = stripComments(read(path.join(APP_DIR, 'main.ts')));
+    const reads = mainSrc.match(/const\s+\w+\s*=\s*process\.env\.ORCHDESK_DATA_DIR/g) || [];
+    assert(reads.length === 0, 'main.ts 不得读取 ORCHDESK_DATA_DIR（只允许赋值给子进程）：' + reads.join('; '));
   });
 
   /* -------------------- 元规则：防规则静默失效 -------------------- */

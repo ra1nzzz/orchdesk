@@ -74,6 +74,7 @@ import {
   migrateDataDirs,
   migrateDataFiles,
   formatBytes,
+  getDataDir,
   resolveDataDir,
   scanDataDir,
   setDataDirResolver,
@@ -1045,14 +1046,14 @@ function persistGrants(): void {
 // enabled=false → dsh-runtime 装载 trace 时 repoUrl 置空 → 只缓冲不上传（观测照旧）。
 // 切换写 <dataDir>/trace.json，**重启生效**（config 在插件装载时注入）。
 ipcMain.handle('orchdesk:trace-status', () => {
-  const dataDir = process.env.ORCHDESK_DATA_DIR || process.env.ORCHDESK_HOME || '';
   let enabled = true;
-  if (dataDir) {
+  try {
+    const dataDir = getDataDir();
     try {
       const f = JSON.parse(fs.readFileSync(path.join(dataDir, 'trace.json'), 'utf-8')) as { enabled?: boolean };
       if (typeof f.enabled === 'boolean') enabled = f.enabled;
     } catch { /* 缺省开 */ }
-  }
+  } catch { /* 数据目录未就绪：保持缺省开，builtin 探测照常 */ }
   let builtin = false;
   try {
     fs.accessSync(path.join(__dirname, '..', 'build', 'trace-token.enc.json'));
@@ -1061,8 +1062,8 @@ ipcMain.handle('orchdesk:trace-status', () => {
   return { enabled, builtin };
 });
 ipcMain.handle('orchdesk:trace-set-enabled', (_e, enabled: boolean) => {
-  const dataDir = process.env.ORCHDESK_DATA_DIR || process.env.ORCHDESK_HOME || '';
-  if (!dataDir) return { ok: false, reason: '数据目录未就绪' };
+  let dataDir = '';
+  try { dataDir = getDataDir(); } catch { return { ok: false, reason: '数据目录未就绪' }; }
   try {
     fs.writeFileSync(path.join(dataDir, 'trace.json'), JSON.stringify({ enabled: !!enabled }, null, 2), 'utf-8');
     return { ok: true, requiresRestart: true };
@@ -1076,7 +1077,7 @@ ipcMain.handle('orchdesk:sandbox-get', () => {
   const policy = getHostServices()?.sandboxPolicy;
   return {
     mode: policy?.resolve?.().mode || 'workspace-write',
-    networkAllow: policy?.getNetworkAllow ? policy.getNetworkAllow() : ['*'],
+    networkAllow: policy?.getNetworkAllow ? policy.getNetworkAllow() : [],
   };
 });
 ipcMain.handle('orchdesk:sandbox-set-network-allow', (_e, list: string[]) => {

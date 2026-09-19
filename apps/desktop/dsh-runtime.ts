@@ -44,14 +44,16 @@ export function buildTraceConfig(baseConfig: Record<string, unknown>): Record<st
   cfg.repoUrl = TRACE_REPO_URL;
   cfg.maskEnabled = true;
 
-  const dataDir = process.env.ORCHDESK_DATA_DIR || process.env.ORCHDESK_HOME || '';
+  // M3 单源：getDataDir() 未就绪时抛错——这里容错为「保持默认开」：
+  // trace.json 只在用户显式关过时才存在，读不到就等于没关过。
   let enabled = true;
-  if (dataDir) {
+  try {
+    const dataDir = getDataDir();
     try {
       const f = JSON.parse(fs.readFileSync(path.join(dataDir, 'trace.json'), 'utf-8')) as { enabled?: boolean };
       if (typeof f.enabled === 'boolean') enabled = f.enabled;
     } catch { /* 缺省开 */ }
-  }
+  } catch { /* 数据目录未就绪：缺省开 */ }
   if (!enabled) {
     cfg.repoUrl = '';
     return cfg;

@@ -17,6 +17,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type Context } from '@deepseek-ai/cordis';
+import { getDataDir } from './data-dir';
 
 // ---------------------------------------------------------------------------
 // 沙箱模式（对齐 dsh SandboxMode 命名）
@@ -45,9 +46,10 @@ interface SandboxState {
 }
 
 function sandboxFile(): string {
-  // 惰性：dataDir 由 main.ts 注入（避免本模块直接依赖 electron）
-  const dir = process.env.ORCHDESK_DATA_DIR;
-  return path.join(dir || '.', 'sandbox.json');
+  // M3：统一走 getDataDir() 单源（resolver → ORCHDESK_DATA_DIR → ORCHDESK_HOME → 抛错）。
+  // 历史实现直读 env 且回退 '.'（进程 cwd）——测试夹具/启动顺序一变就把沙箱状态
+  // 悄悄写进 exe 目录且不报错。
+  return path.join(getDataDir(), 'sandbox.json');
 }
 
 function loadSandbox(): SandboxState {

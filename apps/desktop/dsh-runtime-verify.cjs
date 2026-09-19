@@ -259,14 +259,15 @@ const { check, summary } = createChecker();
     }
   });
   await check('buildTraceConfig enabled=false → repoUrl 置空（用户开关关闭 = 只缓冲不上传）', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-off-'));
+    // M3 单源后 main.ts 模块级注入 resolver（解析到 ORCHDESK_HOME）——数据目录真源是
+    // resolver，ORCHDESK_DATA_DIR 只是未注入时的回退。开关文件必须写进解析出的目录。
+    const dir = require('./dist/data-dir.js').getDataDir();
     fs.writeFileSync(path.join(dir, 'trace.json'), JSON.stringify({ enabled: false }));
-    process.env.ORCHDESK_DATA_DIR = dir;
     try {
       const cfg = rtMod.buildTraceConfig({ repoUrl: '', token: 'x' });
       assert.strictEqual(cfg.repoUrl, '', '关闭时应置空上传目标');
     } finally {
-      delete process.env.ORCHDESK_DATA_DIR;
+      try { fs.unlinkSync(path.join(dir, 'trace.json')); } catch { /* 忽略 */ }
     }
   });
 
