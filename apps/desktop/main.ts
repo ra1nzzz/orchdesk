@@ -2,7 +2,6 @@
 import { app, BrowserWindow, ipcMain, safeStorage, shell, globalShortcut } from 'electron';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import {
   DESKTOP_LABELS,
   SHORTCUT_LABEL,
@@ -15,9 +14,7 @@ import { guanjiClient } from './guanji';
 import { hubClient } from './hub';
 import {
   aggregateUsage,
-  appendUsageTurn,
   defaultUsageFile,
-  normalizeApiUsage,
   readUsageFile,
   writeUsageFile,
   type UsageEntry,
@@ -34,8 +31,7 @@ import {
   timelineFromLabeled,
   type SessionEvent,
 } from './session-events';
-import { emitCanonicalEvent, setEnvelopeConsumer } from './event-emit';
-import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, startupMarketPlugins } from './dsh-runtime';
+import { startRuntime, stopRuntime, getService, setPluginEnabled, firePreStep, startupMarketPlugins } from './dsh-runtime';
 import { registerAuthzIpc, pendingApprovals, nextApprovalId, type AuthzServiceLike, type GrantRuleLike } from './ipc-authz';
 import { registerMemoryIpc, loadPromotionLog, setMemorySummarizeSeam, type MemoryServiceLike } from './ipc-memory';
 import { APPROVAL_TIMEOUT_MS } from './host-services';
@@ -84,12 +80,6 @@ import {
   type NativeToolCall,
   type ToolCall,
   type ToolResult,
-  buildAssistantToolCallMessage,
-  buildSystemPrompt,
-  buildToolResultMessage,
-  extractToolCalls,
-  isKnownTool,
-  normalizeNativeToolCalls,
   MAX_TOOL_ITERATIONS_CAP,
   MAX_TOOL_ITERATIONS_DEFAULT,
 } from './agent-runtime';

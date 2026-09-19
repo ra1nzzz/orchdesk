@@ -397,27 +397,44 @@ function scanRule(rule, code, fileName) {
     assert(reads.length === 0, 'main.ts 不得读取 ORCHDESK_DATA_DIR（只允许赋值给子进程）：' + reads.join('; '));
   });
 
-  /* ---------------- R13：import 的 registerXxx 必须在 main.ts 有调用点 ---------------- */
+  /* ---------------- R13：main.ts 导入绑定必须被引用（组合根「导入即接线」守卫） ---------------- */
 
-  await check("R13 main.ts import 的每个 registerXxx 都有调用点（防「导入了但没注册」的静默掉线）", () => {
-    const mainSrc = stripComments(read(path.join(APP_DIR, 'main.ts')));
-    const imported = new Set();
-    const importRe = /import\s*\{([^}]+)\}\s*from\s*'\.\/[a-z-]+';/g;
+  await check('R13 main.ts 每个非 type 导入绑定都在后续代码被引用（防「导入了但没接线」的静默掉线）', () => {
+    // 注意用原始文本而非 stripComments：后者不识别字符串/正则里的 /*，会把 main.ts
+    // 大段真实代码误判为注释（R13 首版即因此误报 8 个存活导入）。失败方向安全：
+    // 注释里提及导入名只会让规则漏报，不会把活接线误杀。
+    const mainSrc = read(path.join(APP_DIR, 'main.ts'));
+    // 收集所有 import 的绑定：命名/默认/命名空间；排除 type 前缀与 `import type` 整句。
+    const bindings = new Map(); // name -> from
+    const importStmtRe = /import\s+(type\s+)?([^;]+?)\s+from\s+'([^']+)';/g;
     let m;
-    while ((m = importRe.exec(mainSrc))) {
-      for (const part of m[1].split(',')) {
-        const name = part.trim().split(/\s+as\s+/).pop()?.trim();
-        if (name && /^register[A-Z]\w*$/.test(name)) imported.add(name);
+    while ((m = importStmtRe.exec(mainSrc))) {
+      if (m[1]) continue; // import type { ... }
+      const clause = m[2];
+      const named = clause.match(/\{([^}]*)\}/);
+      if (named) {
+        for (const part of named[1].split(',')) {
+          const seg = part.trim();
+          if (!seg) continue;
+          if (/^type\s+/.test(seg)) continue; // 行内 type 前缀
+          const name = (seg.split(/\s+as\s+/).pop() || '').trim();
+          if (name) bindings.set(name, m[3]);
+        }
       }
+      const ns = clause.match(/\*\s+as\s+([A-Za-z_$][\w$]*)/);
+      if (ns) bindings.set(ns[1], m[3]);
+      const def = clause.match(/^([A-Za-z_$][\w$]*)\s*(?:,|$)/);
+      if (def && !named && !ns) bindings.set(def[1], m[3]);
     }
-    assert(imported.size >= 10, `main.ts import 的 registerXxx 仅 ${imported.size} 个（规则空转）`);
-    // 调用点必须在 import 结束之后（取最后一个 from 语句的换行处起的正文）
-    const lastFrom = mainSrc.lastIndexOf("from './");
-    const bodyAfter = lastFrom >= 0 ? mainSrc.slice(mainSrc.indexOf('\n', lastFrom)) : mainSrc;
-    const dangling = [...imported].filter((n) => !new RegExp('\\b' + n + '\\s*\\(').test(bodyAfter));
-    assert(dangling.length === 0,
-      '以下 registerXxx 被 import 但从未调用（IPC 模块整组掉线，tsc 不会报）：' + dangling.join(', '));
-    // 孤儿语句守卫：`(ipcMain);` 这类调用名被误删后剩下的合法表达式（本轮真实事故）
+    assert(bindings.size >= 40, `main.ts 导入绑定仅 ${bindings.size} 个（规则空转）`);
+    // 引用必须出现在 import 区结束之后（最后一个 import 语句的换行处起的正文）。
+    const lastStmtEnd = mainSrc.lastIndexOf("from '");
+    const bodyAfter = lastStmtEnd >= 0 ? mainSrc.slice(mainSrc.indexOf('\n', lastStmtEnd)) : mainSrc;
+    const unreferenced = [...bindings.keys()].filter((n) => !new RegExp('\\b' + n.replace(/\$/g, '\\$') + '\\b').test(bodyAfter));
+    assert(unreferenced.length === 0,
+      '以下导入绑定在 main.ts 从未被引用（IPC 模块整组掉线/死导入，tsc 不报）：'
+      + unreferenced.map((n) => `${n} (from ${bindings.get(n)})`).join(', '));
+    // 孤儿语句守卫：`(ipcMain);` 这类调用名被误删后剩下的合法表达式（真实事故形态）。
     assert(!/^\s*\(\s*ipcMain\s*\)\s*;/m.test(mainSrc), 'main.ts 存在孤儿 `(ipcMain);` 语句（调用名被误删的特征）');
   });
   /* -------------------- 元规则：防规则静默失效 -------------------- */
