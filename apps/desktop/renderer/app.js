@@ -3834,53 +3834,60 @@
       }
     }
   });
-  document.body.addEventListener('click', async (e) => {
-    const el = e.target.closest('[data-action]'); if (!el) return;
-    const a = el.dataset.action, id = el.dataset.id;
-    switch (a) {
-      case 'nav': {
+  // ---------------------------------------------------------------------------
+  // 动作注册表（审查整改：原 1337 行 / 161 case 的巨型 click switch 拆为具名函数）
+  // 主 handler 退化为查表分发；未知动作显式告警（default 语义保留，不静默吞）。
+  // ---------------------------------------------------------------------------
+  async function act_nav(el, id, e) {
+ {
         state.page = id;
         // 进入设置页时重拉记忆域与沙箱日志：SubAgent 执行完会随时往 worker 域落结论，
         // 只靠启动时拉一次，用户看到的就是「空的」，会误判成功能没生效。
         if (id === 'settings') { refreshMemoryDomain(); refreshMemorySummarize(); refreshSandboxLog(); refreshUsage(); }
         if (id === 'plugins') { refreshConnectors(); refreshMarket(); }
-        render();
-        break;
-      }
-      case 'settings-nav': state.settingsSection = id; render(); break;
-      case 'toggle-theme': { state.theme = state.theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = state.theme; break; }
-      case 'toggle-ctx': state.ctxOpen = !state.ctxOpen; render(); break;
-      case 'ctx-tab': state.ctxTab = el.dataset.id; render(); break;
-      // 思考链展开/收起（本轮 UI 重构）：只切这份消息的展开态，工具明细随之显示或收起。
-      case 'think-toggle': {
+        render();}
+  }
+  async function act_settings_nav(el, id, e) {
+ state.settingsSection = id; render();
+  }
+  async function act_toggle_theme(el, id, e) {
+ { state.theme = state.theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = state.theme;}
+  }
+  async function act_toggle_ctx(el, id, e) {
+ state.ctxOpen = !state.ctxOpen; render();
+  }
+  async function act_ctx_tab(el, id, e) {
+ state.ctxTab = el.dataset.id; render();
+  }
+  async function act_think_toggle(el, id, e) {
+ {
         const k = el.dataset.k;
-        if (!k) break;
+        if (!k) return;
         if (state.thinkExpanded.has(k)) state.thinkExpanded.delete(k); else state.thinkExpanded.add(k);
-        render();
-        break;
-      }
-      // ---- 需求3：右栏「文件」TAB ----
-      case 'ftab-toggle': {
+        render();}
+  }
+  async function act_ftab_toggle(el, id, e) {
+ {
         const p = el.dataset.p;
-        if (!p) break;
+        if (!p) return;
         const ft = state.fileTab;
         if (ft.expanded.has(p)) { ft.expanded.delete(p); render(); }
         else {
           ft.expanded.add(p);
           if (ft.children.has(p)) render();
           else fileTabLoadDir(p).then(() => render()).catch(() => render());
-        }
-        break;
-      }
-      case 'ftab-open': {
+        }}
+  }
+  async function act_ftab_open(el, id, e) {
+ {
         // 侧栏只做浏览（很窄），点文件交给全屏面板预览——复用既有预览/编辑/diff 链路
         const p = el.dataset.p;
-        if (!p) break;
+        if (!p) return;
         openFilePanel();
-        openFilePreview(p, p.split(/[\\/]/).pop());
-        break;
-      }
-      case 'ftab-pick': {
+        openFilePreview(p, p.split(/[\\/]/).pop());}
+  }
+  async function act_ftab_pick(el, id, e) {
+ {
         const r = await bridge.pickFolder();
         if (r && r.ok && r.path) {
           const ft = state.fileTab;
@@ -3889,26 +3896,28 @@
         } else if (r && r.ok === false) {
           toast(`选择目录失败：${(r && r.reason) || '未接入'}`, 'err');
         }
-        render();
-        break;
-      }
-      case 'ftab-refresh': {
+        render();}
+  }
+  async function act_ftab_refresh(el, id, e) {
+ {
         const ft = state.fileTab;
-        if (!ft.root) break;
+        if (!ft.root) return;
         ft.children = new Map();
         await fileTabLoadDir(ft.root);
-        render();
-        break;
-      }
-      case 'preview-product': {
+        render();}
+  }
+  async function act_preview_product(el, id, e) {
+ {
         const content = el.dataset.content;
         const name = el.dataset.name;
         const lang = el.dataset.lang;
-        if (content) openProductPreview(name, content, lang);
-        break;
-      }
-      case 'proj-select-toggle': { state.projDropdownOpen = !state.projDropdownOpen; const dd = $('#projDropdown'); if (dd) dd.classList.toggle('open', state.projDropdownOpen); break; }
-      case 'composer-proj-pick': {
+        if (content) openProductPreview(name, content, lang);}
+  }
+  async function act_proj_select_toggle(el, id, e) {
+ { state.projDropdownOpen = !state.projDropdownOpen; const dd = $('#projDropdown'); if (dd) dd.classList.toggle('open', state.projDropdownOpen);}
+  }
+  async function act_composer_proj_pick(el, id, e) {
+ {
         const pid = el.dataset.pid;
         state.selProjForComposer = pid;
         state.projDropdownOpen = false;
@@ -3924,10 +3933,10 @@
         if (state.sel && state.sessions[state.sel] && state.sessions[state.sel].pid === pid) {
           applySessionCwd(state.sel);
         }
-        render();
-        break;
-      }
-      case 'composer-proj-task': {
+        render();}
+  }
+  async function act_composer_proj_task(el, id, e) {
+ {
         state.selProjForComposer = '__task__';
         state.projDropdownOpen = false;
         closeModal();
@@ -3937,27 +3946,35 @@
         state.sel = id;
         state.pExpanded.add('__task__');
         persist(); render();
-        toast('已进入任务模式（无项目）', 'ok');
-        break;
-      }
-      case 'welcome-new-proj': doNewConv(); break;
-      case 'welcome-task': {
+        toast('已进入任务模式（无项目）', 'ok');}
+  }
+  async function act_welcome_new_proj(el, id, e) {
+ doNewConv();
+  }
+  async function act_welcome_task(el, id, e) {
+ {
         const id = 's' + Date.now().toString(36);
         const s = { id, pid: '__task__', title: '任务', expert: expertList()[state.wzExpert] || expertList()[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
         state.sessions[id] = s; state.sel = id;
         persist(); render(); toast('已进入任务模式（无项目）', 'ok');
-        break;
+        return;
       }
 
       /* 会话 */
       // 切换会话即退出回放视图（回放只对被点开的那个会话有效）
       // BUG-023：打开会话时重放工作区（幂等）——覆盖「重启后主进程 Map 已空」的场景。
-      case 'sel': state.sel = id; state.replayFor = null; applySessionCwd(id); pushFloatingContext(); render(); break;
-      case 'newconv': doNewConv(); break;
-      case 'home-send': {
+  }
+  async function act_sel(el, id, e) {
+ state.sel = id; state.replayFor = null; applySessionCwd(id); pushFloatingContext(); render();
+  }
+  async function act_newconv(el, id, e) {
+ doNewConv();
+  }
+  async function act_home_send(el, id, e) {
+ {
         const homeInp = $('#homeComposer');
         const text = homeInp?.value?.trim();
-        if (!text) { toast('输入为空', 'warn'); break; }
+        if (!text) { toast('输入为空', 'warn'); return; }
         homeInp.value = '';
         if (!state.selProjForComposer || state.selProjForComposer === '__task__') {
           const id = 's' + Date.now().toString(36);
@@ -3986,11 +4003,10 @@
           doSend();
         } else {
           toast('发送失败：未找到输入框', 'warn');
-        }
-        break;
-      }
-      case 'quick-weekly': case 'quick-debug': case 'quick-ppt': case 'quick-idle':
-      case 'quick-refactor': case 'quick-data': case 'quick-skills': case 'quick-analyze': {
+        }}
+  }
+  async function act_quick_weekly(el, id, e) {
+ {
         const labels = {
           'quick-weekly': '周报总结', 'quick-debug': '报错修复', 'quick-ppt': 'PPT 制作',
           'quick-idle': '闲时任务', 'quick-refactor': '项目重构', 'quick-data': '数据分析',
@@ -4011,10 +4027,10 @@
         if (inp) { inp.value = text; inp.dispatchEvent(new Event('input', { bubbles: true })); }
         const sendBtn = document.querySelector('[data-action="home-send"]');
         if (sendBtn) sendBtn.click();
-        toast(`已加载「${labels[a] || a}」模板`, 'ok');
-        break;
-      }
-      case 'home-create-proj': {
+        toast(`已加载「${labels[a] || a}」模板`, 'ok');}
+  }
+  async function act_home_create_proj(el, id, e) {
+ {
         openModal(`<div class="mh">${ic('folder', 18)}<b>创建项目</b></div>
           <div class="mb">
             <div class="mb-row"><label>项目名称</label><input id="newProjName" class="inp" placeholder="如：React 重构" style="width:100%"></div>
@@ -4026,10 +4042,10 @@
               <div class="faint" style="font-size:11px;margin-top:4px">绑定后可通过「打开项目目录」快速访问</div>
             </div>
           </div>
-          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="do-create-proj-home">创建</button></div>`);
-        break;
-      }
-      case 'pick-folder': {
+          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="do-create-proj-home">创建</button></div>`);}
+  }
+  async function act_pick_folder(el, id, e) {
+ {
         const pathInput = $('#newProjPath');
         try {
           const r = await bridge.pickFolder();
@@ -4037,13 +4053,13 @@
         } catch {
           const selected = prompt('请输入本地文件夹路径：');
           if (selected && pathInput) pathInput.value = selected;
-        }
-        break;
-      }
-      case 'do-create-proj-home': {
+        }}
+  }
+  async function act_do_create_proj_home(el, id, e) {
+ {
         const name = ($('#newProjName')?.value || '').trim();
         const path = ($('#newProjPath')?.value || '').trim();
-        if (!name) { toast('请输入项目名称', 'warn'); break; }
+        if (!name) { toast('请输入项目名称', 'warn'); return; }
         const id = 'p' + Date.now().toString(36);
         const p = { id, n: name, d: '', open: 1, archived: 0, sessions: [], path: path || '' };
         state.projects.push(p);
@@ -4052,11 +4068,13 @@
         closeModal();
         // Create initial session
         createSessionInProject(id);
-        toast(`项目「${name}」已创建`, 'ok');
-        break;
-      }
-      case 'proj-toggle': { if (state.pExpanded.has(id)) state.pExpanded.delete(id); else state.pExpanded.add(id); render(); break; }
-      case 'proj-menu': e.stopPropagation(); openMenu(el, [
+        toast(`项目「${name}」已创建`, 'ok');}
+  }
+  async function act_proj_toggle(el, id, e) {
+ { if (state.pExpanded.has(id)) state.pExpanded.delete(id); else state.pExpanded.add(id); render();}
+  }
+  async function act_proj_menu(el, id, e) {
+ e.stopPropagation(); openMenu(el, [
         { id: 'open', label: '打开项目目录', svg: ic('folder', 14) },
         { sep: 1, label: '归档项目', svg: ic('archive', 14), danger: 1, id: 'archive' }]);
         document.querySelector('.pop [data-id="open"]').onclick = async () => {
@@ -4078,8 +4096,9 @@
           );
         };
         document.querySelector('.pop [data-id="archive"]').onclick = () => { $('#menuRoot').innerHTML = ''; confirmArchiveProject(id); };
-        break;
-      case 'sess-menu': e.stopPropagation(); openMenu(el, [
+  }
+  async function act_sess_menu(el, id, e) {
+ e.stopPropagation(); openMenu(el, [
         { id: 'copy', label: '复制会话 ID', svg: ic('copy', 14) },
         { id: 'rename', label: '重命名', svg: ic('edit', 14) },
         { sep: 1, id: 'fork', label: '创建分支', svg: ic('fork', 14) },
@@ -4091,46 +4110,74 @@
         pop.querySelector('[data-id="fork"]').onclick = () => { $('#menuRoot').innerHTML = ''; confirmNewBranch(id); };
         pop.querySelector('[data-id="archive"]').onclick = () => { $('#menuRoot').innerHTML = ''; doArchiveSession(id); };
         pop.querySelector('[data-id="delete"]').onclick = async () => { $('#menuRoot').innerHTML = ''; await doDeleteSession(id); };
-        break;
-      // 会话标题栏「分叉」（data-sid 优先；无则当前会话）
-      case 'fork': confirmNewBranch(el.dataset.sid || state.sel); break;
+  }
+  async function act_fork(el, id, e) {
+ confirmNewBranch(el.dataset.sid || state.sel); return;
       /* 创建分支（FR-6）：分叉点来自滑块，缺省 = 全继承 */
-      case 'branch-confirm': {
+  }
+  async function act_branch_confirm(el, id, e) {
+ {
         const inp = $('#modalRoot input[type=text]');
         const nm = inp ? inp.value : '';
         const at = $('#modalRoot #fork-at');
         const sid = el.dataset.sid || state.sel;
         closeModal();
-        doFork(sid, nm, at ? at.value : undefined);
-        break;
-      }
-      case 'replay-open': { state.replayFor = el.dataset.sid || state.sel; state.sessionEvents = { sid: null, data: null, loaded: false }; render(); refreshSessionEvents(state.replayFor); break; }
-      case 'replay-close': { state.replayFor = null; render(); break; }
-      case 'rename-confirm': { const inp = $('#modalRoot input[type=text]'); const sid = el.dataset.id; if (inp && sid) doRename(sid, inp.value); closeModal(); break; }
+        doFork(sid, nm, at ? at.value : undefined);}
+  }
+  async function act_replay_open(el, id, e) {
+ { state.replayFor = el.dataset.sid || state.sel; state.sessionEvents = { sid: null, data: null, loaded: false }; render(); refreshSessionEvents(state.replayFor);}
+  }
+  async function act_replay_close(el, id, e) {
+ { state.replayFor = null; render();}
+  }
+  async function act_rename_confirm(el, id, e) {
+ { const inp = $('#modalRoot input[type=text]'); const sid = el.dataset.id; if (inp && sid) doRename(sid, inp.value); closeModal(); return; }
 
       /* composer */
-      case 'send': doSend(); break;
-      case 'abort-send': doAbortSend(); break;
-      case 'skill-add': openSkillPicker(); break;
-      case 'expert-add': openExpertPicker(); break;
-      case 'skill-attach': toast(`已加载技能「${el.dataset.n}」（注册为 effect，离开会话即卸载）`, 'ok'); closeModal(); break;
-      case 'expert-attach': toast(`已 @引用「${el.dataset.n}」参与本次回复（SubAgent）`, 'ok'); closeModal(); break;
-      case 'auth-open': openAuthPicker(); break;
-      case 'auth-mode-pick': {
+  }
+  async function act_send(el, id, e) {
+ doSend();
+  }
+  async function act_abort_send(el, id, e) {
+ doAbortSend();
+  }
+  async function act_skill_add(el, id, e) {
+ openSkillPicker();
+  }
+  async function act_expert_add(el, id, e) {
+ openExpertPicker();
+  }
+  async function act_skill_attach(el, id, e) {
+ toast(`已加载技能「${el.dataset.n}」（注册为 effect，离开会话即卸载）`, 'ok'); closeModal();
+  }
+  async function act_expert_attach(el, id, e) {
+ toast(`已 @引用「${el.dataset.n}」参与本次回复（SubAgent）`, 'ok'); closeModal();
+  }
+  async function act_auth_open(el, id, e) {
+ openAuthPicker();
+  }
+  async function act_auth_mode_pick(el, id, e) {
+ {
         const target = el.dataset.id;
-        if (target === state.authMode) { closeModal(); break; }
+        if (target === state.authMode) { closeModal(); return; }
         // 从更严切到更松需二次确认（T-P3-2 防 L4 风险）。
         const loosening = (MODE_RANK[target] ?? 1) > (MODE_RANK[state.authMode] ?? 1);
         if (loosening) { confirmSwitchAuth(target); }
-        else { doSwitchAuth(target); }
-        break;
-      }
-      case 'auth-do-switch': { const target = el.dataset.id; closeModal(); doSwitchAuth(target); break; }
-      case 'sim-highrisk': { const z = $('#confirmZone'); z.innerHTML = `<div class="confirm-banner"><span class="badge warn">意图 · 待确认</span> 该请求含「删除文件」高风险动作，本地模型判定需人工确认。
-        <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="confirm-yes">确认执行</button><button class="btn sm" data-action="confirm-no">拒绝</button></div></div>`; z.scrollIntoView(); break; }
-      case 'approval-allow': { const id = el.dataset.id; closeModal(); bridge.submitDecision(id, 'allowed-once'); toast('已允许本次操作（allowed-once）', 'ok'); break; }
+        else { doSwitchAuth(target); }}
+  }
+  async function act_auth_do_switch(el, id, e) {
+ { const target = el.dataset.id; closeModal(); doSwitchAuth(target);}
+  }
+  async function act_sim_highrisk(el, id, e) {
+ { const z = $('#confirmZone'); z.innerHTML = `<div class="confirm-banner"><span class="badge warn">意图 · 待确认</span> 该请求含「删除文件」高风险动作，本地模型判定需人工确认。
+        <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="confirm-yes">确认执行</button><button class="btn sm" data-action="confirm-no">拒绝</button></div></div>`; z.scrollIntoView();}
+  }
+  async function act_approval_allow(el, id, e) {
+ { const id = el.dataset.id; closeModal(); bridge.submitDecision(id, 'allowed-once'); toast('已允许本次操作（allowed-once）', 'ok'); return; }
       /* 授权白名单（PRD FR-9）：会话 / 永久粒度 —— 先建规则再放行，规则失败则拒绝 */
-      case 'approval-grant': {
+  }
+  async function act_approval_grant(el, id, e) {
+ {
         const id = el.dataset.id;
         const scope = el.dataset.scope === 'permanent' ? 'permanent' : 'session';
         const tool = el.dataset.tool || '';
@@ -4154,39 +4201,45 @@
         }).catch((e) => {
           bridge.submitDecision(id, 'rejected');
           toast('白名单写入失败，已拒绝: ' + ((e && e.message) || e), 'err');
-        });
-        break;
-      }
-      case 'approval-deny': { const id = el.dataset.id; closeModal(); bridge.submitDecision(id, 'rejected'); toast('已拒绝该操作', 'danger'); break; }
-      case 'confirm-yes': case 'confirm-no': { const z = $('#confirmZone'); z.innerHTML = ''; toast(a === 'confirm-yes' ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', a === 'confirm-yes' ? 'ok' : 'danger'); break; }
+        });}
+  }
+  async function act_approval_deny(el, id, e) {
+ { const id = el.dataset.id; closeModal(); bridge.submitDecision(id, 'rejected'); toast('已拒绝该操作', 'danger');}
+  }
+  async function act_confirm_yes(el, id, e) {
+ { const z = $('#confirmZone'); z.innerHTML = ''; toast(a === 'confirm-yes' ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', a === 'confirm-yes' ? 'ok' : 'danger'); return; }
 
       /* 补偿层（T-P5-1） */
       /* 沙箱日志（PRD FR-8 可检索）：检索条件变更由 input/change 监听驱动，
          这里只处理「清空」这个破坏性动作。 */
       /* 数据目录清单（PRD FR-4.2）：导入/导出之后体积会变，手动重扫。 */
-      case 'dir-inv-refresh': {
+  }
+  async function act_dir_inv_refresh(el, id, e) {
+ {
         refreshDataDirInventory();
         toast('正在重新扫描数据目录…', 'ok');
-        break;
+        return;
       }
 
       /* 分层记忆晋升（PRD FR-10，第十四个死挂点）：
          插件的 promote() 一直存在但零调用方，这里补的是调用链。 */
-      case 'mem-domain': {
+  }
+  async function act_mem_domain(el, id, e) {
+ {
         state.memory.domain = el.dataset.domain || 'worker';
-        refreshMemoryDomain();
-        break;
-      }
-      case 'mem-refresh': {
-        refreshMemoryDomain();
-        break;
-      }
-      case 'mem-promote': {
+        refreshMemoryDomain();}
+  }
+  async function act_mem_refresh(el, id, e) {
+ {
+        refreshMemoryDomain();}
+  }
+  async function act_mem_promote(el, id, e) {
+ {
         const id = el.dataset.id || '';
         const from = el.dataset.from || state.memory.domain;
         const to = el.dataset.to || '';
-        if (!id || !to) { toast('晋升参数缺失', 'warn'); break; }
-        if (typeof bridge.promoteMemory !== 'function') { toast('晋升未接入（主进程桥不可用）', 'warn'); break; }
+        if (!id || !to) { toast('晋升参数缺失', 'warn'); return; }
+        if (typeof bridge.promoteMemory !== 'function') { toast('晋升未接入（主进程桥不可用）', 'warn'); return; }
         state.memory.busy = true; render();
         bridge.promoteMemory({ id, from, to }).then((r) => {
           state.memory.busy = false;
@@ -4199,11 +4252,11 @@
           state.memory.busy = false;
           toast(`晋升失败：${(err && err.message) || err}`, 'err');
           render();
-        });
-        break;
-      }
-      case 'mem-promote-worker': {
-        if (typeof bridge.promoteWorkerDomain !== 'function') { toast('批量晋升未接入（主进程桥不可用）', 'warn'); break; }
+        });}
+  }
+  async function act_mem_promote_worker(el, id, e) {
+ {
+        if (typeof bridge.promoteWorkerDomain !== 'function') { toast('批量晋升未接入（主进程桥不可用）', 'warn'); return; }
         state.memory.busy = true; render();
         bridge.promoteWorkerDomain('director').then((r) => {
           state.memory.busy = false;
@@ -4215,11 +4268,11 @@
           state.memory.busy = false;
           toast(`批量晋升异常：${(err && err.message) || err}`, 'err');
           render();
-        });
-        break;
-      }
-      case 'mp-clear': {
-        if (!state.memoryPromotions.total) break;
+        });}
+  }
+  async function act_mp_clear(el, id, e) {
+ {
+        if (!state.memoryPromotions.total) return;
         bridge.clearMemoryPromotions().then((r) => {
           if (!r || !r.ok) { toast('清空失败（主进程未接入）', 'warn'); return; }
           state.memoryPromotions = {
@@ -4228,11 +4281,11 @@
           };
           render();
           toast(`已清空晋升审计（${r.cleared} 条）`, 'ok');
-        }).catch(() => toast('清空失败', 'err'));
-        break;
-      }
-      case 'sblog-clear': {
-        if (!state.sandboxLog.total) break;
+        }).catch(() => toast('清空失败', 'err'));}
+  }
+  async function act_sblog_clear(el, id, e) {
+ {
+        if (!state.sandboxLog.total) return;
         bridge.clearSandboxLog().then((r) => {
           if (!r || !r.ok) { toast('清空失败（主进程未接入）', 'warn'); return; }
           state.sandboxLog.entries = [];
@@ -4240,10 +4293,10 @@
           state.sandboxLog.stats = { total: 0, allowed: 0, denied: 0, error: 0, byTool: [] };
           render();
           toast(`已清空沙箱日志（${r.cleared} 条）`, 'ok');
-        }).catch(() => toast('清空失败', 'err'));
-        break;
-      }
-      case 'sandbox-save-net': {
+        }).catch(() => toast('清空失败', 'err'));}
+  }
+  async function act_sandbox_save_net(el, id, e) {
+ {
         const ta = document.getElementById('net-allow');
         const list = String((ta && ta.value) || '').split('\n').map((s) => s.trim()).filter(Boolean);
         const tip = document.getElementById('net-allow-tip');
@@ -4259,31 +4312,33 @@
             if (tip) tip.textContent = `保存失败：${(r && r.reason) || '未知原因'}`;
             toast('沙箱白名单保存失败', 'warn');
           }
-        }).catch(() => { if (tip) tip.textContent = '保存失败（主进程未接入）'; });
-        break;
-      }
-      case 'comp-record': {
+        }).catch(() => { if (tip) tip.textContent = '保存失败（主进程未接入）'; });}
+  }
+  async function act_comp_record(el, id, e) {
+ {
         openModal(`<div class="mh">${ic('warn', 18)}<b>记录补偿动作</b></div>
           <div class="mb">
             <div class="faint" style="margin-bottom:8px">补偿层无形式化保证，仅做尽力补偿。描述已发生的边界外/不可逆操作：</div>
             <textarea id="compText" class="inp" rows="3" placeholder="如：已删除 /tmp/secret.txt"></textarea>
           </div>
-          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="comp-do">记录</button></div>`);
-        break;
-      }
-      case 'comp-do': {
+          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="comp-do">记录</button></div>`);}
+  }
+  async function act_comp_do(el, id, e) {
+ {
         const t = ($('#compText')?.value || '').trim();
-        if (!t) { toast('请描述操作', 'warn'); break; }
+        if (!t) { toast('请描述操作', 'warn'); return; }
         try {
           const rec = await bridge.compensate(t);
           state.compAudit.unshift(rec);
           closeModal(); render(); toast('补偿动作已记录并入审计', 'ok');
         } catch { toast('记录失败（运行时未接入）', 'warn'); }
-        break;
+        return;
       }
 
       /* 自进化临时插件（T-P5-2） */
-      case 'tp-new': {
+  }
+  async function act_tp_new(el, id, e) {
+ {
         openModal(`<div class="mh">${ic('skills', 18)}<b>新建临时插件（自进化）</b></div>
           <div class="mb">
             <div class="faint" style="margin-bottom:8px">信任级 = Shell，须沙箱内运行；仅驻内存，重启即失。加载前经静态分析 + CONFIRM。</div>
@@ -4292,29 +4347,29 @@
           </div>
           <!-- 内联 onclick 里的 toast/bridge/state 都在 IIFE 作用域外，点击必 ReferenceError；
                逻辑已由下方委托的 case 'tp-create' 承担。 -->
-          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="tp-create">创建（CONFIRM）</button></div>`);
-        break;
-      }
-      case 'tp-create': {
+          <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button><button class="btn primary" data-action="tp-create">创建（CONFIRM）</button></div>`);}
+  }
+  async function act_tp_create(el, id, e) {
+ {
         const name = ($('#tpName')?.value || '').trim();
         const code = ($('#tpCode')?.value || '').trim();
-        if (!name || !code) { toast('请填写名称与代码', 'warn'); break; }
+        if (!name || !code) { toast('请填写名称与代码', 'warn'); return; }
         try {
           const r = await bridge.createTempPlugin({ name, code });
           if (r && r.ok) { state.tempPlugins.unshift(r.plugin); closeModal(); render(); toast(`已创建临时插件「${name}」（仅驻内存）`, 'ok'); }
           else { toast('创建被拒：' + ((r && r.reason) || '静态门控未通过'), 'danger'); }
-        } catch { toast('创建失败（运行时未接入）', 'warn'); }
-        break;
-      }
-      case 'tp-dispose': {
+        } catch { toast('创建失败（运行时未接入）', 'warn'); }}
+  }
+  async function act_tp_dispose(el, id, e) {
+ {
         try {
           const ok = await bridge.disposeTempPlugin(id);
           if (ok) state.tempPlugins = state.tempPlugins.filter((p) => p.id !== id);
           render(); toast('临时插件已卸载', 'warn');
-        } catch { toast('卸载失败（运行时未接入）', 'warn'); }
-        break;
-      }
-      case 'trace': {
+        } catch { toast('卸载失败（运行时未接入）', 'warn'); }}
+  }
+  async function act_trace(el, id, e) {
+ {
         // key 必须与 renderMsg 的读取口径一致（sid|m.t）；此前硬编码 's1' 导致反馈永远显示不出来。
         const sid = state.sel || '';
         const key = sid + '|' + (el.dataset.t || '');
@@ -4337,28 +4392,35 @@
           if (r && r.ok) toast(`TRACE：反馈已记录（待发 ${(r.queue && r.queue.pending) || 0} 条，脱敏后批量上送）`, 'ok');
           else if (r && r.reason) toast(`TRACE 反馈未能入队：${r.reason}`, 'warn');
         }).catch(() => {});
-        break;
+        return;
       }
 
       /* 模型选择 + 思维等级 */
-      case 'composer-more-toggle': { state.composerMoreOpen = !state.composerMoreOpen; const cm = document.querySelector('.composer-more-dropdown'); if (cm) cm.classList.toggle('open', state.composerMoreOpen); break; }
-      case 'model-pick': openModelPicker(); break;
-      case 'model-toggle': {
+  }
+  async function act_composer_more_toggle(el, id, e) {
+ { state.composerMoreOpen = !state.composerMoreOpen; const cm = document.querySelector('.composer-more-dropdown'); if (cm) cm.classList.toggle('open', state.composerMoreOpen);}
+  }
+  async function act_model_pick(el, id, e) {
+ openModelPicker();
+  }
+  async function act_model_toggle(el, id, e) {
+ {
         const n = el.dataset.n; const idx = state.selectedModels.indexOf(n);
         if (idx >= 0) { state.selectedModels.splice(idx, 1); el.classList.remove('sel'); }
         else { state.selectedModels.push(n); el.classList.add('sel'); }
         const btn = document.querySelector('[data-action="model-confirm"]'); if (btn) btn.textContent = `确认（${state.selectedModels.length} 个）`;
-        document.querySelectorAll('.mg-all').forEach((sp) => { const p = sp.dataset.p; const grp = getModelPool().filter((m) => m.p.split(' · ')[0] === p); const allSel = grp.every((m) => state.selectedModels.includes(m.n)); sp.textContent = allSel ? '取消全选' : '全选'; });
-        break;
-      }
-      case 'mg-toggle-all': {
+        document.querySelectorAll('.mg-all').forEach((sp) => { const p = sp.dataset.p; const grp = getModelPool().filter((m) => m.p.split(' · ')[0] === p); const allSel = grp.every((m) => state.selectedModels.includes(m.n)); sp.textContent = allSel ? '取消全选' : '全选'; });}
+  }
+  async function act_mg_toggle_all(el, id, e) {
+ {
         const p = el.dataset.p; const grp = getModelPool().filter((m) => m.p.split(' · ')[0] === p);
         const allSel = grp.every((m) => state.selectedModels.includes(m.n));
         if (allSel) grp.forEach((m) => { const i = state.selectedModels.indexOf(m.n); if (i >= 0) state.selectedModels.splice(i, 1); });
         else grp.forEach((m) => { if (!state.selectedModels.includes(m.n)) state.selectedModels.push(m.n); });
-        openModelPicker(); break;
-      }
-      case 'model-confirm': {
+        openModelPicker();}
+  }
+  async function act_model_confirm(el, id, e) {
+ {
         const selectedNames = [...state.selectedModels];
         // 持久化到 localStorage（跨会话复用）
         if (selectedNames.length === 0) {
@@ -4372,13 +4434,18 @@
         const curS = state.sessions[state.sel];
         if (curS && selectedNames.length) curS.model = selectedNames[0];
         if (curS) curS.models = selectedNames;
-        closeModal(); render(); break;
-      }
-      case 'model-clear': state.selectedModels = []; openModelPicker(); break;
+        closeModal(); render();}
+  }
+  async function act_model_clear(el, id, e) {
+ state.selectedModels = []; openModelPicker(); return;
 
       /* 插件 */
-      case 'pside-toggle': { if (state.plugSideExpanded.has(id)) state.plugSideExpanded.delete(id); else state.plugSideExpanded.add(id); render(); break; }
-      case 'plug-toggle': {
+  }
+  async function act_pside_toggle(el, id, e) {
+ { if (state.plugSideExpanded.has(id)) state.plugSideExpanded.delete(id); else state.plugSideExpanded.add(id); render();}
+  }
+  async function act_plug_toggle(el, id, e) {
+ {
         // 真实热插拔（FR-3）：此前只切 CSS class + toast，插件从未真正加载/卸载。
         const wantOn = !el.classList.contains('on');
         el.style.pointerEvents = 'none'; el.style.opacity = '0.6';
@@ -4398,14 +4465,16 @@
         } finally {
           el.style.pointerEvents = ''; el.style.opacity = '';
           render();
-        }
-        break;
-      }
-      case 'plug-cfg': { const card = el.closest('.plug'); if (card) card.classList.toggle('open'); break; }
-      case 'plug-nav': { const card = document.querySelector(`.plug[data-pid="${id}"]`); if (card) { card.classList.add('open'); card.scrollIntoView({ behavior: 'smooth', block: 'start' }); } break; }
-      // 停用即注册回滚（无残留）—— 走与开关相同的真实 IPC。
-      // 原「卸载并回滚」是只弹 toast 的假动作（主进程没有卸载 IPC），不留假按钮。
-      case 'plug-disable': {
+        }}
+  }
+  async function act_plug_cfg(el, id, e) {
+ { const card = el.closest('.plug'); if (card) card.classList.toggle('open');}
+  }
+  async function act_plug_nav(el, id, e) {
+ { const card = document.querySelector(`.plug[data-pid="${id}"]`); if (card) { card.classList.add('open'); card.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}
+  }
+  async function act_plug_disable(el, id, e) {
+ {
         try {
           const r = await bridge.setPluginEnabled(id, false);
           if (r && r.ok) {
@@ -4417,40 +4486,44 @@
         } catch (err) {
           toast(`停用异常：${(err && err.message) || err}`, 'danger');
         }
-        render();
-        break;
-      }
-      case 'plug-unload': {
+        render();}
+  }
+  async function act_plug_unload(el, id, e) {
+ {
         // 兼容旧入口：转发到真实停用
         try {
           const r = await bridge.setPluginEnabled(id || '', false);
           if (r && r.ok) toast('已停用（注册已回滚，无残留）', 'warn');
           else toast(`停用失败：${(r && r.reason) || '未知错误'}`, 'danger');
         } catch { toast('停用异常', 'danger'); }
-        render();
-        break;
-      }
-      case 'market': toast(`「${el.dataset.n}」请到 设置-技能市场（观雅集）完成安装与能力审查`, 'warn'); break;
-      case 'market-auth': toast(`「${el.dataset.n}」需授权：请在 设置-技能市场 安装时于确认弹窗中授权高危能力`, 'warn'); break;
+        render();}
+  }
+  async function act_market(el, id, e) {
+ toast(`「${el.dataset.n}」请到 设置-技能市场（观雅集）完成安装与能力审查`, 'warn');
+  }
+  async function act_market_auth(el, id, e) {
+ toast(`「${el.dataset.n}」需授权：请在 设置-技能市场 安装时于确认弹窗中授权高危能力`, 'warn'); return;
 
       /* 连接器（PRD FR-3） */
-      case 'conn-cfg':
+  }
+  async function act_conn_cfg(el, id, e) {
         state.connectors.expanded = state.connectors.expanded === id ? null : id;
         if (state.page === 'plugins') render();
-        break;
-      case 'conn-test': {
+  }
+  async function act_conn_test(el, id, e) {
+ {
         el.textContent = '测试中…'; el.disabled = true;
         bridge.connectorTest(id).then((r) => {
           if (!r || r.ok === false && r.reason) { toast(String(r && r.reason || '探测失败'), 'err'); }
           else toast(r.message || (r.ok ? '连通性正常' : '探测失败'), r.ok ? 'ok' : 'warn');
           refreshConnectors();
-        }).catch((err) => { toast(`探测失败：${err && err.message || err}`, 'err'); refreshConnectors(); });
-        break;
-      }
-      case 'conn-discover': {
+        }).catch((err) => { toast(`探测失败：${err && err.message || err}`, 'err'); refreshConnectors(); });}
+  }
+  async function act_conn_discover(el, id, e) {
+ {
         // 自动发现：从本机 CLI/git 登录态找该连接器是否已可用。只找不写盘——
         // 找到的 secret 回填进表单，用户仍要点「保存并测试」才真正写入（尊重授权）。
-        if (typeof bridge.connectorDiscover !== 'function') { toast('主进程未接入，无法自动发现', 'warn'); break; }
+        if (typeof bridge.connectorDiscover !== 'function') { toast('主进程未接入，无法自动发现', 'warn'); return; }
         el.textContent = '发现中…'; el.disabled = true;
         try {
           const r = await bridge.connectorDiscover(id);
@@ -4472,10 +4545,10 @@
           }
         } catch (err) {
           toast(`自动发现失败：${err && err.message || err}`, 'err');
-        }
-        break;
-      }
-      case 'conn-save': {
+        }}
+  }
+  async function act_conn_save(el, id, e) {
+ {
         const inputs = document.querySelectorAll(`[id^="connf-${id}-"]`);
         const creds = {};
         inputs.forEach((inp) => { creds[inp.id.replace(`connf-${id}-`, '')] = inp.value; });
@@ -4486,53 +4559,58 @@
           else if (r.probe) toast(r.probe.manual ? String(r.probe.message || '已保存') : (r.probe.ok ? `已保存 · ${r.probe.message}` : `已保存 · ${r.probe.message}`), r.probe.manual || r.probe.ok ? 'ok' : 'warn');
           else toast('凭证已保存', 'ok');
           refreshConnectors();
-        }).catch((err) => { toast(`保存失败：${err && err.message || err}`, 'err'); refreshConnectors(); });
-        break;
-      }
-      case 'conn-clear': {
+        }).catch((err) => { toast(`保存失败：${err && err.message || err}`, 'err'); refreshConnectors(); });}
+  }
+  async function act_conn_clear(el, id, e) {
+ {
         bridge.connectorClear(id).then((r) => {
           toast(r && r.ok ? '凭证已清除' : String(r && r.reason || '清除失败'), r && r.ok ? 'ok' : 'err');
           refreshConnectors();
-        }).catch((err) => toast(`清除失败：${err && err.message || err}`, 'err'));
-        break;
-      }
-      case 'conn-audit-clear':
+        }).catch((err) => toast(`清除失败：${err && err.message || err}`, 'err'));}
+  }
+  async function act_conn_audit_clear(el, id, e) {
         bridge.clearConnectorAudit().then((r) => {
           toast(r && r.ok ? `已清空 ${r.cleared} 条审计` : '清空失败', r && r.ok ? 'ok' : 'err');
           refreshConnectorAudit();
         }).catch(() => {});
-        break;
-      case 'open-external':
+  }
+  async function act_open_external(el, id, e) {
         if (typeof bridge.openExternal === 'function') {
           bridge.openExternal(el.dataset.url || '').then((r) => {
             if (!r || !r.ok) toast(String(r && r.reason || '无法打开链接'), 'err');
           }).catch(() => {});
         } else toast('外部链接打开未接入', 'warn');
-        break;
+        return;
 
       /* 本地插件市场（PRD FR-3） */
-      case 'market-refresh': refreshMarket(); break;
+  }
+  async function act_market_refresh(el, id, e) {
+ refreshMarket(); return;
 
       /* FR-5 用量追踪 */
-      case 'usage-refresh': refreshUsage(); break;
-      case 'usage-clear':
+  }
+  async function act_usage_refresh(el, id, e) {
+ refreshUsage();
+  }
+  async function act_usage_clear(el, id, e) {
         bridge.clearUsage().then((r) => {
           toast(r && r.ok ? '用量记账已清空' : String(r && r.reason || '清空失败'), r && r.ok ? 'ok' : 'err');
           refreshUsage();
         }).catch(() => {});
-        break;
-      case 'market-open-dir':
-        if (typeof bridge.openMarketDir !== 'function') { toast('未接入', 'warn'); break; }
+  }
+  async function act_market_open_dir(el, id, e) {
+        if (typeof bridge.openMarketDir !== 'function') { toast('未接入', 'warn'); return; }
         bridge.openMarketDir().then((r) => {
           if (!r || !r.ok) toast(String(r && r.reason || '无法打开插件目录'), 'err');
           else toast('已在系统文件管理器打开插件目录', 'ok');
         }).catch((err) => toast(`打开失败：${err && err.message || err}`, 'err'));
-        break;
-      case 'market-local-toggle': {
+  }
+  async function act_market_local_toggle(el, id, e) {
+ {
         const item = state.market.items.find((x) => x.dir === id);
         const next = !(item && item.enabled);
         if (item) state.market.busy = id;
-        if (typeof bridge.setMarketPluginEnabled !== 'function') { toast('未接入', 'warn'); break; }
+        if (typeof bridge.setMarketPluginEnabled !== 'function') { toast('未接入', 'warn'); return; }
         bridge.setMarketPluginEnabled(id, next).then((r) => {
           if (!r || r.ok === false) {
             toast(String(r && r.reason || '操作失败'), 'err');
@@ -4544,28 +4622,26 @@
             toast('已停用（逆回滚完成，无残留）', 'ok');
           }
           refreshMarket();
-        }).catch((err) => toast(`操作失败：${err && err.message || err}`, 'err'));
-        break;
-      }
-      // 侧栏导航：滚到主区对应分区并短暂高亮（此前 plug-nav 只处理内置插件，
-      // 其余条目要么没有 action、要么是空 case market-local-nav —— 点了像坏了）。
-      case 'pside-nav': {
+        }).catch((err) => toast(`操作失败：${err && err.message || err}`, 'err'));}
+  }
+  async function act_pside_nav(el, id, e) {
+ {
         const target = el.dataset.target;
         const node = target && document.getElementById(target);
         if (node) {
           node.scrollIntoView({ behavior: 'smooth', block: 'start' });
           node.classList.add('psec-flash');
           setTimeout(() => node.classList.remove('psec-flash'), 1200);
-        }
-        break;
-      }
-      case 'market-local-nav': {
+        }}
+  }
+  async function act_market_local_nav(el, id, e) {
+ {
         // 旧入口（已由 pside-nav 取代），保留以免外部/旧状态点击落空
         const node = document.getElementById('psec-market');
-        if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        break;
-      }
-      case 'conn-nav': {
+        if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' });}
+  }
+  async function act_conn_nav(el, id, e) {
+ {
         // 侧栏点连接器 = 滚到连接器分区 + 展开该连接器配置（原来只展开、不滚动）
         const node = document.getElementById('psec-connectors');
         if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -4576,11 +4652,13 @@
           const n2 = document.getElementById('psec-connectors');
           if (n2) n2.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
-        break;
+        return;
       }
 
       /* T-P6-1 观雅集技能市场 */
-      case 'guanji-token': {
+  }
+  async function act_guanji_token(el, id, e) {
+ {
         askInput({
           title: '配置观雅集 TOKEN',
           label: '粘贴观雅集持久化 TOKEN（来自 https://skill.ytaiv.com/api/auth/token，登录后获取）。TOKEN 将经系统安全存储加密保存，绝不硬编码。',
@@ -4595,14 +4673,14 @@
             toast(state.guanjiTokenSet ? '观雅集 TOKEN 已配置' : `TOKEN 配置失败：${(r && r.reason) || '未知错误'}`, state.guanjiTokenSet ? 'ok' : 'danger');
             render();
           },
-        });
-        break;
-      }
-      case 'guanji-install': {
+        });}
+  }
+  async function act_guanji_install(el, id, e) {
+ {
         const slug = el.dataset.slug;
         const list = state.guanjiSkills.length ? state.guanjiSkills : SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }));
         const skill = list.find((x) => x.slug === slug);
-        if (!skill) break;
+        if (!skill) return;
         if (skill.auth === 1) {
           // 高危技能：先弹显式授权确认（列出声明的 L3/L4 高危能力），确认后 authorized=true 安装。
           openModal(`<div class="mh">${ic('shield', 18)}<b>授权安装「${esc(skill.name || slug)}」</b></div>
@@ -4614,18 +4692,18 @@
               <button class="btn danger" data-action="guanji-install-auth" data-slug="${esc(slug)}">授权并安装</button></div>`);
         } else {
           await doInstallGuanjiSkill(skill, false);
-        }
-        break;
-      }
-      case 'guanji-install-auth': {
+        }}
+  }
+  async function act_guanji_install_auth(el, id, e) {
+ {
         const slug = el.dataset.slug;
         const list = state.guanjiSkills.length ? state.guanjiSkills : SKILLS_MARKET.map((s) => ({ slug: s.n, name: s.n, description: s.d, caps: s.caps, auth: s.auth }));
         const skill = list.find((x) => x.slug === slug);
-        if (!skill) break;
-        await doInstallGuanjiSkill(skill, true);
-        break;
-      }
-      case 'guanji-publish': {
+        if (!skill) return;
+        await doInstallGuanjiSkill(skill, true);}
+  }
+  async function act_guanji_publish(el, id, e) {
+ {
         askInput({
           title: '发布技能到观雅集',
           label: '输入技能 slug（与 .skill 包根 SKILL.md 的 name 一致）。发布需已配置 TOKEN；.skill 包经 Electron 文件对话框选择后上传。',
@@ -4637,11 +4715,13 @@
             toast(r && r.ok ? `已发布「${slug.trim()}」到观雅集` : `发布失败：${(r && r.reason) || '需配置 TOKEN 与有效 .skill 文件'}`, r && r.ok ? 'ok' : 'danger');
             render();
           },
-        });
-        break;
-      }
-      case 'skill-toggle': { const s = state.installedSkills.find((x) => x.slug === el.dataset.n); if (s) { s.enabled = !s.enabled; render(); } break; }
-      case 'skill-uninstall': {
+        });}
+  }
+  async function act_skill_toggle(el, id, e) {
+ { const s = state.installedSkills.find((x) => x.slug === el.dataset.n); if (s) { s.enabled = !s.enabled; render(); }}
+  }
+  async function act_skill_uninstall(el, id, e) {
+ {
         // 真删磁盘包。此前只从渲染层数组移除，文件还在 —— 下次启动又冒出来。
         const slug = el.dataset.n;
         try {
@@ -4658,11 +4738,13 @@
           toast(`卸载异常：${(err && err.message) || err}`, 'danger');
         }
         render();
-        break;
+        return;
       }
 
       /* MCP（真接入） */
-      case 'mcp-add': {
+  }
+  async function act_mcp_add(el, id, e) {
+ {
         openModal(`<div class="mh">${ic('zap', 18)}<b>添加 MCP server</b></div>
           <div class="mb">
             <div class="faint" style="margin-bottom:8px">stdio 传输：填写启动命令与参数。env 值（如 API 密钥）将<b>加密</b>落盘。保存即握手探测一次。</div>
@@ -4673,16 +4755,16 @@
             <div class="mb-row"><label>环境变量（KEY=VALUE，一行一个，选填）</label><textarea id="mcpEnv" class="inp" rows="3" placeholder="GITHUB_TOKEN=ghp_xxx"></textarea></div>
           </div>
           <div class="mf"><button class="btn ghost" data-action="modal-cancel">取消</button>
-            <button class="btn primary" data-action="mcp-save">保存并探测</button></div>`);
-        break;
-      }
-      case 'mcp-save': {
+            <button class="btn primary" data-action="mcp-save">保存并探测</button></div>`);}
+  }
+  async function act_mcp_save(el, id, e) {
+ {
         const id = ($('#mcpId') && $('#mcpId').value || '').trim();
         const name = ($('#mcpName') && $('#mcpName').value || '').trim();
         const command = ($('#mcpCmd') && $('#mcpCmd').value || '').trim();
         const argsRaw = ($('#mcpArgs') && $('#mcpArgs').value || '').trim();
         const envRaw = ($('#mcpEnv') && $('#mcpEnv').value || '').trim();
-        if (!id || !command) { toast('ID 与命令必填', 'warn'); break; }
+        if (!id || !command) { toast('ID 与命令必填', 'warn'); return; }
         const args = argsRaw ? argsRaw.split(/\s+/).filter(Boolean) : [];
         const env = {};
         if (envRaw) {
@@ -4710,10 +4792,10 @@
         }
         closeModal();
         await refreshMcp();
-        render();
-        break;
-      }
-      case 'mcp-probe': {
+        render();}
+  }
+  async function act_mcp_probe(el, id, e) {
+ {
         const id = el.dataset.id;
         el.textContent = '探测中…'; el.disabled = true;
         try {
@@ -4728,10 +4810,10 @@
           toast(`探测异常：${(err && err.message) || err}`, 'danger');
         }
         await refreshMcp();
-        render();
-        break;
-      }
-      case 'mcp-toggle': {
+        render();}
+  }
+  async function act_mcp_toggle(el, id, e) {
+ {
         const id = el.dataset.id;
         const cur = state.mcp.servers.find((x) => x.id === id);
         const want = !(cur && cur.enabled !== false);
@@ -4744,10 +4826,10 @@
           toast(`切换异常：${(err && err.message) || err}`, 'danger');
         }
         await refreshMcp();
-        render();
-        break;
-      }
-      case 'mcp-del': {
+        render();}
+  }
+  async function act_mcp_del(el, id, e) {
+ {
         const id = el.dataset.id;
         try {
           const r = typeof bridge.mcpDelete === 'function'
@@ -4759,23 +4841,25 @@
         }
         await refreshMcp();
         render();
-        break;
+        return;
       }
 
       /* T-P6-2 OrchClaw Hub 联调 */
-      case 'hub-pair': {
+  }
+  async function act_hub_pair(el, id, e) {
+ {
         const url = (($('#hubUrl') && $('#hubUrl').value) || '').trim();
         const token = (($('#hubToken') && $('#hubToken').value) || '').trim();
-        if (!url || !token) { toast('请填写 Hub URL 与配对凭据', 'danger'); break; }
+        if (!url || !token) { toast('请填写 Hub URL 与配对凭据', 'danger'); return; }
         const r = await bridge.hubPair(url, token);
         if (r && r.ok) { state.hubStatus = { paired: true, url, agentName: r.agentName }; state.hubUrl = url; toast(`已配对远程 Agent${r.agentName ? '：' + r.agentName : ''}`, 'ok'); }
         else { toast(`配对失败：${(r && r.reason) || '未知错误'}`, 'danger'); }
-        render();
-        break;
-      }
-      case 'hub-send': {
+        render();}
+  }
+  async function act_hub_send(el, id, e) {
+ {
         const text = (($('#hubTask') && $('#hubTask').value) || '').trim();
-        if (!text) { toast('请填写任务内容', 'danger'); break; }
+        if (!text) { toast('请填写任务内容', 'danger'); return; }
         state.hubTaskText = text;
         const r = await bridge.hubSend(text);
         if (r && r.ok && r.taskId) {
@@ -4783,13 +4867,15 @@
           const res = await bridge.hubResult(r.taskId);
           state.hubResultText = (res && res.result) ? res.result : `状态：${(res && res.status) || 'unknown'}`;
         } else { state.hubResultText = `发送失败：${(r && r.reason) || '未配对'}`; }
-        render();
-        break;
-      }
-      case 'hub-unpair': { state.hubStatus = { paired: false }; state.hubResultText = ''; toast('已解除配对', 'warn'); render(); break; }
+        render();}
+  }
+  async function act_hub_unpair(el, id, e) {
+ { state.hubStatus = { paired: false }; state.hubResultText = ''; toast('已解除配对', 'warn'); render(); return; }
 
       /* 设置 */
-      case 'model-test': {
+  }
+  async function act_model_test(el, id, e) {
+ {
         // 此前用 800ms setTimeout 伪造「连通正常」，而真正的 bridge.testModel 从未被调用 —— 假成功。
         // 改为真实连通性测试：主进程发一次真实请求并计时。
         const pid = el.dataset.id || '';
@@ -4803,12 +4889,12 @@
           toast(`测试异常：${(err && err.message) || err}`, 'danger');
         } finally {
           el.disabled = false; el.textContent = '测试';
-        }
-        break;
-      }
-      case 'model-edit-provider': {
+        }}
+  }
+  async function act_model_edit_provider(el, id, e) {
+ {
         const p = (state.modelProviders || []).find(x => x.id === el.dataset.id);
-        if (!p) break;
+        if (!p) return;
         state.mpEditing = { id: p.id };
         render();
         $('#mp-type').value = p.type || 'ollama';
@@ -4819,20 +4905,22 @@
         $('#mp-key').value = '';
         $('#mp-models').value = (p.models || []).join(', ');
         updateProtocolRow();
-        $('#mp-name').focus();
-        break;
-      }
-      case 'model-del-provider': {
+        $('#mp-name').focus();}
+  }
+  async function act_model_del_provider(el, id, e) {
+ {
         state.modelProviders = (state.modelProviders || []).filter(x => x.id !== el.dataset.id);
         const r = await bridge.saveModelConfig({ providers: state.modelProviders, defaultProvider: state.defaultProvider });
         if (r && r.ok) {
           try { const mc = await bridge.getModelConfig(); if (mc && mc.providers) dynamicModels = mc.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' · ' + p.type, k: '(本地)', state: '已配' }))); } catch { dynamicModels = []; }
           toast('提供商已删除', 'warn'); renderModelProviders();
-        } else { toast('删除失败', 'danger'); }
-        break;
-      }
-      case 'model-cancel-edit': { state.mpEditing = null; render(); break; }
-      case 'model-add-provider': {
+        } else { toast('删除失败', 'danger'); }}
+  }
+  async function act_model_cancel_edit(el, id, e) {
+ { state.mpEditing = null; render();}
+  }
+  async function act_model_add_provider(el, id, e) {
+ {
         const type = $('#mp-type')?.value || 'ollama';
         const name = $('#mp-name')?.value?.trim();
         let url = $('#mp-url')?.value?.trim();
@@ -4840,7 +4928,7 @@
         const key = $('#mp-key')?.value?.trim();
         const modelsStr = $('#mp-models')?.value?.trim();
         const apiMode = type === 'openai-compatible' ? ($('#mp-mode')?.value || 'chat') : 'ollama';
-        if (!name || !url) { toast('请填写名称和 Base URL', 'warn'); break; }
+        if (!name || !url) { toast('请填写名称和 Base URL', 'warn'); return; }
         if (!full) {
           const proto = url.startsWith('http://') ? 'http://' : url.startsWith('https://') ? 'https://' : 'http://';
           url = proto + url;
@@ -4865,42 +4953,37 @@
           toast(isEdit ? `提供商「${name}」已更新` : `提供商「${name}」已添加`, 'ok');
           if (!isEdit) { $('#mp-name').value = ''; $('#mp-url').value = ''; $('#mp-key').value = ''; $('#mp-models').value = ''; }
           renderModelProviders();
-        } else { toast(`保存失败：${(r2 && r2.reason) || ''}`, 'danger'); }
-        break;
-      }
-      // 兜底：UI 里不该再出现未接线动作。此前这里弹「该操作在真实版本中打开
-      // 对应面板」——可这就是真实版本，那句话等于用假承诺把死挂点糊过去。
-      // 现在未接线动作会在控制台报警，并在界面上如实说「未接线」。
-      case 'todo':
+        } else { toast(`保存失败：${(r2 && r2.reason) || ''}`, 'danger'); }}
+  }
+  async function act_todo(el, id, e) {
         console.warn('[orchdesk] 未接线的动作被点击：', el.dataset.action, el.outerHTML.slice(0, 120));
         toast('该动作尚未接线（已记录到控制台）', 'warn');
-        break;
-      default:
-        // 动作名拼错 / 新增动作忘了写分支 —— 别静默吞掉。
-        console.warn('[orchdesk] 未知的 data-action：', a);
-        break;
-
-      /* T-P6-3 数据快照 + 更新检查 */
-      case 'open-project-dir': {
+  }
+  async function act_open_project_dir(el, id, e) {
+ {
         // 设置页语义 = 打开数据目录，故意不传项目路径（项目目录走项目的 `··` 菜单）。
         const r = await bridge.openProjectDir();
         toast(r && r.ok ? `已打开数据目录：${(r && r.path) || ''}` : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
-        break;
+        return;
       }
       /* 日志目录（模型调用 / 插件加载诊断留痕） */
-      case 'open-log-dir': {
+  }
+  async function act_open_log_dir(el, id, e) {
+ {
         const r = await bridge.openLogDir();
-        toast(r && r.ok ? `已打开日志目录\n当前日志: ${r.file || ''}` : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');
-        break;
-      }
-      case 'snapshot-data': { const r = await bridge.snapshotData(); toast(r && r.ok ? `数据快照已生成：${r.dir}` : `快照失败：${(r && r.reason) || ''}`, r && r.ok ? 'ok' : 'danger'); break; }
+        toast(r && r.ok ? `已打开日志目录\n当前日志: ${r.file || ''}` : `打开失败：${(r && r.reason) || '未知错误'}`, r && r.ok ? 'ok' : 'danger');}
+  }
+  async function act_snapshot_data(el, id, e) {
+ { const r = await bridge.snapshotData(); toast(r && r.ok ? `数据快照已生成：${r.dir}` : `快照失败：${(r && r.reason) || ''}`, r && r.ok ? 'ok' : 'danger'); return; }
       /* BUG-013 方案 B：数据导出 / 导入 */
-      case 'export-data': {
+  }
+  async function act_export_data(el, id, e) {
+ {
         const r = await bridge.exportData();
-        toast(r && r.ok ? `数据已导出：${r.path}` : (r && r.reason === 'cancelled' ? '已取消导出' : `导出失败：${(r && r.reason) || ''}`), r && r.ok ? 'ok' : (r && r.reason === 'cancelled' ? 'ok' : 'danger'));
-        break;
-      }
-      case 'import-data': {
+        toast(r && r.ok ? `数据已导出：${r.path}` : (r && r.reason === 'cancelled' ? '已取消导出' : `导出失败：${(r && r.reason) || ''}`), r && r.ok ? 'ok' : (r && r.reason === 'cancelled' ? 'ok' : 'danger'));}
+  }
+  async function act_import_data(el, id, e) {
+ {
         importSuspend = true;
         try {
           const r = await bridge.importData();
@@ -4931,30 +5014,44 @@
           }
         } finally {
           importSuspend = false; // 任何异常路径都必须恢复落盘，否则后续变更永不持久化
-        }
-        break;
-      }
-      case 'check-updates': {
+        }}
+  }
+  async function act_check_updates(el, id, e) {
+ {
         toast('正在先快照数据目录，然后检查更新…', 'ok');
         const r = await bridge.checkUpdates();
         const snap = (r && r.snapshot && r.snapshot.ok) ? `数据快照：${r.snapshot.dir}` : '数据快照失败';
         const upd = (r && r.update) ? (r.update.available ? `发现新版本 ${r.update.version}` : (r.update.note || '已是最新')) : (r && r.reason || '更新检查暂不可用');
         toast(`${snap}\n${upd}`, (r && r.update && r.update.available) ? 'ok' : 'warn');
-        break;
+        return;
       }
 
       /* 系统提示词（T-P4-3） */
-      case 'prompt-new': openPromptEditor(null); break;
-      case 'prompt-edit': { const d = state.promptDocs.find((x) => x.id === id); openPromptEditor(d || null); break; }
-      case 'prompt-save': doSavePrompt(id); break;
-      case 'prompt-delete': doDeletePrompt(id); break;
+  }
+  async function act_prompt_new(el, id, e) {
+ openPromptEditor(null);
+  }
+  async function act_prompt_edit(el, id, e) {
+ { const d = state.promptDocs.find((x) => x.id === id); openPromptEditor(d || null);}
+  }
+  async function act_prompt_save(el, id, e) {
+ doSavePrompt(id);
+  }
+  async function act_prompt_delete(el, id, e) {
+ doDeletePrompt(id); return;
 
       /* modal */
-      case 'modal-bg': if (e.target === el) { state.askInputCb = null; state.browserPanelOpen = false; closeModal(); } break;
-      case 'modal-cancel': state.askInputCb = null; state.browserPanelOpen = false; closeModal(); break;
+  }
+  async function act_modal_bg(el, id, e) {
+ if (e.target === el) { state.askInputCb = null; state.browserPanelOpen = false; closeModal(); }
+  }
+  async function act_modal_cancel(el, id, e) {
+ state.askInputCb = null; state.browserPanelOpen = false; closeModal(); return;
 
       /* 浏览器面板（ADR-0011）+ 侧栏（需求3） */
-      case 'browser-panel': {
+  }
+  async function act_browser_panel(el, id, e) {
+ {
         // 右下角图标：浏览器已打开 → 切换侧栏；未打开 → 打开详情弹窗（里面说明了触发方式）
         if (state.browser.open) {
           state.browserSideOpen = !state.browserSideOpen;
@@ -4962,74 +5059,94 @@
           renderStatusBarActions();
         } else {
           openBrowserPanel();
-        }
-        break;
-      }
-      case 'bw-side-close': {
+        }}
+  }
+  async function act_bw_side_close(el, id, e) {
+ {
         state.browserSideOpen = false;
         renderBrowserSide();
-        renderStatusBarActions();
-        break;
-      }
-      case 'bw-tab-close': {
+        renderStatusBarActions();}
+  }
+  async function act_bw_tab_close(el, id, e) {
+ {
         const id = el.dataset.id;
-        if (!id) break;
+        if (!id) return;
         const r = await bridge.closeBrowserPage(id);
-        if (r && r.state) applyBrowserState(r.state);
-        break;
-      }
-      case 'bw-tab-clear': {
+        if (r && r.state) applyBrowserState(r.state);}
+  }
+  async function act_bw_tab_clear(el, id, e) {
+ {
         const r = await bridge.clearBrowserPages();
         if (r && r.state) applyBrowserState(r.state);
-        toast('已关闭全部页面', 'ok');
-        break;
-      }
-      case 'bw-tab-focus': {
+        toast('已关闭全部页面', 'ok');}
+  }
+  async function act_bw_tab_focus(el, id, e) {
+ {
         // 单窗口模型：切到历史页面 = 把窗口导航过去（用户亲手操作，不过授权门）
         const id = el.dataset.id;
         const p = (state.browser.pages || []).find((x) => x.id === id);
-        if (!p) break;
+        if (!p) return;
         const r = await bridge.browserGoto(p.url);
         if (r && r.state) applyBrowserState(r.state);
-        if (r && r.ok === false) toast(`切换失败：${r.reason || ''}`, 'err');
-        break;
-      }
-      case 'browser-show': browserAct(() => bridge.setBrowserVisible(true)); break;
-      case 'browser-hide': browserAct(() => bridge.setBrowserVisible(false)); break;
-      case 'browser-close': browserAct(() => bridge.closeBrowser(), '浏览器已关闭'); break;
+        if (r && r.ok === false) toast(`切换失败：${r.reason || ''}`, 'err');}
+  }
+  async function act_browser_show(el, id, e) {
+ browserAct(() => bridge.setBrowserVisible(true));
+  }
+  async function act_browser_hide(el, id, e) {
+ browserAct(() => bridge.setBrowserVisible(false));
+  }
+  async function act_browser_close(el, id, e) {
+ browserAct(() => bridge.closeBrowser(), '浏览器已关闭'); return;
 
       /* 终端面板（P2-10）+ 底部抽屉（需求3） */
-      case 'terminal-panel': {
+  }
+  async function act_terminal_panel(el, id, e) {
+ {
         // 右下角图标：展开 / 收起抽屉
-        if (state.terminalPanelOpen) closeTerminalPanel(); else openTerminalPanel();
-        break;
-      }
-      case 'term-full': toggleTermFull(); break;
-      case 'term-close': closeTerminalPanel(); break;
-      case 'term-new': newTerminalSession(); break;
-      case 'term-tab': {
+        if (state.terminalPanelOpen) closeTerminalPanel(); else openTerminalPanel();}
+  }
+  async function act_term_full(el, id, e) {
+ toggleTermFull();
+  }
+  async function act_term_close(el, id, e) {
+ closeTerminalPanel();
+  }
+  async function act_term_new(el, id, e) {
+ newTerminalSession();
+  }
+  async function act_term_tab(el, id, e) {
+ {
         if (state.terminal.activeId !== id) {
           state.terminal.activeId = id;
           renderTerminalPanel();
-        }
-        break;
-      }
-      case 'term-tab-close': {
+        }}
+  }
+  async function act_term_tab_close(el, id, e) {
+ {
         bridge.terminalKill(id).then(() => refreshTerminal());
-        break;
+        return;
       }
 
       /* 文件面板（P2-11） */
-      case 'file-panel': openFilePanel(); break;
-      case 'file-close': closeFilePanel(); break;
-      case 'file-pick': pickFileRoot(); break;
-      case 'file-refresh': {
+  }
+  async function act_file_panel(el, id, e) {
+ openFilePanel();
+  }
+  async function act_file_close(el, id, e) {
+ closeFilePanel();
+  }
+  async function act_file_pick(el, id, e) {
+ pickFileRoot();
+  }
+  async function act_file_refresh(el, id, e) {
+ {
         state.filePanel.children.delete(state.filePanel.root);
         state.filePanel.expanded = new Set([state.filePanel.root]);
-        loadFileDir(state.filePanel.root);
-        break;
-      }
-      case 'file-toggle': {
+        loadFileDir(state.filePanel.root);}
+  }
+  async function act_file_toggle(el, id, e) {
+ {
         const path = el.dataset.path;
         if (state.filePanel.expanded.has(path)) {
           state.filePanel.expanded.delete(path);
@@ -5038,41 +5155,62 @@
           state.filePanel.expanded.add(path);
           if (state.filePanel.children.has(path)) renderFilePanel();
           else loadFileDir(path);
-        }
-        break;
-      }
-      case 'file-open': openFilePreview(el.dataset.path, el.dataset.name); break;
-      // P3 编辑/diff
-      case 'file-edit': startFileEdit(); break;
-      case 'file-edit-diff': toggleFileDiff(); break;
-      case 'file-edit-save': saveFileEdit(); break;
-      case 'file-edit-cancel': cancelFileEdit(); break;
-      case 'file-edit-reload': reloadFilePreview(); break;
-      case 'browser-shot-dir': {
+        }}
+  }
+  async function act_file_open(el, id, e) {
+ openFilePreview(el.dataset.path, el.dataset.name);
+  }
+  async function act_file_edit(el, id, e) {
+ startFileEdit();
+  }
+  async function act_file_edit_diff(el, id, e) {
+ toggleFileDiff();
+  }
+  async function act_file_edit_save(el, id, e) {
+ saveFileEdit();
+  }
+  async function act_file_edit_cancel(el, id, e) {
+ cancelFileEdit();
+  }
+  async function act_file_edit_reload(el, id, e) {
+ reloadFilePreview();
+  }
+  async function act_browser_shot_dir(el, id, e) {
+ {
         bridge.openBrowserShotDir().then((r) => {
           if (!r || r.ok === false) toast(`打开截图目录失败：${(r && r.reason) || '未接入'}`, 'err');
           else toast('已打开截图目录', 'ok');
-        }).catch((err) => toast(`打开截图目录失败：${(err && err.message) || err}`, 'err'));
-        break;
-      }
-      case 'ask-input-ok': {
+        }).catch((err) => toast(`打开截图目录失败：${(err && err.message) || err}`, 'err'));}
+  }
+  async function act_ask_input_ok(el, id, e) {
+ {
         const cb = state.askInputCb;
         state.askInputCb = null;
         const v = ($('#askInput') && $('#askInput').value) || '';
         closeModal();
-        if (typeof cb === 'function') cb(v);
-        break;
-      }
-      case 'archive-confirm': doArchiveProject(id); closeModal(); break;
+        if (typeof cb === 'function') cb(v);}
+  }
+  async function act_archive_confirm(el, id, e) {
+ doArchiveProject(id); closeModal(); return;
 
       /* 向导 */
-      case 'wz-next': if (state.wz === 0) { state.wz = 1; renderWizard(); } else { $('#wizard').classList.add('hidden'); state.page = 'session'; render(); toast(`已进入会话 · 默认专家：${expertList()[state.wzExpert] || expertList()[0]}`, 'ok'); } break;
-      case 'wz-skip': $('#wizard').classList.add('hidden'); state.page = 'session'; render(); break;
-      case 'wz-open': state.wz = 0; renderWizard(); $('#wizard').classList.remove('hidden'); break;
-      case 'wz-expert': state.wzExpert = +el.dataset.i; renderWizard(); break;
+  }
+  async function act_wz_next(el, id, e) {
+ if (state.wz === 0) { state.wz = 1; renderWizard(); } else { $('#wizard').classList.add('hidden'); state.page = 'session'; render(); toast(`已进入会话 · 默认专家：${expertList()[state.wzExpert] || expertList()[0]}`, 'ok'); }
+  }
+  async function act_wz_skip(el, id, e) {
+ $('#wizard').classList.add('hidden'); state.page = 'session'; render();
+  }
+  async function act_wz_open(el, id, e) {
+ state.wz = 0; renderWizard(); $('#wizard').classList.remove('hidden');
+  }
+  async function act_wz_expert(el, id, e) {
+ state.wzExpert = +el.dataset.i; renderWizard(); return;
       /* 专家团派发（multi composeTeam，第五个死挂点修复：目录可看 → 任务可派） */
       /* TRACE 上报开关（TOKEN 加密内置，用户仅可开关；默认开） */
-      case 'trace-toggle': {
+  }
+  async function act_trace_toggle(el, id, e) {
+ {
         const cur = state.traceEnabled !== false;
         bridge.traceSetEnabled(!cur).then((r) => {
           if (!r || !r.ok) { toast((r && r.reason) || '切换失败', 'err'); return; }
@@ -5080,14 +5218,16 @@
           updateTraceUi();
           toast(r.requiresRestart ? '已保存 · 重启 OrchDesk 后生效' : '已保存', 'ok');
         }).catch((e) => toast('切换失败: ' + ((e && e.message) || e), 'err'));
-        break;
+        return;
       }
       /* 授权白名单（PRD FR-9）：添加 / 撤销 / 全部撤销 */
-      case 'grant-add': {
+  }
+  async function act_grant_add(el, id, e) {
+ {
         const tool = ($('#grant-tool') && $('#grant-tool').value) || '*';
         const pattern = (($('#grant-pattern') && $('#grant-pattern').value) || '').trim();
         const scope = ($('#grant-scope') && $('#grant-scope').value) === 'session' ? 'session' : 'permanent';
-        if (!pattern) { toast('请填写目标模式（不限目标填 *）', 'warn'); break; }
+        if (!pattern) { toast('请填写目标模式（不限目标填 *）', 'warn'); return; }
         bridge.addGrant({
           tool, pattern, scope,
           ...(scope === 'session' ? { sessionId: state.sel || '' } : {}),
@@ -5097,29 +5237,31 @@
           state.grants = Array.isArray(r.grants) ? r.grants : state.grants;
           const p = $('#grant-pattern'); if (p) p.value = '';
           render(); toast('已加入白名单', 'ok');
-        }).catch((e) => toast('添加失败: ' + ((e && e.message) || e), 'err'));
-        break;
-      }
-      case 'grant-revoke': {
+        }).catch((e) => toast('添加失败: ' + ((e && e.message) || e), 'err'));}
+  }
+  async function act_grant_revoke(el, id, e) {
+ {
         bridge.revokeGrant(el.dataset.id).then((r) => {
           if (!r || !r.ok) { toast('撤销失败', 'err'); return; }
           state.grants = Array.isArray(r.grants) ? r.grants : state.grants;
           render(); toast('已撤销该白名单规则', 'ok');
-        }).catch((e) => toast('撤销失败: ' + ((e && e.message) || e), 'err'));
-        break;
-      }
-      case 'grant-revoke-all': {
+        }).catch((e) => toast('撤销失败: ' + ((e && e.message) || e), 'err'));}
+  }
+  async function act_grant_revoke_all(el, id, e) {
+ {
         bridge.revokeAllGrants().then((r) => {
           if (!r || !r.ok) { toast('撤销失败', 'err'); return; }
           state.grants = Array.isArray(r.grants) ? r.grants : [];
           render(); toast(`已撤销全部 ${r.revoked || 0} 条白名单`, 'ok');
         }).catch((e) => toast('撤销失败: ' + ((e && e.message) || e), 'err'));
-        break;
+        return;
       }
       /* 桌面集成开关（PRD FR-4.2）：此前 6 项全是 data-action="todo" 空壳 */
-      case 'desktop-toggle': {
+  }
+  async function act_desktop_toggle(el, id, e) {
+ {
         const key = el.dataset.dk;
-        if (!state.desktop || !state.desktop.config || !(key in state.desktop.config)) break;
+        if (!state.desktop || !state.desktop.config || !(key in state.desktop.config)) return;
         const next = !state.desktop.config[key];
         const label = (state.desktop.labels && state.desktop.labels[key]) || key;
         // 乐观更新：先响应用户点击，失败再回滚（设置项切换的即时反馈要求）
@@ -5145,10 +5287,10 @@
           state.desktop.config[key] = !next;
           el.classList.toggle('on', !next);
           toast('切换失败: ' + ((e && e.message) || e), 'err');
-        });
-        break;
-      }
-      case 'team-compose': {
+        });}
+  }
+  async function act_team_compose(el, id, e) {
+ {
         const tid = el.dataset.tid;
         const tn = el.dataset.tn || '专家团';
         // BUG（全盘死挂点扫描）：原代码 askInput({...}).then(...)——askInput 不返回
@@ -5169,13 +5311,187 @@
               toast(`编排完成 · ${r.rootId || ''}`, 'ok');
             }).catch((e) => toast('编排失败: ' + ((e && e.message) || e), 'err'));
           },
-        });
-        break;
-      }
-    }
-  });
+        });}
+  }
 
-  let outboundTimer = null;
+  const ACTIONS = {
+    'nav': act_nav,
+    'settings-nav': act_settings_nav,
+    'toggle-theme': act_toggle_theme,
+    'toggle-ctx': act_toggle_ctx,
+    'ctx-tab': act_ctx_tab,
+    'think-toggle': act_think_toggle,
+    'ftab-toggle': act_ftab_toggle,
+    'ftab-open': act_ftab_open,
+    'ftab-pick': act_ftab_pick,
+    'ftab-refresh': act_ftab_refresh,
+    'preview-product': act_preview_product,
+    'proj-select-toggle': act_proj_select_toggle,
+    'composer-proj-pick': act_composer_proj_pick,
+    'composer-proj-task': act_composer_proj_task,
+    'welcome-new-proj': act_welcome_new_proj,
+    'welcome-task': act_welcome_task,
+    'sel': act_sel,
+    'newconv': act_newconv,
+    'home-send': act_home_send,
+    'quick-weekly': act_quick_weekly,
+    'quick-debug': act_quick_weekly,
+    'quick-ppt': act_quick_weekly,
+    'quick-idle': act_quick_weekly,
+    'quick-refactor': act_quick_weekly,
+    'quick-data': act_quick_weekly,
+    'quick-skills': act_quick_weekly,
+    'quick-analyze': act_quick_weekly,
+    'home-create-proj': act_home_create_proj,
+    'pick-folder': act_pick_folder,
+    'do-create-proj-home': act_do_create_proj_home,
+    'proj-toggle': act_proj_toggle,
+    'proj-menu': act_proj_menu,
+    'sess-menu': act_sess_menu,
+    'fork': act_fork,
+    'branch-confirm': act_branch_confirm,
+    'replay-open': act_replay_open,
+    'replay-close': act_replay_close,
+    'rename-confirm': act_rename_confirm,
+    'send': act_send,
+    'abort-send': act_abort_send,
+    'skill-add': act_skill_add,
+    'expert-add': act_expert_add,
+    'skill-attach': act_skill_attach,
+    'expert-attach': act_expert_attach,
+    'auth-open': act_auth_open,
+    'auth-mode-pick': act_auth_mode_pick,
+    'auth-do-switch': act_auth_do_switch,
+    'sim-highrisk': act_sim_highrisk,
+    'approval-allow': act_approval_allow,
+    'approval-grant': act_approval_grant,
+    'approval-deny': act_approval_deny,
+    'confirm-yes': act_confirm_yes,
+    'confirm-no': act_confirm_yes,
+    'dir-inv-refresh': act_dir_inv_refresh,
+    'mem-domain': act_mem_domain,
+    'mem-refresh': act_mem_refresh,
+    'mem-promote': act_mem_promote,
+    'mem-promote-worker': act_mem_promote_worker,
+    'mp-clear': act_mp_clear,
+    'sblog-clear': act_sblog_clear,
+    'sandbox-save-net': act_sandbox_save_net,
+    'comp-record': act_comp_record,
+    'comp-do': act_comp_do,
+    'tp-new': act_tp_new,
+    'tp-create': act_tp_create,
+    'tp-dispose': act_tp_dispose,
+    'trace': act_trace,
+    'composer-more-toggle': act_composer_more_toggle,
+    'model-pick': act_model_pick,
+    'model-toggle': act_model_toggle,
+    'mg-toggle-all': act_mg_toggle_all,
+    'model-confirm': act_model_confirm,
+    'model-clear': act_model_clear,
+    'pside-toggle': act_pside_toggle,
+    'plug-toggle': act_plug_toggle,
+    'plug-cfg': act_plug_cfg,
+    'plug-nav': act_plug_nav,
+    'plug-disable': act_plug_disable,
+    'plug-unload': act_plug_unload,
+    'market': act_market,
+    'market-auth': act_market_auth,
+    'conn-cfg': act_conn_cfg,
+    'conn-test': act_conn_test,
+    'conn-discover': act_conn_discover,
+    'conn-save': act_conn_save,
+    'conn-clear': act_conn_clear,
+    'conn-audit-clear': act_conn_audit_clear,
+    'open-external': act_open_external,
+    'market-refresh': act_market_refresh,
+    'usage-refresh': act_usage_refresh,
+    'usage-clear': act_usage_clear,
+    'market-open-dir': act_market_open_dir,
+    'market-local-toggle': act_market_local_toggle,
+    'pside-nav': act_pside_nav,
+    'market-local-nav': act_market_local_nav,
+    'conn-nav': act_conn_nav,
+    'guanji-token': act_guanji_token,
+    'guanji-install': act_guanji_install,
+    'guanji-install-auth': act_guanji_install_auth,
+    'guanji-publish': act_guanji_publish,
+    'skill-toggle': act_skill_toggle,
+    'skill-uninstall': act_skill_uninstall,
+    'mcp-add': act_mcp_add,
+    'mcp-save': act_mcp_save,
+    'mcp-probe': act_mcp_probe,
+    'mcp-toggle': act_mcp_toggle,
+    'mcp-del': act_mcp_del,
+    'hub-pair': act_hub_pair,
+    'hub-send': act_hub_send,
+    'hub-unpair': act_hub_unpair,
+    'model-test': act_model_test,
+    'model-edit-provider': act_model_edit_provider,
+    'model-del-provider': act_model_del_provider,
+    'model-cancel-edit': act_model_cancel_edit,
+    'model-add-provider': act_model_add_provider,
+    'todo': act_todo,
+    'open-project-dir': act_open_project_dir,
+    'open-log-dir': act_open_log_dir,
+    'snapshot-data': act_snapshot_data,
+    'export-data': act_export_data,
+    'import-data': act_import_data,
+    'check-updates': act_check_updates,
+    'prompt-new': act_prompt_new,
+    'prompt-edit': act_prompt_edit,
+    'prompt-save': act_prompt_save,
+    'prompt-delete': act_prompt_delete,
+    'modal-bg': act_modal_bg,
+    'modal-cancel': act_modal_cancel,
+    'browser-panel': act_browser_panel,
+    'bw-side-close': act_bw_side_close,
+    'bw-tab-close': act_bw_tab_close,
+    'bw-tab-clear': act_bw_tab_clear,
+    'bw-tab-focus': act_bw_tab_focus,
+    'browser-show': act_browser_show,
+    'browser-hide': act_browser_hide,
+    'browser-close': act_browser_close,
+    'terminal-panel': act_terminal_panel,
+    'term-full': act_term_full,
+    'term-close': act_term_close,
+    'term-new': act_term_new,
+    'term-tab': act_term_tab,
+    'term-tab-close': act_term_tab_close,
+    'file-panel': act_file_panel,
+    'file-close': act_file_close,
+    'file-pick': act_file_pick,
+    'file-refresh': act_file_refresh,
+    'file-toggle': act_file_toggle,
+    'file-open': act_file_open,
+    'file-edit': act_file_edit,
+    'file-edit-diff': act_file_edit_diff,
+    'file-edit-save': act_file_edit_save,
+    'file-edit-cancel': act_file_edit_cancel,
+    'file-edit-reload': act_file_edit_reload,
+    'browser-shot-dir': act_browser_shot_dir,
+    'ask-input-ok': act_ask_input_ok,
+    'archive-confirm': act_archive_confirm,
+    'wz-next': act_wz_next,
+    'wz-skip': act_wz_skip,
+    'wz-open': act_wz_open,
+    'wz-expert': act_wz_expert,
+    'trace-toggle': act_trace_toggle,
+    'grant-add': act_grant_add,
+    'grant-revoke': act_grant_revoke,
+    'grant-revoke-all': act_grant_revoke_all,
+    'desktop-toggle': act_desktop_toggle,
+    'team-compose': act_team_compose,
+  };
+
+  document.body.addEventListener('click', async (e) => {
+    const el = e.target.closest('[data-action]'); if (!el) return;
+    const a = el.dataset.action, id = el.dataset.id;
+    const fn = ACTIONS[a];
+    if (fn) { await fn(el, id, e); return; }
+    // 动作名拼错 / 新增动作忘了接线 —— 别静默吞掉（保留原 default 语义）。
+    console.warn('[orchdesk] 未知的 data-action：', a);
+  });
+let outboundTimer = null;
   async function updateOutboundWarn(text) {
     const el = $('#outboundWarn'); if (!el) return;
     clearTimeout(outboundTimer);
