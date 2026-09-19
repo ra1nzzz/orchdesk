@@ -40,7 +40,7 @@ export type ToolExecHost = {
   dataDir: () => string;
   getAppPath: (name: 'home' | 'userData' | 'temp') => string | undefined;
   approvalGate: (toolName: string, reason: string, sessionId?: string, target?: string, signal?: AbortSignal) => Promise<string | null>;
-  outboundGate: (text: string, sessionId?: string) => Promise<string | null>;
+  outboundGate: (text: string, sessionId?: string, signal?: AbortSignal) => Promise<string | null>;
   recordSandbox: (input: {
     tool: string;
     kind: SandboxLogEntry['kind'];
@@ -73,8 +73,8 @@ function getAppPath(name: 'home' | 'userData' | 'temp'): string | undefined {
 function approvalGate(toolName: string, reason: string, sessionId?: string, target?: string, signal?: AbortSignal): Promise<string | null> {
   return requireHost().approvalGate(toolName, reason, sessionId, target, signal);
 }
-function outboundGate(text: string, sessionId?: string): Promise<string | null> {
-  return requireHost().outboundGate(text, sessionId);
+function outboundGate(text: string, sessionId?: string, signal?: AbortSignal): Promise<string | null> {
+  return requireHost().outboundGate(text, sessionId, signal);
 }
 function recordSandbox(input: {
   tool: string;
@@ -458,7 +458,7 @@ export async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: str
         }
         // PRD FR-12：删除 / 对外发送 / 不可逆命令在授权门之上再加一道补偿层二次确认
         // （L4 双确认）。普通命令（git/npm/ls…）判定为 other，不额外打扰。
-        const outboundDenied = await outboundGate(cmd, sessionCtx?.sessionId);
+        const outboundDenied = await outboundGate(cmd, sessionCtx?.sessionId, sessionCtx?.signal);
         if (outboundDenied) {
           recordSandbox({ tool: name, kind: 'outbound', target: cmd, decision: 'denied', reason: outboundDenied, sessionId: sid });
           return { name, result: '', error: outboundDenied };

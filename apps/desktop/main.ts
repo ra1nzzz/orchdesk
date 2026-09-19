@@ -491,7 +491,7 @@ async function approvalGate(toolName: string, reason: string, sessionId?: string
  * 审批弹窗二次确认；无补偿服务/无审批通道时按 fail-open 放行但记 WARN——
  * 与 firePreStep 同策略：基础设施缺失不锁死对话，但绝不静默。
  */
-async function outboundGate(text: string, sessionId?: string): Promise<string | null> {
+async function outboundGate(text: string, sessionId?: string, signal?: AbortSignal): Promise<string | null> {
   const svc = getService<CompensationServiceLike>('compensation');
   if (!svc) {
     // BUG（全盘死挂点扫描）：原实现无服务时直接放行且不落任何日志，与函数注释
@@ -510,7 +510,7 @@ async function outboundGate(text: string, sessionId?: string): Promise<string | 
   }
   if (!verdict?.needsConfirm) return null;
   const category = String(verdict.category || 'other');
-  const denied = await approvalGate(`outbound:${category}`, String(verdict.reason || '跨边界/不可逆外发操作'), sessionId);
+  const denied = await approvalGate(`outbound:${category}`, String(verdict.reason || '跨边界/不可逆外发操作'), sessionId, undefined, signal);
   return denied;
 }
 

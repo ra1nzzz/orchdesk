@@ -217,8 +217,11 @@
   const bridge = (function () {
     const real = (typeof window !== 'undefined' && window.orchdesk) ? window.orchdesk : null;
     if (real) return real;
-    // 无桥接：返回空壳，UI 显示"未连接"状态
-    return {
+    // 无桥接：返回空壳，UI 显示"未连接"状态。
+    // 下方显式 stub 覆盖高频路径的行为语义；Proxy 兜底其余方法——preload 暴露
+    // 100+ 方法而 stub 只有 70 个回退，历史上调用未覆盖方法时浏览器预览模式直接
+    // TypeError（取值时就抛，.catch 接不住）。未知名一律回落「未接入」Promise。
+    const stub = {
       loadSessions: () => Promise.resolve([]),
       persistSessions: (arr) => Promise.resolve({ ok: false, reason: '未连接主进程' }),
       runAgentTurn: (sessionId, text, opts) => Promise.resolve({ text: '未连接主进程运行时，无法调用模型。请在设置中配置模型提供商。', intent: 'CONFIRM' }),
@@ -310,6 +313,14 @@
       fileRead: () => Promise.resolve({ ok: false, reason: '主进程未接入', bridgeMissing: true }),
       fileWrite: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
     };
+    return new Proxy(stub, {
+      get(target, prop) {
+        if (prop in target) return target[prop];
+        // 未知名：统一回落「未接入」Promise（订阅型方法调用方会再包一层取退订，
+        // 返回 Promise 而非函数可被 typeof 区分，调用方已有可选调用防护）。
+        return () => Promise.resolve({ ok: false, reason: '主进程未接入' });
+      },
+    });
   })();
 
   /* ---------- PRD FR-8 沙箱日志：判定结果与类型的中文名 ---------- */

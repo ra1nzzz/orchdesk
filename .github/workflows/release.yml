@@ -180,6 +180,19 @@ jobs:
           cd apps/desktop
           npx electron-builder --win nsis portable --publish always
 
+      # M3 路线剩余项：发布品校验和——SmartScreen 之外用户至少能校验下载完整性
+      # （latest.yml 的 sha512 只覆盖 auto-update 通道，不覆盖用户手动下载的 exe）。
+      - name: Checksums (SHA256SUMS)
+        shell: bash
+        run: |
+          cd apps/desktop/release
+          sha256sum *.exe *.blockmap latest.yml > SHA256SUMS 2>/dev/null || sha256sum *.exe > SHA256SUMS
+          cat SHA256SUMS
+          # 追加进 Release Notes（用户在一个页面里同时看到变更与校验和）
+          printf '\n## SHA-256 校验和\n\n```\n' >> ../release-notes.md
+          cat SHA256SUMS >> ../release-notes.md
+          printf '```\n' >> ../release-notes.md
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
