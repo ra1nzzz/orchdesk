@@ -225,6 +225,141 @@ const { check, summary } = createChecker();
   });
   fs.writeFileSync(path.join(HOME, 'models.json'), backup, 'utf-8');
 
+  console.log('== F. SSE 解析器 ==');
+  {
+    const mc = require('./dist/model-client.js');
+    const chunks = [];
+    const parsed = mc.consumeOpenAiSse(
+      'data: {"choices":[{"delta":{"content":"你"}}]}\n\ndata: {"choices":[{"delta":{"content":"好"}}]}\n\ndata: [DONE]\n',
+      (c) => chunks.push(c),
+    );
+    await check('consumeOpenAiSse 拼出全文并回调 chunk', () => {
+      assert.strictEqual(parsed.content, '你好');
+      assert.deepStrictEqual(chunks, ['你', '好']);
+    });
+    const savedFetch = global.fetch;
+    const jsonChunks = [];
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ message: { content: '目录里有 a.txt' } }),
+    });
+    const reply = await mc.callOllama(
+      { name: 't', type: 'ollama', baseUrl: 'http://127.0.0.1' },
+      'm',
+      [{ role: 'user', content: 'hi' }],
+      [],
+      { onDelta: (c) => jsonChunks.push(c) },
+    );
+    global.fetch = savedFetch;
+    await check('JSON 整包走 onDelta 一次', () => {
+      assert.ok(String(reply.content).includes('a.txt'));
+      assert.deepStrictEqual(jsonChunks, ['目录里有 a.txt']);
+    });
+    const ndChunks = [];
+    const parts = [
+      '{"message":{"content":"春"},"done":false}\n',
+      '{"message":{"content":"秋"},"done":true}\n',
+    ];
+    global.fetch = async (_url, opts) => {
+      assert.strictEqual(JSON.parse(opts.body).stream, true, 'Ollama 应请求 stream:true');
+      let i = 0;
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (i >= parts.length) return { done: true, value: undefined };
+                return { done: false, value: new TextEncoder().encode(parts[i++]) };
+              },
+              releaseLock() {},
+            };
+          },
+        },
+        text: async () => { throw new Error('应走 ReadableStream 而不是 res.text()'); },
+      };
+    };
+    const streamReply = await mc.callOllama(
+      { name: 't', type: 'ollama', baseUrl: 'http://127.0.0.1' },
+      'm',
+      [{ role: 'user', content: 'hi' }],
+      [],
+      { onDelta: (c) => ndChunks.push(c) },
+    );
+    global.fetch = savedFetch;
+    await check('NDJSON 分片走 onDelta 多次', () => {
+      assert.strictEqual(streamReply.content, '春秋');
+      assert.deepStrictEqual(ndChunks, ['春', '秋']);
+    });
+    await check('shouldRetryWithoutStream 不误伤 tools 400', () => {
+      assert.strictEqual(mc.shouldRetryWithoutStream(400, 'streaming is not supported', true), true);
+      assert.strictEqual(mc.shouldRetryWithoutStream(400, 'unsupported parameter: tools', true), false);
+      assert.strictEqual(mc.shouldRetryWithoutStream(401, 'nope', true), false);
+      assert.strictEqual(mc.shouldRetryWithoutStream(400, 'invalid request', true), true);
+      assert.strictEqual(mc.shouldRetryWithoutStream(400, 'invalid', false), false);
+    });
+    const streamFlags = [];
+    global.fetch = async (_url, opts) => {
+      const b = JSON.parse(opts.body);
+      streamFlags.push(b.stream);
+      if (b.stream) return { ok: false, status: 400, text: async () => 'stream not supported' };
+      return { ok: true, status: 200, text: async () => JSON.stringify({ message: { content: '降级成功' } }) };
+    };
+    const dropped = await mc.callOllama(
+      { name: 't', type: 'ollama', baseUrl: 'http://127.0.0.1' },
+      'm',
+      [{ role: 'user', content: 'hi' }],
+      [],
+    );
+    global.fetch = savedFetch;
+    await check('Ollama stream 400 后改 stream:false', () => {
+      assert.deepStrictEqual(streamFlags, [true, false]);
+      assert.strictEqual(dropped.content, '降级成功');
+    });
+  }
+
+  console.log('== F. 回合 abort ==');
+  const abortTurn = ipcHandlers.get('orchdesk:abort-agent-turn');
+  await check('abort-agent-turn handler 已注册', () => {
+    assert.ok(abortTurn, 'orchdesk:abort-agent-turn handler 应已注册');
+  });
+  await check('无进行中回合 abort 返回 no-active-turn', async () => {
+    const r = await abortTurn(null, 'ghost');
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.reason, 'no-active-turn');
+  });
+  {
+    const savedFetch = global.fetch;
+    global.fetch = async (url, opts) => {
+      await new Promise((_, reject) => {
+        const onAbort = () => {
+          const err = new Error('The operation was aborted');
+          err.name = 'AbortError';
+          reject(err);
+        };
+        if (opts && opts.signal) {
+          if (opts.signal.aborted) { onAbort(); return; }
+          opts.signal.addEventListener('abort', onAbort, { once: true });
+        }
+      });
+    };
+    const pending = runAgentTurn(null, 's-abort', '请停', {});
+    await new Promise((r) => setTimeout(r, 40));
+    const ar = await abortTurn(null, 's-abort');
+    await check('进行中回合 abort 返回 ok', () => {
+      assert.strictEqual(ar.ok, true);
+    });
+    out = await pending;
+    await check('abort 后回合返回（已停止）', () => {
+      assert.strictEqual(out.aborted, true);
+      assert.ok(String(out.text).includes('已停止'), '实际: ' + out.text);
+      assert.strictEqual(out.intent, 'CONFIRM');
+    });
+    global.fetch = savedFetch;
+  }
+
   // -------------------------------------------------------------------------
   const ok = summary();
 

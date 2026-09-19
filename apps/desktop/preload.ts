@@ -44,6 +44,13 @@ const orchdesk = {
     return () => ipcRenderer.removeListener('orchdesk:tool-step', listener);
   },
 
+  /** 模型增量文本：typing 消息实时追加（JSON 整包一次；SSE 按 chunk）。 */
+  onAgentDelta: (cb: (delta: { sessionId: string; text: string }) => void): (() => void) => {
+    const listener = (_e: unknown, delta: { sessionId: string; text: string }): void => cb(delta);
+    ipcRenderer.on('orchdesk:agent-delta', listener);
+    return () => ipcRenderer.removeListener('orchdesk:agent-delta', listener);
+  },
+
   /** 插件运行时：真实装载状态（替代渲染层硬编码常量）。 */
   getPluginRuntime: (): Promise<{ ready: boolean; activeCount: number; total: number; plugins: Array<{ name: string; active: boolean; available: boolean; error?: string }> }> =>
     ipcRenderer.invoke('orchdesk:plugin-runtime'),
@@ -75,6 +82,10 @@ const orchdesk = {
     opts: { models?: string[]; thinkLevel?: string },
   ): Promise<{ text: string; intent: string }> =>
     ipcRenderer.invoke('orchdesk:run-agent-turn', sessionId, text, opts),
+
+  /** 中止进行中的模型回合（composer「停止」）。无进行中回合时返回 ok:false。 */
+  abortAgentTurn: (sessionId: string): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:abort-agent-turn', sessionId),
 
   /** 授权模式（T-P3-2）：读取当前生效的 AuthzMode（default/trusted/paranoid）。 */
   getAuthMode: (): Promise<{ mode: string }> =>

@@ -59,6 +59,80 @@ function hostSourceFiles() {
 
 function read(p) { return fs.readFileSync(p, 'utf-8'); }
 
+/**
+ * preload 故意暴露但渲染层尚未调用的方法。
+ * 目标尽量为空；只收录扫描后确实零 caller 的名字（拼错 → M3 豁免失效）。
+ */
+const PRELOAD_UNUSED_ALLOW = [
+  // MCP 工具调用留给主会话 / Agent 复用，渲染层目前没有接线
+  'mcpCallTool',
+];
+
+/**
+ * 解析 preload.ts 里 `const orchdesk = { ... }` 的顶层方法名。
+ * 配对花括号到对象结束，只收 depth=1 的 `name:` / `name(`，并跳过 `.invoke(` 这类成员调用。
+ */
+function parsePreloadOrchdeskMethods(code) {
+  const stripped = stripComments(code);
+  const marker = stripped.match(/\borchdesk\s*=\s*\{/);
+  if (!marker) throw new Error('preload.ts 未找到 orchdesk = {');
+  let i = marker.index + marker[0].length;
+  let brace = 1;
+  let paren = 0;
+  let bracket = 0;
+  let inStr = null;
+  let esc = false;
+  const methods = [];
+  while (i < stripped.length && brace > 0) {
+    const c = stripped[i];
+    if (inStr) {
+      if (esc) { esc = false; i += 1; continue; }
+      if (c === '\\') { esc = true; i += 1; continue; }
+      if (c === inStr) inStr = null;
+      i += 1;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { inStr = c; i += 1; continue; }
+    if (c === '{') { brace += 1; i += 1; continue; }
+    if (c === '}') { brace -= 1; if (brace === 0) break; i += 1; continue; }
+    if (c === '(') { paren += 1; i += 1; continue; }
+    if (c === ')') { paren -= 1; i += 1; continue; }
+    if (c === '[') { bracket += 1; i += 1; continue; }
+    if (c === ']') { bracket -= 1; i += 1; continue; }
+    if (brace === 1 && paren === 0 && bracket <= 0 && /[A-Za-z_$]/.test(c)) {
+      let p = i - 1;
+      while (p >= 0 && /[ \t]/.test(stripped[p])) p -= 1;
+      const isMember = p >= 0 && stripped[p] === '.';
+      let j = i + 1;
+      while (j < stripped.length && /[\w$]/.test(stripped[j])) j += 1;
+      const name = stripped.slice(i, j);
+      let k = j;
+      while (k < stripped.length && /[ \t]/.test(stripped[k])) k += 1;
+      if (!isMember && (stripped[k] === ':' || stripped[k] === '(')) methods.push(name);
+      i = j;
+      continue;
+    }
+    i += 1;
+  }
+  return [...new Set(methods)];
+}
+
+/** renderer/*.js 中的 `bridge.NAME` / `orchdesk.NAME`；跳过字符串字面量与 `bridge[expr]` 动态名。 */
+function rendererBridgeNames() {
+  const names = new Set();
+  for (const f of rendererFiles()) {
+    const stripped = stripComments(read(f.abs));
+    const re = /\b(?:bridge|orchdesk)\.([A-Za-z_$][\w$]*)/g;
+    let m;
+    while ((m = re.exec(stripped))) {
+      const prev = m.index > 0 ? stripped[m.index - 1] : '';
+      if (prev === "'" || prev === '"' || prev === '`') continue;
+      names.add(m[1]);
+    }
+  }
+  return names;
+}
+
 /* ------------------------------ 规则表 ------------------------------ */
 
 /**
@@ -208,6 +282,31 @@ function scanRule(rule, code, fileName) {
     assert(count >= baseline, `verify 链上套件数 ${count} 少于基线 ${baseline}（链条被删减？）`);
   });
 
+  /* -------------------- 非正则规则：preload 必须有渲染层调用方 -------------------- */
+
+  await check('R8 preload 方法必须有渲染层调用方', () => {
+    const preloadPath = path.join(APP_DIR, 'preload.ts');
+    assert(fs.existsSync(preloadPath), '找不到 preload.ts');
+    const methods = parsePreloadOrchdeskMethods(read(preloadPath));
+    assert(methods.length > 20, `preload 顶层方法仅 ${methods.length} 个（规则空转）`);
+    const methodSet = new Set(methods);
+    const missingAllow = PRELOAD_UNUSED_ALLOW.filter((n) => !methodSet.has(n));
+    assert(missingAllow.length === 0, 'PRELOAD_UNUSED_ALLOW 豁免失效（preload 中不存在）：' + missingAllow.join(', '));
+    const called = rendererBridgeNames();
+    const allow = new Set(PRELOAD_UNUSED_ALLOW);
+    const unused = methods.filter((n) => !called.has(n) && !allow.has(n));
+    assert(unused.length === 0, '以下 preload 方法零渲染层调用方：' + unused.join(', '));
+  });
+
+  await check('R8b 渲染层不得调用不存在的 preload 方法', () => {
+    const preloadPath = path.join(APP_DIR, 'preload.ts');
+    assert(fs.existsSync(preloadPath), '找不到 preload.ts');
+    const methodSet = new Set(parsePreloadOrchdeskMethods(read(preloadPath)));
+    const called = rendererBridgeNames();
+    const dead = [...called].filter((n) => !methodSet.has(n)).sort();
+    assert(dead.length === 0, '渲染层调用了 preload 不存在的方法：' + dead.join(', '));
+  });
+
   /* -------------------- 元规则：防规则静默失效 -------------------- */
 
   console.log('== 架构守护：元规则自检（防规则失效）==');
@@ -227,6 +326,14 @@ function scanRule(rule, code, fileName) {
   await check('M3 纯逻辑白名单模块均存在（改名/删除后需同步本清单）', () => {
     const missing = PURE_MODULES.filter((f) => !fs.existsSync(path.join(APP_DIR, f)));
     assert(missing.length === 0, '白名单中不存在的模块：' + missing.join(', '));
+  });
+
+  await check('M3 PRELOAD_UNUSED_ALLOW 方法均存在于 preload（拼错 → 豁免失效）', () => {
+    const preloadPath = path.join(APP_DIR, 'preload.ts');
+    assert(fs.existsSync(preloadPath), '找不到 preload.ts');
+    const methodSet = new Set(parsePreloadOrchdeskMethods(read(preloadPath)));
+    const missing = PRELOAD_UNUSED_ALLOW.filter((n) => !methodSet.has(n));
+    assert(missing.length === 0, 'PRELOAD_UNUSED_ALLOW 豁免失效（preload 中不存在）：' + missing.join(', '));
   });
 
   await check('M4 纯逻辑白名单确实零 electron（与 R2 交叉复核：清单本身没写多）', () => {

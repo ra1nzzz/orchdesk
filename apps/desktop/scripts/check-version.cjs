@@ -7,16 +7,66 @@
  *   - release 流程传 --allow-tagged：仅当最新 tag 恰好指向当前 HEAD（bumpp 刚打的
  *     正式发布 tag）时放行；tag 指向别的提交仍然阻断
  * 仓库无任何 tag（首次构建）放行。
+ *
+ * 文档同步：README.md / CHECKPOINT.md 必须与 apps/desktop/package.json 的 version 对齐。
+ *   - 参数含 `docs`：只跑文档检查（verify 链用，避免已发布版本被 tag 守卫误红）
+ *   - 其它模式：先跑文档检查，再跑 tag 守卫
  */
 const { execSync } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const APP_DIR = path.resolve(__dirname, '..');
+const REPO_ROOT = path.resolve(APP_DIR, '..', '..');
 const allowTagged = process.argv.includes('--allow-tagged');
 const pkg = require(path.join(APP_DIR, 'package.json'));
 
+function checkDocsSynced() {
+  const version = String(pkg.version);
+  const readmePath = path.join(REPO_ROOT, 'README.md');
+  const checkpointPath = path.join(REPO_ROOT, 'docs', '00-项目', 'CHECKPOINT.md');
+
+  let readme;
+  try {
+    readme = fs.readFileSync(readmePath, 'utf8');
+  } catch (err) {
+    console.error('[version-guard] 无法读取仓库根 README.md:', (err && err.message) || err);
+    process.exit(1);
+  }
+  const readmeNeedle = `当前版本：v${version}`;
+  if (!readme.includes(readmeNeedle)) {
+    console.error(`[version-guard] README.md 未同步：必须含「${readmeNeedle}」`);
+    process.exit(1);
+  }
+
+  let checkpoint;
+  try {
+    checkpoint = fs.readFileSync(checkpointPath, 'utf8');
+  } catch (err) {
+    console.error('[version-guard] 无法读取 CHECKPOINT.md:', (err && err.message) || err);
+    process.exit(1);
+  }
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const cellRe = new RegExp('\\|\\s*\\*\\*当前版本\\*\\*\\s*\\|\\s*`' + escaped + '`');
+  if (!cellRe.test(checkpoint)) {
+    console.error(
+      `[version-guard] CHECKPOINT.md 未同步：当前版本单元格必须以 \`${version}\` 开头` +
+        `（| **当前版本** | \`${version}\`）`,
+    );
+    process.exit(1);
+  }
+
+  console.log(`[version-guard] docs OK：README/CHECKPOINT 与 package.json ${version} 一致`);
+}
+
 function git(cmd) {
   return execSync(cmd, { cwd: APP_DIR }).toString().trim();
+}
+
+checkDocsSynced();
+
+if (process.argv.includes('docs')) {
+  process.exit(0);
 }
 
 let latest = '';

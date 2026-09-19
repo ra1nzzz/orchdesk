@@ -10,7 +10,7 @@
  *
  * 验证项：
  *
- *       1. OpenAI chat 形态：URL 拼装 / Authorization 头 / body 形态 / stream:false
+ *       1. OpenAI chat 形态：URL 拼装 / Authorization 头 / body 形态 / stream:true
  *       2. 一轮内多个 tool_calls **全部**执行（回归防线：旧实现只取 [0]）
  *       3. 多轮工具循环与轮次上限
  *       4. Ollama 形态：{baseUrl}/api/chat + message.tool_calls 归一化
@@ -178,14 +178,14 @@ function lastAssistant(sessionId) {
     assert.strictEqual(calls[0].url, '/v1/chat/completions', '实际路径: ' + calls[0].url);
     assert.strictEqual(calls[0].headers.authorization, `Bearer ${KEY}`, 'Authorization 头不符: ' + calls[0].headers.authorization);
   });
-  await check('A2 body 含 model / messages / tools，且 stream:false', () => {
+  await check('A2 body 含 model / messages / tools，且 stream:true', () => {
     const b = calls[0].body;
     assert.strictEqual(b.model, 'wire-model', '实际 model: ' + b.model);
     assert.ok(Array.isArray(b.messages) && b.messages.length >= 2, 'messages 应含 system + user');
     // 数量从工具表取（ADR-0011 起为 15：新增 8 个浏览器工具），不写死常量
     const expectTools = require('./dist/agent-runtime.js').TOOL_DEFS.length;
     assert.ok(Array.isArray(b.tools) && b.tools.length === expectTools, `应下发 ${expectTools} 个工具定义，实际: ` + (b.tools || []).length);
-    assert.strictEqual(b.stream, false, 'stream 必须为 false');
+    assert.strictEqual(b.stream, true, 'chat 请求应 stream:true（JSON 网关仍走整包兜底）');
   });
   await check('A3 正文取自 choices[0].message.content', () => {
     assert.strictEqual(out.text, '你好，我是线级测试模型', '实际: ' + out.text);
@@ -260,7 +260,7 @@ function lastAssistant(sessionId) {
     assert.strictEqual(calls[0].url, '/api/chat', '实际路径: ' + calls[0].url);
     const b = calls[0].body;
     assert.strictEqual(b.model, 'qwen3:14b');
-    assert.strictEqual(b.stream, false);
+    assert.strictEqual(b.stream, true, 'Ollama 请求应 stream:true');
     const expectTools2 = require('./dist/agent-runtime.js').TOOL_DEFS.length;
     assert.ok(Array.isArray(b.tools) && b.tools.length === expectTools2, `Ollama 形态也应下发 ${expectTools2} 个 tools，实际: ` + (b.tools || []).length);
     assert.strictEqual(calls[0].headers.authorization, undefined, 'Ollama 形态不带 Authorization 头');
@@ -828,6 +828,32 @@ function lastAssistant(sessionId) {
     const before = JSON.parse(fs.readFileSync(path.join(HOME, 'usage.json'), 'utf-8'));
     const mine = before.entries.filter((e) => e.sessionId === 's-nousage');
     assert.strictEqual(mine.length, 0, '该会话不应有记账条目');
+  });
+
+  console.log('== S. chat SSE 真 HTTP（JSON 网关以外的流式正文）==');
+  writeModels({ id: 'p-chat', name: '线级测试网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  plan = [text(200, 'data: {"choices":[{"delta":{"content":"春"}}]}\n\ndata: {"choices":[{"delta":{"content":"秋"}}]}\n\ndata: [DONE]\n')];
+  out = await runAgentTurn(null, 's-sse', '流式你好', {});
+  await check('S1 stream:true 且 SSE 拼出全文', () => {
+    assert.strictEqual(calls[0].body.stream, true, 'chat 应请求 stream:true');
+    assert.strictEqual(out.text, '春秋', '实际: ' + out.text);
+  });
+
+  console.log('== T. stream:true 被拒 → 同轮 stream:false（不误伤 tools 降级）==');
+  writeModels({ id: 'p-chat', name: '线级测试网关', type: 'openai-compatible', baseUrl: BASE_V1, apiKeyEnc: KEY_ENC, models: ['wire-model'] }, 5);
+  reset();
+  responder = ({ body }) => {
+    if (body.stream) return text(400, 'streaming is not supported by this gateway');
+    return chat('非流式兜底回复', undefined);
+  };
+  out = await runAgentTurn(null, 's-stream-drop', '你好', {});
+  await check('T1 stream 400 后改 stream:false 且仍带 tools', () => {
+    assert.ok(calls.length >= 2, '应至少 2 次请求，实际: ' + calls.length);
+    assert.strictEqual(calls[0].body.stream, true);
+    assert.strictEqual(calls[1].body.stream, false);
+    assert.ok(Array.isArray(calls[1].body.tools), '卸流后仍应带 tools，不能误走 tools 降级');
+    assert.strictEqual(out.text, '非流式兜底回复', '实际: ' + out.text);
   });
 
   // =========================================================================

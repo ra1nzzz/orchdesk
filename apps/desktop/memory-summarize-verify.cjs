@@ -298,7 +298,8 @@ function runProbe() {
   } catch (err) {
     const so = String((err && err.stdout) || '');
     const se = String((err && err.stderr) || '');
-    throw new Error(`probe 失败：${err.message}\n${so}\n${se}`);
+    if (/RESULT_JSON:/.test(so)) stdout = so;
+    else throw new Error(`probe 失败：${err.message}\n${so}\n${se}`);
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* 清理失败不影响结果 */ }
   }

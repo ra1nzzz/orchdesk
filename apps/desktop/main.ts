@@ -1,43 +1,17 @@
 /// <reference types="electron" />
-import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, safeStorage, shell, globalShortcut, Notification, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, safeStorage, shell, globalShortcut } from 'electron';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import {
-  DEFAULT_DESKTOP_CONFIG,
   DESKTOP_LABELS,
-  SHORTCUT_ACCELERATOR,
   SHORTCUT_LABEL,
-  floatingWindowHtml,
-  isDesktopKey,
   loadDesktopConfig,
   saveDesktopConfig,
   setDesktopKey,
-  type DesktopConfig,
-  type DesktopKey,
 } from './desktop-integration';
+import * as bootDesktop from './boot-desktop';
 import { guanjiClient } from './guanji';
-import {
-  CONNECTOR_CATALOG,
-  CONNECTOR_PROBE_TIMEOUT_MS,
-  appendAudit as appendConnectorAudit,
-  buildProbeRequest,
-  clearCreds,
-  emptyConnectorFile,
-  getConnectorDef,
-  interpretProbeResult,
-  isConnectorId,
-  normalizeConnectorFile,
-  readCreds,
-  redactCreds,
-  searchAudit as searchConnectorAudit,
-  auditStats as connectorAuditStats,
-  writeCreds,
-  type ConnectorAuditAction,
-  type ConnectorAuditEntry,
-  type ConnectorFile,
-} from './connector-registry';
-import { discoverConnector } from './connector-discover';
 import { hubClient } from './hub';
 import {
   aggregateUsage,
@@ -61,8 +35,7 @@ import {
   type SessionEvent,
 } from './session-events';
 import { emitCanonicalEvent, setEnvelopeConsumer } from './event-emit';
-import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, listMarketPlugins, setMarketPluginEnabled, startupMarketPlugins, marketDir } from './dsh-runtime';
-import { normalizeEnabledMap } from './plugin-market';
+import { startRuntime, stopRuntime, getService, getRuntime, getPluginStates, setPluginEnabled, firePreStep, persistGrantsNow, startupMarketPlugins } from './dsh-runtime';
 import { getHostServices } from './host-services';
 import {
   normalizeSandboxLog,
@@ -91,7 +64,7 @@ import {
   SUMMARIZE_TIMEOUT_MS,
 } from './memory-summarize';
 import { encryptSecret, decryptSecret, isV1Cipher } from './credentials';
-import { initLogger, mirrorConsole, log, logModel, logFilePath } from './logger';
+import { initLogger, mirrorConsole, log, logFilePath } from './logger';
 import {
   DATA_DIR_NAMES,
   DATA_FILE_NAMES,
@@ -107,10 +80,7 @@ import {
   type MigrateFileSpec,
 } from './data-dir';
 import {
-  ALLOWED_COMMANDS,
   TOOL_DEFS,
-  FILE_READ_RESULT_MAX,
-  WEB_FETCH_RESULT_MAX,
   type ApiMessage,
   type ModelReply,
   type NativeToolCall,
@@ -124,69 +94,15 @@ import {
   normalizeNativeToolCalls,
 } from './agent-runtime';
 import { isAbsoluteLike } from './common-tools';
-import {
-  callMcpTool,
-  connectMcpServer,
-  emptyMcpStore,
-  isMcpId,
-  normalizeMcpConfig,
-  parseMcpStore,
-  serializeMcpStore,
-  type McpCallResult,
-  type McpConnState,
-  type McpConnectionState,
-  type McpListResult,
-  type McpServerConfig,
-  type McpStore,
-} from './mcp-client';
-import {
-  buildClickExpression,
-  buildLinksExpression,
-  buildTextExpression,
-  buildTypeExpression,
-  buildWaitForSelectorExpression,
-  clipBrowserText,
-  describeBrowserState,
-  normalizeBrowserArgs,
-  scanScriptRisks,
-  type BrowserStateSnapshot,
-} from './browser-tools';
-import {
-  browserShotDir,
-  clearBrowserPages,
-  closeBrowser as cdpCloseBrowser,
-  closeBrowserPage,
-  evalInPage,
-  getBrowserState,
-  onBrowserStateChange,
-  openBrowser as cdpOpenBrowser,
-  screenshotBrowser,
-  setBrowserVisible,
-} from './browser-cdp';
-import {
-  createTerminal,
-  ensurePtyLoaded,
-  getTerminalState,
-  killTerminal,
-  onTerminalData,
-  onTerminalExit,
-  resizeTerminal,
-  writeTerminal,
-} from './terminal-pty';
-import {
-  humanSize,
-  languageOf,
-  looksBinaryByName,
-  normalizeFileRead,
-  normalizeFileTree,
-  normalizeFileWrite,
-  sniffBinary,
-  sortTreeEntries,
-  FILE_TREE_MAX_ENTRIES,
-  SNIFF_WINDOW,
-  FILE_READ_MAX_BYTES,
-} from './file-panel';
-
+import { callModel as callModelHttp, initModelClient } from './model-client';
+import { abortAgentTurn, initAgentTurn, runAgentTurn } from './agent-turn';
+import { executeTool, initToolExec, sessionCwd, setSessionCwd } from './tool-exec';
+import { registerBrowserIpc } from './ipc-browser';
+import { preloadTerminalPty, registerTerminalIpc } from './ipc-terminal';
+import { registerFilePanelIpc } from './ipc-file-panel';
+import { connectorsFilePath, initConnectors, loadConnectors, registerConnectorIpc } from './ipc-connectors';
+import { initMcp, loadMcp, mcpFilePath, registerMcpIpc } from './ipc-mcp';
+import { hydrateMarketEnabled, initMarket, loadMarketEnabled, registerMarketIpc } from './ipc-market';
 // ============================================================================
 // OrchDesk 桌面壳主进程（P1）
 // ----------------------------------------------------------------------------
@@ -201,9 +117,12 @@ import {
 // ctx.agents.followup seam（后者留作未来切 dsh 原生于代理循环时的入口）。
 // ============================================================================
 
-let mainWindow: BrowserWindow | null = null;
-let tray: Tray | null = null;
 const isDev = !app.isPackaged;
+bootDesktop.initBootDesktop({
+  log: (level, scope, msg) => log(level === 'ERROR' || level === 'WARN' ? level : 'INFO', scope, msg),
+  checkForUpdates,
+});
+initModelClient({ decryptKey });
 
 // ---------------------------------------------------------------------------
 // IPC sender 校验（遗留项①，纵深防御）：全仓唯一带 preload 的窗口是 mainWindow
@@ -224,7 +143,7 @@ const isDev = !app.isPackaged;
 function isTrustedIpcSender(sender: unknown): boolean {
   if (sender == null) return true; // 进程内直调（测试后门等），非真实 webContents
   try {
-    return !!(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents);
+    return !!(bootDesktop.mainWindow && !bootDesktop.mainWindow.isDestroyed() && sender === bootDesktop.mainWindow.webContents);
   } catch { return false; }
 }
 // 可被 verify 套件断言（不导出默认走 tsc 无害；仅供测试观测校验决策）
@@ -509,246 +428,16 @@ function decryptKey(encB64?: string): string {
   }
 }
 
-// ---- 真实模型调用（OpenAI 兼容 + Ollama，支持 function calling）----
-// 返回结构化 ModelReply（content + toolCalls），不再把 tool_calls 编码成
-// `<tool:...>` 文本再由上层正则解码（BUG-014 根因：编码 → 解码往返易断）。
-
-async function callModel(provider: ModelProvider, model: string, messages: ApiMessage[], toolDefs: typeof TOOL_DEFS = []): Promise<ModelReply> {
-  if (provider.type === 'ollama') {
-    return callOllama(provider, model, messages, toolDefs);
-  }
-  return callOpenAICompatible(provider, model, messages, toolDefs);
-}
-
-async function callOllama(provider: ModelProvider, model: string, messages: ApiMessage[], toolDefs: typeof TOOL_DEFS = []): Promise<ModelReply> {
-  const url = provider.baseUrl.replace(/\/$/, '') + '/api/chat';
-  const body: Record<string, unknown> = { model, messages, stream: false };
-  if (toolDefs.length) body.tools = toolDefs;
-  const t0 = Date.now();
-  logModel('request', { provider: provider.name, model, apiMode: 'ollama', url, toolCalls: toolDefs.length });
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
-  }).catch((err) => {
-    logModel('error', { provider: provider.name, model, apiMode: 'ollama', url, ms: Date.now() - t0, error: (err as Error).message });
-    throw err;
-  });
-  if (!res.ok) throw new Error(`Ollama 返回 HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const rawBody = await res.text();
-  let data: {
-    message?: { content?: string; tool_calls?: unknown };
-    error?: string;
-    done_reason?: string;
-  };
-  try {
-    data = JSON.parse(rawBody) as typeof data;
-  } catch {
-    throw new Error(`Ollama 返回非 JSON 响应（HTTP ${res.status}）: ${rawBody.slice(0, 200)}`);
-  }
-  if (data.error) throw new Error(data.error);
-
-  const toolCalls = normalizeNativeToolCalls(data.message?.tool_calls);
-  const content = data.message?.content || '';
-  logModel('response', {
-    provider: provider.name, model, apiMode: 'ollama', url,
-    status: res.status, ms: Date.now() - t0,
-    contentLen: content.length, toolCalls: toolCalls.length,
-  });
-  return {
-    content,
-    toolCalls,
-    source: toolCalls.length ? 'native' : 'none',
-    // FR-5：Ollama 顶层 prompt_eval_count / eval_count → 归一化 usage
-    usage: normalizeApiUsage(data) || undefined,
-    emptyReason: (!content && !toolCalls.length)
-      ? emptyContentReason({
-          provider: provider.name,
-          model,
-          mode: 'ollama',
-          status: res.status,
-          finish: data.done_reason,
-          bodySnippet: rawBody.slice(0, 200),
-        })
-      : undefined,
-  };
-}
-
-/** 构造请求 URL / body（chat / responses / completions 三种 API 形态）。 */
-function buildRequest(base: string, mode: 'chat' | 'responses' | 'completions', model: string, messages: ApiMessage[]): { url: string; body: Record<string, unknown> } {
-  const isFullEndpoint = /\/chat\/completions|\/responses|\/completions/.test(base);
-  const clean = base.replace(/\/v1\/?$/, '');
-
-  if (mode === 'responses') {
-    // OpenAI Responses 规范：input 接受完整消息数组。system 角色映射为 developer，
-    // 并保留 assistant 历史 —— 此前只拼 user 文本，导致 responses 模式丢失系统提示词
-    // （含 <tool:> 兜底格式说明）与多轮上下文，多轮对话直接断裂。
-    const input = messages.map(m => ({
-      role: m.role === 'system' ? 'developer' as const : m.role,
-      content: m.content || '',
-    }));
-    return {
-      url: isFullEndpoint ? base : clean + '/v1/responses',
-      body: { model, input },
-    };
-  }
-  if (mode === 'completions') {
-    return {
-      url: isFullEndpoint ? base : clean + '/v1/completions',
-      body: { model, prompt: messages.map(m => `${m.role}: ${m.content || ''}`).join('\n'), max_tokens: 1024 },
-    };
-  }
-  return {
-    url: isFullEndpoint ? base : clean + '/v1/chat/completions',
-    body: { model, messages, stream: false },
-  };
-}
-
-/** 从 OpenAI chat 响应中取出正文。 */
-function pickOpenAIContent(data: Record<string, unknown>, mode: 'chat' | 'responses' | 'completions'): string {
-  if (mode === 'responses') {
-    const direct = (data as { output_text?: string }).output_text;
-    if (typeof direct === 'string' && direct) return direct;
-    const out = (data as { output?: Array<{ type?: string; content?: Array<{ text?: string }> }> }).output;
-    if (Array.isArray(out)) {
-      const parts: string[] = [];
-      for (const item of out) {
-        if (item?.type === 'message' && Array.isArray(item.content)) {
-          for (const c of item.content) if (typeof c?.text === 'string') parts.push(c.text);
-        }
-      }
-      if (parts.length) return parts.join('\n');
-    }
-    return '';
-  }
-  if (mode === 'completions') {
-    return ((data as { choices?: Array<{ text?: string }> }).choices?.[0]?.text || '');
-  }
-  // content 可能是字符串，也可能是分段数组（[{type:'text',text:'…'}]，常见于多模态
-  // 网关 / 新版模型）—— 只按字符串处理会把后者误判为「模型返回空内容」。
-  const raw = (data as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content;
-  if (typeof raw === 'string') return raw;
-  if (Array.isArray(raw)) {
-    return raw.map((c) => (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string'
-      ? (c as { text: string }).text
-      : '')).join('');
-  }
-  return '';
-}
-
-/** HTTP 200 但拿不到正文时，构造可定位的诊断信息（不含密钥，响应体本身无敏感值）。 */
-function emptyContentReason(opts: { provider: string; model: string; mode: string; status: number; finish?: unknown; bodySnippet: string }): string {
-  const parts = [
-    '模型返回空内容',
-    `provider=${opts.provider}`,
-    `model=${opts.model}`,
-    `apiMode=${opts.mode}`,
-    `HTTP ${opts.status}`,
-  ];
-  if (opts.finish !== undefined) parts.push(`finish_reason=${String(opts.finish)}`);
-  if (opts.bodySnippet) parts.push(`响应片段: ${opts.bodySnippet}`);
-  return `（${parts.join(' · ')}）`;
-}
-
-async function callOpenAICompatible(provider: ModelProvider, model: string, messages: ApiMessage[], toolDefs: typeof TOOL_DEFS = []): Promise<ModelReply> {
-  const apiKey = decryptKey(provider.apiKeyEnc);
-  if (!apiKey) throw new Error(`提供商「${provider.name}」未配置 API Key，请先在设置页配置`);
-  const mode = provider.apiMode || 'chat';
-  const base = provider.baseUrl.replace(/\/+$/, '');
-
-  // 只有 chat 形态支持 OpenAI function calling；responses/completions 不发 tools。
-  const canUseTools = mode === 'chat' && toolDefs.length > 0;
-  // 逐级降级：完整 → 不带 tool_choice → 完全不带 tools（部分网关不支持会 400/404/422）。
-  const attempts: Array<{ tools: boolean; toolChoice: boolean }> = canUseTools
-    ? [{ tools: true, toolChoice: true }, { tools: true, toolChoice: false }, { tools: false, toolChoice: false }]
-    : [{ tools: false, toolChoice: false }];
-
-  let lastErr = '';
-  for (const att of attempts) {
-    const { url, body } = buildRequest(base, mode, model, messages);
-    if (att.tools) {
-      body.tools = toolDefs;
-      if (att.toolChoice) body.tool_choice = 'auto';
-    }
-    const t0 = Date.now();
-    logModel('request', {
-      provider: provider.name, model, apiMode: mode, url,
-      toolCalls: att.tools ? toolDefs.length : 0,
-      ...(att.tools ? {} : { error: canUseTools ? `tools 降级（att.tools=${att.tools}）` : undefined }),
-    });
-
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(120_000),
-      });
-    } catch (err) {
-      logModel('error', { provider: provider.name, model, apiMode: mode, url, ms: Date.now() - t0, error: (err as Error).message });
-      throw new Error(`请求模型接口失败：${(err as Error).message}`);
-    }
-
-    if (!res.ok) {
-      const txt = await res.text();
-      lastErr = `模型 API 返回 HTTP ${res.status}: ${txt.slice(0, 300)}`;
-      logModel('error', { provider: provider.name, model, apiMode: mode, url, status: res.status, ms: Date.now() - t0, error: txt.slice(0, 200) });
-      // 工具相关参数被拒绝 → 降级重试；其余错误直接抛出。
-      if (att.tools && [400, 404, 415, 422].includes(res.status)) continue;
-      throw new Error(lastErr);
-    }
-
-    const rawBody = await res.text();
-    let data: Record<string, unknown>;
-    try {
-      data = JSON.parse(rawBody) as Record<string, unknown>;
-    } catch {
-      // HTTP 200 但非 JSON（如网关返回 HTML 错误页）——给出可定位的诊断而非「空内容」
-      throw new Error(`模型 API 返回非 JSON 响应（HTTP ${res.status} · apiMode=${mode}）: ${rawBody.slice(0, 200)}`);
-    }
-    const errMsg = (data as { error?: { message?: string } }).error?.message;
-    if (errMsg) {
-      lastErr = errMsg;
-      if (att.tools && /tool|function/i.test(errMsg)) continue;
-      throw new Error(errMsg);
-    }
-
-    const choice = (data as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: unknown }> }).choices?.[0];
-    const toolCalls = normalizeNativeToolCalls(choice?.message?.tool_calls);
-    const content = pickOpenAIContent(data, mode) || (typeof choice?.message?.content === 'string' ? choice.message.content : '');
-    const finish = choice?.finish_reason;
-
-    // 软拒绝：带 tools 时网关返回 200 但 content/toolCalls 全空（StepFun 等网关行为），
-    // 继续降级到不带 tools，避免把空响应当成最终答案。
-    if (!content && !toolCalls.length && att.tools) {
-      lastErr = emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish, bodySnippet: rawBody.slice(0, 200) });
-      logModel('error', { provider: provider.name, model, apiMode: mode, url, status: res.status, ms: Date.now() - t0, error: `[softReject] ${lastErr}` });
-      continue;
-    }
-
-    logModel('response', {
-      provider: provider.name, model, apiMode: mode, url,
-      status: res.status, ms: Date.now() - t0,
-      contentLen: content.length, toolCalls: toolCalls.length,
-    });
-    return {
-      content,
-      toolCalls,
-      source: toolCalls.length ? 'native' : 'none',
-      // FR-5：chat（prompt_tokens）与 responses（input_tokens）两种形态统一归一化；
-      // 网关不回 usage → undefined，上层不伪造 0。
-      usage: normalizeApiUsage(data) || undefined,
-      // 只有「去掉 tools 后成功拿到非空响应」才算真正的工具拒绝，
-      // 若去掉 tools 仍是空响应，则不应把工具能力永久关闭。
-      toolsRejected: canUseTools && !att.tools && content ? true : undefined,
-      emptyReason: (!content && !toolCalls.length)
-        ? emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish, bodySnippet: rawBody.slice(0, 200) })
-        : undefined,
-    };
-  }
-  throw new Error(lastErr || '模型调用失败（未知原因）');
+// ---- 真实模型调用：实现见 model-client.ts（可注入 AbortSignal）----
+async function callModel(
+  provider: ModelProvider,
+  model: string,
+  messages: ApiMessage[],
+  toolDefs: typeof TOOL_DEFS = [],
+  signal?: AbortSignal,
+  onDelta?: (chunk: string) => void,
+): Promise<ModelReply> {
+  return callModelHttp(provider, model, messages, toolDefs, { signal, onDelta });
 }
 
 /** 时间戳 helper */
@@ -763,72 +452,7 @@ function nowTime(): string { return new Date().toLocaleTimeString('zh-CN', { hou
 //   orchdesk:run-agent-turn(id,text,opt) Agent 回合（工具调用 + 真实模型）
 // ============================================================================
 
-// --- 工具执行引擎（Agent Runtime 核心） ---
-// 类型（ToolCall / ToolResult / ApiMessage）与工具定义（TOOL_DEFS / ALLOWED_COMMANDS）
-// 统一在 agent-runtime.ts 中定义，便于在 node 下直接单测。
-
-/**
- * 命令执行的工作目录：必须是**存在**的目录，否则子进程 spawn 直接 ENOENT。
- * 依次尝试 user home → 数据目录 → 当前工作目录 → 系统临时目录。
- */
-function resolveShellCwd(): string {
-  const candidates: string[] = [];
-  try { candidates.push(app.getPath('home')); } catch { /* ignore */ }
-  try { candidates.push(os.homedir()); } catch { /* ignore */ }
-  try { candidates.push(dataDir()); } catch { /* ignore */ }
-  candidates.push(process.cwd(), os.tmpdir());
-  for (const c of candidates) {
-    try {
-      if (c && fs.existsSync(c) && fs.statSync(c).isDirectory()) return c;
-    } catch { /* 继续尝试下一个 */ }
-  }
-  return os.tmpdir();
-}
-
-// app.getPath 结果缓存：isPathAllowed 是工具执行热路径（每个 file_* 工具一次），
-// 历史实现每次调用都跑 3 次 getPath。app 未就绪时拿不到路径，此时不缓存，下次再试。
-let cachedAllowedRoots: string[] | null = null;
-
-// 网关软拒绝 tools 的持久化记忆：key = providerId|model。
-// 一旦某 provider+model 在带 tools 时返回 200 空内容或硬 4xx，后续会话直接走文本兜底，
-// 避免每轮都重复三次降级重试。
-const toolRejectMemo = new Map<string, true>();
-function toolRejectKey(provider: ModelProvider, model: string): string {
-  return `${provider.id}|${model}`;
-}
-function allowedRoots(): string[] {
-  if (!cachedAllowedRoots) {
-    const roots: string[] = [];
-    for (const name of ['home', 'userData', 'temp'] as const) {
-      const p = safeGetPath(name);
-      if (p) roots.push(path.resolve(p));
-    }
-    if (roots.length) cachedAllowedRoots = roots;
-  }
-  return cachedAllowedRoots ?? [];
-}
-
-/** 安全沙箱：限制可访问的目录 */
-function isPathAllowed(p: string): boolean {
-  const resolved = path.resolve(p);
-  // BUG-023：会话工作区（用户在 GUI 里绑定的项目目录）也是白名单根——
-  // 否则 cwd 切到 D 盘项目后，file_*/set_cwd 全被沙箱拒绝，「工作区」名存实亡。
-  // sessionCwds 只能经 set-session-cwd（用户驱动）写入，Agent 无法借此扩权。
-  const roots = [...allowedRoots(), dataDir(), process.cwd(), ...sessionCwds.values()];
-  return roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
-}
-
-/** 允许执行的命令白名单（集合形式，O(1) 判定）。 */
-const ALLOWED_COMMAND_SET = new Set(ALLOWED_COMMANDS);
-
-// 会话级工作目录：set_cwd 写入，shell/file 操作读取。进程内 Map，重启即失——
-// ponytail: 升级路径 = 持久化到 sessions.json 的会话字段。
-const sessionCwds = new Map<string, string>();
-
-function sessionCwd(sessionId?: string): string {
-  const set = sessionId ? sessionCwds.get(sessionId) : undefined;
-  return set || resolveShellCwd();
-}
+// --- 工具执行引擎：见 tool-exec.ts ---
 
 /**
  * 授权门（PRD L3/L4 / T-P3-2）：paranoid（只读）直接拒；default/trusted 过 GUI 审批；
@@ -947,407 +571,6 @@ function recordSandbox(input: {
 /** 最近一次读到的授权模式（getMode 是异步的，日志只能留快照）。 */
 let lastAuthMode = 'default';
 
-// ---------------------------------------------------------------------------
-// 浏览器工具（ADR-0011：Electron 自带 CDP，零额外依赖）
-// ---------------------------------------------------------------------------
-// 安全口径沿用既有工具：
-//   - 导航 = 边界外网络访问 → 域名白名单，非白名单过补偿层外发二次确认（同 web_fetch）
-//   - 点击 / 输入 / 执行脚本 = 真实改变页面（下单、发帖、删数据都可能）→ 授权门（同 file_write）
-//   - 每一次判定都进沙箱日志：事后能回答「Agent 在哪个网页上点了什么」
-// 浏览器共享用户默认 session（保留登录态）——这是能力的一半，也是为什么写操作必须过门。
-
-/** 浏览器工具在沙箱日志里的判定对象（不记录输入文本，避免把密码写进日志）。 */
-function browserTargetOf(name: string, args: Record<string, unknown>): string {
-  const st = getBrowserState();
-  const where = st.open && st.url ? st.url : '(浏览器未打开)';
-  if (name === 'browser_type') return `${where} · 输入到 ${String(args.selector || '').slice(0, 80)}`;
-  if (name === 'browser_click') return `${where} · 点击 ${String(args.selector || '').slice(0, 80)}`;
-  if (name === 'browser_eval') return `${where} · 执行脚本 ${String(args.expression || '').length} 字符`;
-  if (name === 'browser_open') return String(args.url || '').slice(0, 300) || '(空 URL)';
-  return where;
-}
-
-async function executeBrowserTool(name: string, args: Record<string, unknown>, sessionId?: string): Promise<ToolResult> {
-  const parsed = normalizeBrowserArgs(name, args);
-  if (!parsed.ok) {
-    recordSandbox({ tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'error', reason: parsed.error, sessionId });
-    return { name, result: '', error: parsed.error };
-  }
-  const v = parsed.value;
-  const fail = (reason: string, decision: 'denied' | 'error' = 'error'): ToolResult => {
-    recordSandbox({ tool: name, kind: 'browser', target: browserTargetOf(name, args), decision, reason, sessionId });
-    return { name, result: '', error: reason };
-  };
-
-  switch (v.name) {
-    case 'browser_open': {
-      const policy = getHostServices()?.sandboxPolicy;
-      const allowed = policy?.isDomainAllowed ? policy.isDomainAllowed(v.url) : true;
-      if (!allowed) {
-        const denied = await outboundGate(`访问网页 ${v.url}`, sessionId);
-        if (denied) return fail(`域名不在白名单：${denied}`, 'denied');
-      }
-      try {
-        const st = await cdpOpenBrowser(v.url, { waitUntil: v.waitUntil, timeoutMs: v.timeoutMs });
-        recordSandbox({
-          tool: name, kind: 'browser', target: v.url, decision: 'allowed',
-          reason: st.title ? `已打开：${st.title}`.slice(0, 200) : '已打开', sessionId,
-        });
-        return { name, result: describeBrowserState(st) };
-      } catch (err) {
-        return fail((err as Error).message.slice(0, 500));
-      }
-    }
-
-    case 'browser_text': {
-      if (!getBrowserState().open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const r = await evalInPage(buildTextExpression(v.selector, v.maxChars));
-      if (!r.ok) return fail(r.error || '读取页面文本失败');
-      recordSandbox({
-        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
-        reason: `读取 ${String(r.value || '').length} 字符`, sessionId,
-      });
-      return { name, result: clipBrowserText(r.value || '', v.maxChars) };
-    }
-
-    case 'browser_links': {
-      if (!getBrowserState().open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const r = await evalInPage(buildLinksExpression(v.selector, v.limit));
-      if (!r.ok) return fail(r.error || '读取链接失败');
-      recordSandbox({
-        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
-        reason: '列出页面链接', sessionId,
-      });
-      return { name, result: r.value || '(页面内没有链接)' };
-    }
-
-    case 'browser_click': {
-      const st = getBrowserState();
-      if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const denied = await approvalGate('browser_click', `在网页上点击 ${v.selector}`, sessionId, st.url || '');
-      if (denied) return fail(denied, 'denied');
-      const wait = await evalInPage(buildWaitForSelectorExpression(v.selector, v.timeoutMs));
-      if (!wait.ok) return fail(wait.error || `等待元素 ${v.selector} 超时`);
-      const r = await evalInPage(buildClickExpression(v.selector));
-      if (!r.ok) return fail(r.error || '点击失败');
-      recordSandbox({
-        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
-        reason: r.value, sessionId,
-      });
-      return { name, result: `${r.value}（${v.selector}）` };
-    }
-
-    case 'browser_type': {
-      const st = getBrowserState();
-      if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const denied = await approvalGate('browser_type', `在网页输入框填入 ${v.text.length} 个字符`, sessionId, st.url || '');
-      if (denied) return fail(denied, 'denied');
-      const r = await evalInPage(buildTypeExpression(v.selector, v.text, { clear: v.clear, pressEnter: v.pressEnter }));
-      if (!r.ok) return fail(r.error || '填入失败');
-      recordSandbox({
-        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
-        reason: r.value, sessionId,
-      });
-      return { name, result: r.value || '已填入' };
-    }
-
-    case 'browser_screenshot': {
-      const st = getBrowserState();
-      if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const shot = await screenshotBrowser({ fullPage: v.fullPage, timeoutMs: v.timeoutMs }, dataDir());
-      if (!shot.ok) return fail(shot.error || '截图失败');
-      recordSandbox({
-        tool: name, kind: 'browser', target: shot.path || '(截图)', decision: 'allowed',
-        reason: `已保存截图${v.fullPage ? '（整页）' : ''}${shot.via === 'capturePage' ? '（CDP 截图不可用，已回退 capturePage）' : ''}`, sessionId,
-      });
-      // 回退路径只在视口大小，如实告诉模型，别让它以为拿到了整页
-      const tail = shot.via === 'capturePage' ? '（视口截图：CDP 整页/合成截图在本环境不可用）' : '';
-      return { name, result: `截图已保存：${shot.path}${tail}` };
-    }
-
-    case 'browser_eval': {
-      const st = getBrowserState();
-      if (!st.open) return fail('浏览器未打开（先用 browser_open 打开网址）');
-      const risks = scanScriptRisks(v.expression);
-      const reason = `执行脚本${risks.length ? `（涉及：${risks.join('、')}）` : ''}：${v.expression.slice(0, 160)}`;
-      const denied = await approvalGate('browser_eval', reason, sessionId, st.url || '');
-      if (denied) return fail(denied, 'denied');
-      const r = await evalInPage(v.expression, v.timeoutMs);
-      if (!r.ok) {
-        recordSandbox({
-          tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'error',
-          reason: (r.error || '脚本执行失败').slice(0, 300), sessionId,
-        });
-        return { name, result: '', error: r.error || '脚本执行失败' };
-      }
-      recordSandbox({
-        tool: name, kind: 'browser', target: browserTargetOf(name, args), decision: 'allowed',
-        reason: risks.length ? `风险项：${risks.join('、')}` : '页面内求值', sessionId,
-      });
-      return { name, result: r.value || '(脚本返回空值)' };
-    }
-
-    case 'browser_close': {
-      const closed = cdpCloseBrowser();
-      recordSandbox({
-        tool: name, kind: 'browser', target: '(关闭浏览器)', decision: 'allowed',
-        reason: closed ? '浏览器窗口已关闭' : '浏览器本来就没打开', sessionId,
-      });
-      return { name, result: closed ? '浏览器已关闭（登录态保留）' : '浏览器未打开，无需关闭' };
-    }
-
-    default:
-      return fail(`未接线的浏览器工具：${name}`);
-  }
-}
-
-async function executeTool(tool: ToolCall, sessionCtx?: { sessionId?: string }): Promise<ToolResult> {
-  const { name, arguments: args } = tool;
-  const cwd = sessionCwd(sessionCtx?.sessionId);
-  try {
-    switch (name) {
-      case 'file_read': {
-        const filePath = path.resolve(cwd, String(args.path || ''));
-        const sid = sessionCtx?.sessionId;
-        if (!isPathAllowed(filePath)) {
-          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
-          return { name, result: '', error: '路径不在允许范围内' };
-        }
-        // 防御超大文件：工具承诺最大回传 50KB，但整读不入上限文件会阻塞主进程并吃内存尖峰。
-        // 先 stat 拿尺寸，超上限直接拒绝（不整读），与渲染层 file 面板的 2MB 读取上限呼应。
-        let size = -1;
-        try {
-          size = fs.statSync(filePath).size;
-        } catch (err) {
-          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'error', reason: `stat 失败：${(err as Error).message}`, sessionId: sid });
-          return { name, result: '', error: `无法读取文件：${(err as Error).message}` };
-        }
-        // ④H-1：读取上限单源化 —— 与渲染层 file 面板共用 FILE_READ_MAX_BYTES（file-panel.ts:31）。
-        // 注意 file_read 工具超限=拒绝，面板 IPC=截断+truncated 标记：仅共享上限值，处理语义各自保留。
-        if (size > FILE_READ_MAX_BYTES) {
-          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: `文件 ${size} 字节超过 ${FILE_READ_MAX_BYTES} 读取上限`, sessionId: sid });
-          return { name, result: '', error: `文件过大（${size} 字节），超过 2MB 读取上限，请用文件面板或分段读取` };
-        }
-        const content = fs.readFileSync(filePath, 'utf-8');
-        recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'allowed', sessionId: sid });
-        return { name, result: content.slice(0, FILE_READ_RESULT_MAX) }; // ④M-3：回传上限单源（agent-runtime.ts）
-      }
-      case 'file_write': {
-        const filePath = path.resolve(cwd, String(args.path || ''));
-        const content = String(args.content || '');
-        const sid = sessionCtx?.sessionId;
-        if (!isPathAllowed(filePath)) {
-          recordSandbox({ tool: name, kind: 'path', target: filePath, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
-          return { name, result: '', error: '路径不在允许范围内' };
-        }
-        // 写文件可覆盖白名单内任意内容 → 同样过授权门（与 shell 同一 helper）
-        const denied = await approvalGate('file_write', `写入 ${filePath}`, sessionCtx?.sessionId, filePath);
-        if (denied) {
-          recordSandbox({ tool: name, kind: 'approval', target: filePath, decision: 'denied', reason: denied, sessionId: sid });
-          return { name, result: '', error: denied };
-        }
-        const dir = path.dirname(filePath);
-        fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(filePath, content, 'utf-8');
-        recordSandbox({
-          tool: name, kind: 'approval', target: filePath, decision: 'allowed',
-          reason: `已写入 ${path.basename(filePath)} (${content.length} 字节)`, sessionId: sid,
-        });
-        return { name, result: `已写入 ${path.basename(filePath)} (${content.length} 字节)` };
-      }
-      case 'file_list': {
-        const dirPath = path.resolve(cwd, String(args.path || '.'));
-        const sid = sessionCtx?.sessionId;
-        if (!isPathAllowed(dirPath)) {
-          recordSandbox({ tool: name, kind: 'path', target: dirPath, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
-          return { name, result: '', error: '路径不在允许范围内' };
-        }
-        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-        const items = entries.map(e => `${e.isDirectory() ? '📁' : '📄'} ${e.name}`).join('\n');
-        recordSandbox({ tool: name, kind: 'path', target: dirPath, decision: 'allowed', sessionId: sid });
-        return { name, result: items || '(空目录)' };
-      }
-      case 'shell_command': {
-        const cmd = String(args.command || '');
-        const cmdName = (cmd.split(/[\s/\\]+/)[0] || '').toLowerCase();
-        const sid = sessionCtx?.sessionId;
-        if (!cmdName) return { name, result: '', error: '命令为空' };
-        if (!ALLOWED_COMMAND_SET.has(cmdName)) {
-          recordSandbox({
-            tool: name, kind: 'command', target: cmd, decision: 'denied',
-            reason: `命令「${cmdName}」不在白名单中`, sessionId: sid,
-          });
-          return { name, result: '', error: `命令「${cmdName}」不在白名单中。允许: ${ALLOWED_COMMANDS.slice(0, 20).join(', ')}...` };
-        }
-        // ---- 授权门（PRD L3/L4 / T-P3-2）：命令执行必须过审批 ----
-        // 此前审批 UI 已建但工具链路从不触发（与 intent/trace 同款死挂点，BUG-021 修复）。
-        const denied = await approvalGate('shell_command', cmd, sessionCtx?.sessionId, cmd);
-        if (denied) {
-          recordSandbox({ tool: name, kind: 'approval', target: cmd, decision: 'denied', reason: denied, sessionId: sid });
-          return { name, result: '', error: denied };
-        }
-        // PRD FR-12：删除 / 对外发送 / 不可逆命令在授权门之上再加一道补偿层二次确认
-        // （L4 双确认）。普通命令（git/npm/ls…）判定为 other，不额外打扰。
-        const outboundDenied = await outboundGate(cmd, sessionCtx?.sessionId);
-        if (outboundDenied) {
-          recordSandbox({ tool: name, kind: 'outbound', target: cmd, decision: 'denied', reason: outboundDenied, sessionId: sid });
-          return { name, result: '', error: outboundDenied };
-        }
-        // 进程隔离 + 不阻塞主进程：在子进程中异步执行。
-        // cwd 用会话工作目录（set_cwd 可切换），缺省回落 resolveShellCwd()。
-        const { exec } = await import('node:child_process');
-        try {
-          const output = await new Promise<string>((resolve, reject) => {
-            const child = exec(cmd, {
-              cwd,
-              encoding: 'utf-8',
-              timeout: 30_000,
-              maxBuffer: 8 * 1024 * 1024,
-              windowsHide: true,
-            }, (err, stdout, stderr) => {
-              if (err) {
-                // 超时被杀也要把已产出的输出交回，便于诊断
-                const partial = `${stdout || ''}${stderr ? '\n[stderr]\n' + stderr : ''}`;
-                reject(new Error(`${(err as Error).message}${partial ? '：' + partial.slice(0, 500) : ''}`));
-                return;
-              }
-              resolve(`${stdout || ''}${stderr ? '\n[stderr]\n' + stderr : ''}`);
-            });
-            child.on('error', reject);
-          });
-          recordSandbox({ tool: name, kind: 'approval', target: cmd, decision: 'allowed', sessionId: sid });
-          return { name, result: output.slice(0, 50000) };
-        } catch (err) {
-          recordSandbox({
-            tool: name, kind: 'command', target: cmd, decision: 'error',
-            reason: (err as Error).message, sessionId: sid,
-          });
-          return { name, result: '', error: (err as Error).message.slice(0, 2000) };
-        }
-      }
-      case 'web_fetch': {
-        const url = String(args.url || '');
-        const sid = sessionCtx?.sessionId;
-        if (!url.startsWith('http://') && !url.startsWith('https://')) {
-          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: 'URL 必须以 http(s) 开头', sessionId: sid });
-          return { name, result: '', error: 'URL 必须以 http(s) 开头' };
-        }
-        // PRD FR-8：网络请求域名白名单。非白名单域名 = 边界外外发 → 补偿层二次确认。
-        // 此前 v0.9.1 以「只读 GET 无不可逆外发」为由跳过，与 FR-12 明文冲突（外发即边界外 emission）。
-        const policy = getHostServices()?.sandboxPolicy;
-        const allowed = policy?.isDomainAllowed ? policy.isDomainAllowed(url) : true;
-        if (!allowed) {
-          const denied = await outboundGate(`请求接口 ${url}`, sessionCtx?.sessionId);
-          if (denied) {
-            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: `域名不在白名单：${denied}`, sessionId: sid });
-            return { name, result: '', error: `域名不在白名单：${denied}` };
-          }
-          recordSandbox({ tool: name, kind: 'outbound', target: url, decision: 'allowed', reason: '非白名单域名经外发二次确认后放行', sessionId: sid });
-        }
-        try {
-          const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-          // 响应体积护栏：承诺只回传 WEB_FETCH_RESULT_MAX（30KB），但不能因此整读超大响应进内存（防 OOM / 主进程阻塞）。
-          // content-length 预检 + 流式读满上限即停，两重保险。
-          const MAX_FETCH_BYTES = 1 * 1024 * 1024;
-          const declared = Number(res.headers.get('content-length') || '0');
-          if (declared > MAX_FETCH_BYTES) {
-            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'denied', reason: `响应声明 ${declared} 字节超 ${MAX_FETCH_BYTES} 上限`, sessionId: sid });
-            return { name, result: '', error: `响应过大（${declared} 字节），超过读取上限` };
-          }
-          if (!res.body) {
-            const buf = Buffer.from(await res.arrayBuffer());
-            recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
-            return { name, result: buf.toString('utf-8').slice(0, WEB_FETCH_RESULT_MAX) };
-          }
-          const chunks: Buffer[] = [];
-          let total = 0;
-          for await (const chunk of res.body) {
-            const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            total += b.length;
-            if (total > MAX_FETCH_BYTES) break; // 超上限即截停，不整读
-            chunks.push(b);
-          }
-          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'allowed', sessionId: sid });
-          return { name, result: Buffer.concat(chunks).toString('utf-8').slice(0, WEB_FETCH_RESULT_MAX) };
-        } catch (err) {
-          recordSandbox({ tool: name, kind: 'network', target: url, decision: 'error', reason: (err as Error).message, sessionId: sid });
-          return { name, result: '', error: (err as Error).message.slice(0, 2000) };
-        }
-      }
-      // ---- 浏览器（CDP）工具：导航 / 读页面 / 点击 / 输入 / 截图 / 求值 / 关闭 ----
-      case 'browser_open':
-      case 'browser_text':
-      case 'browser_links':
-      case 'browser_click':
-      case 'browser_type':
-      case 'browser_screenshot':
-      case 'browser_eval':
-      case 'browser_close':
-        return await executeBrowserTool(name, args, sessionCtx?.sessionId);
-      case 'memory_save': {
-        // dsh memory 服务（global 域）落地——「记住 X」从口头应答变成真实持久化
-        const content = String(args.content || '').trim();
-        if (!content) return { name, result: '', error: '内容为空' };
-        const svc = getService<MemoryServiceLike>('memory');
-        if (!svc?.record) return { name, result: '', error: '记忆服务未就绪（运行时未启动）' };
-        svc.record('global', content, { origin: 'agent:memory_save' });
-        return { name, result: `已记住：${content.slice(0, 100)}` };
-      }
-      case 'set_cwd': {
-        const resolved = path.resolve(String(args.path || ''));
-        const sid = sessionCtx?.sessionId;
-        if (!isPathAllowed(resolved)) {
-          recordSandbox({ tool: name, kind: 'path', target: resolved, decision: 'denied', reason: '路径不在允许范围内', sessionId: sid });
-          return { name, result: '', error: '路径不在允许范围内' };
-        }
-        let isDir = false;
-        try { isDir = fs.statSync(resolved).isDirectory(); } catch { /* not exist */ }
-        if (!isDir) return { name, result: '', error: `目录不存在：${resolved}` };
-        if (sessionCtx?.sessionId) sessionCwds.set(sessionCtx.sessionId, resolved);
-        recordSandbox({ tool: name, kind: 'path', target: resolved, decision: 'allowed', sessionId: sid });
-        return { name, result: `工作目录已切换：${resolved}` };
-      }
-      default:
-        return { name, result: '', error: `未知工具: ${name}` };
-    }
-  } catch (err) {
-    // 执行期异常也是要可追溯的事实（file_read 读不存在的文件、磁盘满、权限被拒…）。
-    // 此前这类错误直接返回，沙箱日志里一条都没有，事后查不到「Agent 到底碰了什么」。
-    const message = (err as Error).message;
-    recordSandbox({
-      tool: name,
-      kind: sandboxKindOf(name),
-      target: sandboxTargetOf(name, args, cwd),
-      decision: 'error',
-      reason: message,
-      sessionId: sessionCtx?.sessionId,
-    });
-    return { name, result: '', error: message };
-  }
-}
-
-/** 工具 → 判定类型（异常路径没有显式 kind，按工具归类以便检索）。 */
-function sandboxKindOf(toolName: string): SandboxLogEntry['kind'] {
-  if (toolName === 'shell_command') return 'command';
-  if (toolName === 'web_fetch') return 'network';
-  if (toolName.startsWith('browser_')) return 'browser';
-  return 'path';
-}
-
-/** 工具 → 判定对象（取最能说明「碰了什么」的那一个入参）。 */
-function sandboxTargetOf(toolName: string, args: Record<string, unknown> | undefined, cwd: string): string {
-  const a = args || {};
-  const raw = toolName === 'shell_command' ? a.command
-    : toolName === 'web_fetch' ? a.url
-      : (a.path ?? a.content);
-  if (raw === undefined || raw === null || raw === '') return cwd;
-  const s = String(raw);
-  // 相对路径解析成绝对路径再记，否则检索「D:/x/y.txt」永远命中不了。
-  if (/^[a-zA-Z]:[\\/]|^\//.test(s)) return s;
-  try { return path.resolve(cwd, s); } catch { return s; }
-}
-
-
 // --- Agent Runtime：模型回合 + 工具调用循环 ---
 
 /** 取可下发 IPC 的渲染窗口：mainWindow 优先，回退首个未销毁窗。
@@ -1355,9 +578,16 @@ function sandboxTargetOf(toolName: string, args: Record<string, unknown> | undef
  * 全库此前散落 4 份同款三元式（浏览器状态/终端数据/终端退出/工具步骤），统一收口。 */
 function rendererWindow(): BrowserWindow | null {
   try {
-    if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+    if (bootDesktop.mainWindow && !bootDesktop.mainWindow.isDestroyed()) return bootDesktop.mainWindow;
     return BrowserWindow.getAllWindows().find((x) => !x.isDestroyed()) || null;
   } catch { return null; }
+}
+
+function sendToRenderer(channel: string, payload: unknown): void {
+  try {
+    const w = rendererWindow();
+    if (w) w.webContents.send(channel, payload);
+  } catch { /* 窗口已关闭 */ }
 }
 
 /** 把一次工具执行同步给渲染层（步骤条 + 通知）。 */
@@ -1371,259 +601,41 @@ function notifyToolStep(sessionId: string, name: string, ph: 'running' | 'done' 
   } catch { /* 忽略：窗口可能已关闭 */ }
 }
 
-async function runAgentTurn(sessionId: string, text: string, opts: { models?: string[]; thinkLevel?: string }): Promise<{
-  text: string;
-  intent: string;
-  /** 本回合工具轨迹（n/ph/result）。渲染层据此在 agent 消息下展示「N 步 · M 个动作」。 */
-  tools?: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }>;
-  steps?: number;
-}> {
-  const modelCfg = loadModelConfig();
-  if (!modelCfg.providers.length) return { text: '（未配置模型）请先在设置页「模型管理」中添加模型提供商。', intent: 'CONFIRM' };
-
-  const provider = modelCfg.providers[0]!;
-  const availableModels = provider.models || [];
-  const requested = (opts?.models || [])[0];
-  const modelPick = availableModels.includes(requested || '') ? requested : (availableModels[0] || modelCfg.defaultModel);
-  const model = modelPick || 'qwen3:14b';
-
-  // 会话不存在时先建壳，避免「渲染层尚未持久化会话」导致本轮消息丢失。
-  if (!store[sessionId]) {
-    store[sessionId] = { id: sessionId, msgs: [], created: new Date().toISOString(), updated: new Date().toISOString() };
-  }
-
-  // Phase 8: emit task.created（双写：本地 SessionEvent + Canonical envelope）
-  void emitCanonicalEvent(
-    'task.created',
-    { type: 'user', id: text.slice(0, 64) }, // 用户输入截断作为 actor id
-    { type: 'Session', id: sessionId },
-    { text, model },
-    { file: eventFileFor(dataDir(), sessionId), context: { sessionId, turn: 0 } },
-  );
-
-  // 历史：只取 user/assistant 正文（tool 步骤消息是 UI 记录，不回灌模型）。
-  const sessionMsgs = (store[sessionId] as { msgs?: Array<{ role?: string; text?: string }> } | undefined)?.msgs || [];
-  const apiMessages: ApiMessage[] = sessionMsgs
-    .filter(m => (m.role === 'user' || m.role === 'assistant') && m.text)
-    .slice(-20)
-    .map(m => ({ role: m.role as 'user' | 'assistant', content: m.text as string }));
-  // dsh 服务接入对话流：记忆语义召回（FR-7）+ 提示词库合并（FR-5/FR-11）+ 会话工作目录。
-  // 召回/合并失败不阻塞回合（提示词只影响 system prompt，不影响执行侧 fail 边界）。
-  let memories: string[] = [];
+/** 模型增量文本（JSON 整包一次；SSE 解析后按 chunk）。 */
+function notifyAgentDelta(sessionId: string, text: string): void {
+  if (!text) return;
   try {
-    const memSvc = getService<MemoryServiceLike>('memory');
-    if (memSvc?.recall) {
-      // 语义召回（TF-IDF Top-K）：相关优先；但短查询与记忆无词面交集时余弦为 0，
-      // 此时回落机械取尾——「用户告知的事实」必须可见，不能被召回算法吞掉。
-      const hits = (memSvc.recall(text, { k: 5 }) as Array<{ entry?: { text?: string }; score?: number }> | undefined) || [];
-      memories = hits.filter((h) => (h.score ?? 0) > 0).map((h) => String(h.entry?.text || '')).filter(Boolean);
-    }
-    if (!memories.length && memSvc?.listDomain) {
-      memories = ((memSvc.listDomain('global') as Array<{ text?: string }> | undefined) || [])
-        .map((e) => String(e?.text || '')).filter(Boolean).slice(-10);
-    }
-  } catch { /* 记忆召回失败不阻塞回合 */ }
-
-  let prompts: string[] = [];
-  try {
-    const promptSvc = getService<PromptServiceLike>('promptLib');
-    if (promptSvc?.mergeForAgent) {
-      const merged = promptSvc.mergeForAgent('orchdesk-main') as { sections?: Array<{ fromTitle?: string; body?: string; conflict?: boolean }> } | null;
-      prompts = (merged?.sections || [])
-        .map((s) => `【${s?.fromTitle || '提示词'}】${String(s?.body || '').trim()}${s?.conflict ? '（与其他提示词冲突，按用户最新意图取舍）' : ''}`)
-        .filter((p) => p.length > 6);
-    }
-  } catch { /* 提示词合并失败不阻塞回合 */ }
-
-  apiMessages.unshift({ role: 'system', content: buildSystemPrompt({ cwd: sessionCwd(sessionId), memories, prompts }) });
-  apiMessages.push({ role: 'user', content: text });
-
-  const toolSteps: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }> = [];
-  let finalReply = '';
-  let stepCount = 0;
-  // FR-5：本回合累计 token 用量。null = 网关从未上报 usage（「没上报」≠「0 token」，
-  // 此时本回合不记用量条目，聚合里也不会出现这次回合）。
-  let turnUsage: { p: number; c: number; t: number } | null = null;
-  const MAX_ITERATIONS = Math.max(1, Math.min(200, modelCfg.maxToolIterations || 20));
-  // 网关明确拒绝工具协议 → 停止下发 tools，转「文本兜底解析」，
-  // 避免每一轮都重复三次降级重试。进程级记忆让同 provider+model 的后续会话直接跳过 tools。
-  const rejectKey = toolRejectKey(provider, model);
-  let providerRejectsTools = toolRejectMemo.has(rejectKey);
-
-  // 工具调用循环
-  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-    // ---- dsh 挂点桥接（ADR-0008）：用户意图必经 agent/pre-step waterfall ----
-    // intent 意图网关（F1-F4 规则漏斗 → reject 硬拒）与 trace 遥测都在该事件上；
-    // 仅对用户输入门控一次（iter=0），后续工具 step 由沙箱白名单/命令白名单兜底。
-    // 运行时未启动 → firePreStep 返回 null → 放行（基础设施缺失不锁死对话）。
-    if (iter === 0) {
-      let gate: { kind?: string; reason?: string } | null = null;
-      try {
-        gate = await firePreStep({
-          sessionId, text,
-          // 完整会话正文（system + 历史 + 当前输入）：memory 80% 阈值按总 token 估算
-          messages: apiMessages.map((m) => String(m.content || '')).filter(Boolean),
-        });
-      } catch (err) {
-        log('WARN', 'intent', `pre-step waterfall 异常（放行）: ${(err as Error).message}`);
-      }
-      if (gate?.kind === 'reject') {
-        finalReply = `（意图网关拦截）该请求被判定为高风险操作，已拒绝执行。${gate.reason ? `原因：${gate.reason}` : '可在设置页调整意图识别策略。'}`;
-        break;
-      }
-    }
-    const wantsTools = !providerRejectsTools;
-    let reply: ModelReply;
-    try {
-      reply = await callModel(provider, model, apiMessages, wantsTools ? TOOL_DEFS : []);
-    } catch (err) {
-      return { text: `（模型调用失败）${(err as Error).message}`, intent: 'CONFIRM' };
-    }
-    if (reply.usage) {
-      const u = reply.usage;
-      turnUsage = turnUsage
-        ? { p: turnUsage.p + u.promptTokens, c: turnUsage.c + u.completionTokens, t: turnUsage.t + u.totalTokens }
-        : { p: u.promptTokens, c: u.completionTokens, t: u.totalTokens };
-    }
-    if (reply.toolsRejected) {
-      providerRejectsTools = true;
-      toolRejectMemo.set(rejectKey, true);
-      console.warn(`[orchdesk] 提供商「${provider.name}」不接受工具定义，后续会话转为文本兜底解析。`);
-    }
-
-    // ---- 模式 1：原生 function calling（优先）----
-    if (reply.toolCalls.length) {
-      const assistantMsg = buildAssistantToolCallMessage(reply.content, reply.toolCalls as NativeToolCall[]);
-      apiMessages.push(assistantMsg);
-
-      for (const tc of reply.toolCalls) {
-        stepCount++;
-        notifyToolStep(sessionId, tc.name, 'running');
-        const result = await executeTool(tc, { sessionId });
-        toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
-        notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
-        // Phase 8: emit tool.result
-        void emitCanonicalEvent(
-          'tool.result',
-          { type: 'agent', id: sessionId },
-          { type: 'ToolCall', id: tc.id || tc.name },
-          { name: tc.name, result: result.result, error: result.error, sessionId },
-          { file: eventFileFor(dataDir(), sessionId), context: { sessionId, step: stepCount } },
-        );
-        // OpenAI 规范：工具结果用 role='tool' + tool_call_id 回传。
-        apiMessages.push(buildToolResultMessage(tc, result, 'native'));
-      }
-      continue;
-    }
-
-    // ---- 模式 2：文本兜底（模型不支持 native tool_calls）----
-    const parsed = extractToolCalls(reply.content);
-    const usable = parsed.calls.filter(c => isKnownTool(c.name));
-    if (!usable.length) {
-      finalReply = reply.content || reply.emptyReason || '（模型返回空内容）';
-      break;
-    }
-
-    apiMessages.push({ role: 'assistant', content: parsed.stripped || `（调用工具：${usable.map(c => c.name).join(', ')}）` });
-    for (const tc of usable) {
-      stepCount++;
-      notifyToolStep(sessionId, tc.name, 'running');
-      // BUG（全盘死挂点扫描）：文本兜底模式此前漏传 sessionId —— 对照同函数上文原生
-      // 路径的 executeTool 调用（不要用行号互指，编辑漂移会让注释失真）。
-      // 不传则 executeTool 内 sessionCtx?.sessionId 恒假：set_cwd 静默失效、cwd 回落
-      // home、session 级 grant 匹配不到、沙箱日志 sessionId 全空。会话工作区整链在该
-      // 模式断（用户「git pull 找不到仓库」的第三种形态）。
-      const result = await executeTool(tc, { sessionId });
-      toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
-      notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
-      // Phase 8: emit tool.result
-      void emitCanonicalEvent(
-        'tool.result',
-        { type: 'agent', id: sessionId },
-        { type: 'ToolCall', id: tc.name },
-        { name: tc.name, result: result.result, error: result.error, sessionId },
-        { file: eventFileFor(dataDir(), sessionId), context: { sessionId, step: stepCount } },
-      );
-      // 文本兜底模式下 assistant 消息里没有 tool_calls，
-      // 此时若强行发 role='tool' 会被多数网关判定为非法 → 用 user 角色回传。
-      apiMessages.push(buildToolResultMessage({ name: tc.name }, result, 'text'));
-    }
-  }
-
-  if (!finalReply) finalReply = `（已完成 ${stepCount} 个工具步骤，但模型未给出最终总结）`;
-
-  // 持久化
-  const s = store[sessionId] as Record<string, unknown> | undefined;
-  const turnTs = Date.now();
-  if (s) {
-    const msgs = (s.msgs as Array<Record<string, unknown>>) || [];
-    msgs.push({ role: 'user', text, t: nowTime(), ts: new Date(turnTs).toISOString() });
-    msgs.push({
-      role: 'assistant', text: finalReply, model, t: nowTime(), ts: new Date(turnTs).toISOString(),
-      tools: toolSteps, steps: stepCount,
-      // FR-5：单回合 token 用量徽标（网关没上报就没有该字段，UI 不显示）
-      ...(turnUsage ? { tok: { p: turnUsage.p, c: turnUsage.c } } : {}),
-    });
-    s.msgs = msgs;
-    s.updated = new Date().toISOString();
-    saveStore();
-  }
-
-  // ---- SessionEvent append-only 双写（FR-6，ADR-0009）----
-  // 「模型可见必入日志」：用户输入与模型回复（含工具步骤、token 用量）在同一
-  // 持久化点追加进事件流。写失败不阻塞回合（事件流是回放权威源，不是运行态依赖）
-  // ——整块兜异常（eventFileFor 对非法 sid 会抛错），只 WARN 不 reject 回合。
-  try {
-    const evFile = eventFileFor(dataDir(), sessionId);
-    const evs: Array<Omit<SessionEvent, 'seq'>> = [
-      { ts: turnTs, kind: 'user', text },
-      {
-        ts: turnTs, kind: 'assistant', text: finalReply, model,
-        tools: toolSteps.map((t) => ({ name: t.n, phase: t.ph, result: t.result })),
-        ...(turnUsage ? { tok: { p: turnUsage.p, c: turnUsage.c } } : {}),
-      },
-    ];
-    const w = appendEvents(evFile, evs);
-    if (!w.ok) log('WARN', 'events', `会话事件追加失败: ${w.reason}`);
-  } catch (err) {
-    log('WARN', 'events', `会话事件双写异常: ${(err as Error).message}`);
-  }
-
-  // ---- FR-5 用量记账：一回合一条目（网关从未上报 usage → 不记，不伪造 0）----
-  // 记账失败同样不阻塞回合——宁可丢一条统计，不能让回合 IPC 因落盘问题失败。
-  if (turnUsage) {
-    try {
-      const entry: UsageEntry = {
-        ts: new Date(turnTs).toISOString(),
-        sessionId, provider: provider.name, model,
-        promptTokens: turnUsage.p, completionTokens: turnUsage.c, totalTokens: turnUsage.t,
-        steps: stepCount,
-      };
-      const usageFile = path.join(dataDir(), DATA_FILE_NAMES.usage);
-      const cur = readUsageFile(usageFile);
-      const next = appendUsageTurn(cur, entry);
-      const wr = writeUsageFile(usageFile, next);
-      if (!wr.ok) log('WARN', 'usage', `用量记账落盘失败: ${wr.reason}`);
-    } catch (err) {
-      log('WARN', 'usage', `用量记账异常: ${(err as Error).message}`);
-    }
-  }
-
-  // BUG（全盘死挂点扫描）：此前返回值只有 { text, intent }，渲染层收不到本回合工具
-  // 轨迹 → doSend 从不写 m.tools，renderMsg 里「N 步 · M 个动作」的展示形态永远为空
-  // （工具实时推送 tool-step 虽有订阅，state.toolSteps 存了却无人读取 = 存而不显）。
-
-  // Phase 8: emit task.completed（双写：本地 SessionEvent + Canonical envelope）
-  void emitCanonicalEvent(
-    'task.completed',
-    { type: 'agent', id: sessionId },
-    { type: 'Session', id: sessionId },
-    { text: finalReply, tools: toolSteps, steps: stepCount, model },
-    { file: eventFileFor(dataDir(), sessionId), context: { sessionId, turn: stepCount } },
-  );
-
-  return { text: finalReply, intent: 'ACT', tools: toolSteps, steps: stepCount };
+    const w = rendererWindow();
+    if (w) w.webContents.send('orchdesk:agent-delta', { sessionId, text });
+  } catch { /* 忽略：窗口可能已关闭 */ }
 }
+
+initToolExec({
+  dataDir,
+  getAppPath: (name) => safeGetPath(name),
+  approvalGate,
+  outboundGate,
+  recordSandbox,
+});
+initConnectors({ dataDir });
+initMcp({ dataDir });
+initMarket({ dataDir });
+
+initAgentTurn({
+  loadModelConfig,
+  getSession: (id) => store[id] as { msgs?: Array<{ role?: string; text?: string } & Record<string, unknown>> } | undefined,
+  ensureSession: (id) => {
+    if (!store[id]) {
+      store[id] = { id, msgs: [], created: new Date().toISOString(), updated: new Date().toISOString() };
+    }
+  },
+  saveStore,
+  dataDir,
+  sessionCwd,
+  executeTool,
+  notifyAgentDelta,
+  notifyToolStep,
+});
 
 // 测试后门（非渲染层桥）：browser-tools-verify / credentials-verify 经此驱动
 // executeTool 做接线级断言。渲染层不触达（preload 无对应 invoke），生产仅作
@@ -1638,241 +650,6 @@ ipcMain.handle('orchdesk:tool-execute', async (_e, tool: ToolCall) => {
 // 当前实现：OpenAI 兼容 API + Ollama 本地模型；配置存储于 userData/models.json，
 // API Key 经 safeStorage 加密。
 // ---------------------------------------------------------------------------
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    center: true,
-    show: false,
-    backgroundColor: '#1E1E1E',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-    },
-  });
-  // 导航防护（安全纵深）：主窗口永远只载本地 file:// 页面。一旦被导航到远端，
-  // preload 暴露的 bridge API 就落进外部内容手里——即使 contextIsolation 也在，
-  // 也应在源头堵死。内部浏览器走独立 BrowserWindow（browser-cdp.ts），不在此窗口导航。
-  mainWindow.webContents.on('will-navigate', (event) => {
-    event.preventDefault();
-  });
-  // 拒绝 window.open / target=_blank 逃逸（无 popup 需求；内部打开走别通道）。
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.once('ready-to-show', () => mainWindow?.show());
-  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
-}
-
-// ---------------------------------------------------------------------------
-// 桌面集成（PRD FR-4.2）：系统托盘 / 全局快捷键 / 登录自启动 / 自动更新 / 悬浮窗 / 开机提醒
-// ----------------------------------------------------------------------------
-// 第十个死挂点：设置页这 6 个开关此前全是 data-action="todo" 空壳 —— UI 可点、不落盘、
-// 更无任何系统副作用。这里按「配置落 desktop.json，副作用在此重放」接线：
-// 切换开关时只重放**受影响的那一项**，避免每次点击都去写系统登录项。
-// 纯逻辑（归一化 / 落盘 / 悬浮窗内容）在 desktop-integration.ts（零 electron 依赖）。
-let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG };
-let floatingWindow: BrowserWindow | null = null;
-/** 悬浮窗展示的上下文（由渲染层在切换会话时推送，避免主进程猜「当前会话」）。 */
-let floatingContext: { title: string; sessions: number } = { title: '', sessions: 0 };
-
-function showMainWindow(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    createWindow();
-    return;
-  }
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
-}
-
-/** 全局快捷键语义：没有窗口 → 创建；可见且聚焦 → 隐藏；否则 → 唤起。 */
-function toggleMainWindow(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    createWindow();
-    return;
-  }
-  if (mainWindow.isVisible() && mainWindow.isFocused()) mainWindow.hide();
-  else showMainWindow();
-}
-
-function createTray(): void {
-  if (tray) return;
-  tray = new Tray(nativeImage.createEmpty());
-  const contextMenu = Menu.buildFromTemplate([
-    { label: '打开主窗', click: () => showMainWindow() },
-    { label: '退出', click: () => app.quit() },
-  ]);
-  tray.setToolTip('OrchDesk');
-  tray.setContextMenu(contextMenu);
-  tray.on('click', () => showMainWindow());
-  tray.on('double-click', () => showMainWindow());
-}
-
-function destroyTray(): void {
-  if (!tray) return;
-  try {
-    tray.destroy();
-  } catch {
-    // 已销毁：destroy 抛错不应阻断开关切换
-  }
-  tray = null;
-}
-
-/** 系统托盘：关闭后是否继续常驻。 */
-function applyTray(on: boolean): void {
-  if (on) createTray();
-  else destroyTray();
-}
-
-/** 全局快捷键 Ctrl(Cmd)+Shift+Space：注册/注销唯一加速器。 */
-function applyShortcut(on: boolean): void {
-  try {
-    if (on) {
-      if (globalShortcut.isRegistered(SHORTCUT_ACCELERATOR)) return;
-      const ok = globalShortcut.register(SHORTCUT_ACCELERATOR, () => toggleMainWindow());
-      if (!ok) log('WARN', 'desktop', `全局快捷键注册失败（${SHORTCUT_LABEL}）：可能被其它应用占用`);
-    } else {
-      globalShortcut.unregister(SHORTCUT_ACCELERATOR);
-    }
-  } catch (err) {
-    log('WARN', 'desktop', `全局快捷键接线异常：${(err as Error).message}`);
-  }
-}
-
-/** 读系统登录项真实状态（写入可能被系统拒绝，UI 必须展示实际值而非意愿值）。 */
-function readLoginItemSettings(): { openAtLogin?: boolean } {
-  try {
-    return app.getLoginItemSettings() as { openAtLogin?: boolean };
-  } catch {
-    return {};
-  }
-}
-
-/** 登录自启动：写系统登录项（Windows 注册表 / macOS LaunchAgent）。 */
-function applyAutostart(on: boolean): { ok: boolean; reason?: string } {
-  try {
-    app.setLoginItemSettings({ openAtLogin: on, openAsHidden: on });
-    return { ok: true };
-  } catch (err) {
-    const reason = (err as Error).message;
-    log('WARN', 'desktop', `登录自启动写入失败：${reason}`);
-    return { ok: false, reason };
-  }
-}
-
-/** 开机提醒：关键事件（启动完成 / 更新可用）发系统通知。 */
-function notifyDesktop(title: string, body: string): boolean {
-  if (!desktopConfig.notify) return false;
-  try {
-    if (Notification.isSupported && !Notification.isSupported()) return false;
-    new Notification({ title, body }).show();
-    return true;
-  } catch (err) {
-    log('WARN', 'desktop', `系统通知发送失败：${(err as Error).message}`);
-    return false;
-  }
-}
-
-/** 自动更新：延迟后台检查（不阻塞首屏），有新版时按配置发通知。 */
-function applyAutoUpdate(on: boolean): void {
-  if (!on) return;
-  setTimeout(() => {
-    void checkForUpdates()
-      .then((r) => {
-        if (r?.update?.available) {
-          notifyDesktop('OrchDesk 有新版本', String(r.update.note || `v${r.update.version || ''} 已下载，退出后安装`));
-        }
-      })
-      .catch((err) => log('WARN', 'desktop', `自动更新检查异常：${(err as Error).message}`));
-  }, 8000);
-}
-
-function floatingPosition(): { x: number; y: number } {
-  try {
-    const area = screen.getPrimaryDisplay().workAreaSize;
-    return { x: Math.max(0, area.width - 288 - 16), y: Math.max(0, area.height - 120 - 48) };
-  } catch {
-    return { x: 0, y: 0 };
-  }
-}
-
-function renderFloatingWindow(): void {
-  if (!floatingWindow || floatingWindow.isDestroyed()) return;
-  const title = floatingContext.title || 'OrchDesk';
-  const html = floatingWindowHtml({
-    title,
-    subtitle: floatingContext.title ? '当前会话' : '未选择会话',
-    sessions: floatingContext.sessions,
-  });
-  void floatingWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
-}
-
-function createFloatingWindow(): void {
-  if (floatingWindow && !floatingWindow.isDestroyed()) {
-    renderFloatingWindow();
-    return;
-  }
-  floatingWindow = new BrowserWindow({
-    width: 288,
-    height: 96,
-    frame: false,
-    resizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    show: false,
-    ...floatingPosition(),
-    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
-  });
-  floatingWindow.on('closed', () => { floatingWindow = null; });
-  // 导航防护与主窗一致（纵深防御）：悬浮窗内容全由主进程 loadURL(data:) 生成，
-  // 无渲染层合法导航；禁止渲染层内部任何导航逃逸。
-  floatingWindow.webContents.on('will-navigate', (event) => { event.preventDefault(); });
-  floatingWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  // 悬浮窗是沙箱渲染进程，页面内无 ipcRenderer —— 用窗口聚焦事件实现「点击唤起主窗」。
-  floatingWindow.on('focus', () => showMainWindow());
-  floatingWindow.once('ready-to-show', () => floatingWindow?.show());
-  renderFloatingWindow();
-}
-
-function destroyFloatingWindow(): void {
-  if (!floatingWindow) return;
-  try {
-    if (!floatingWindow.isDestroyed()) floatingWindow.close();
-  } catch {
-    // 已关闭
-  }
-  floatingWindow = null;
-}
-
-function applyFloating(on: boolean): void {
-  if (on) createFloatingWindow();
-  else destroyFloatingWindow();
-}
-
-/**
- * 全量重放（启动时）。顺序无关，但自启动写系统项放最后，失败不影响其余。
- * 整体 try/catch：桌面集成为增强项，任一系统能力不可用都不该阻断主窗启动。
- */
-function applyDesktopConfig(): void {
-  try {
-    applyTray(desktopConfig.tray);
-    applyShortcut(desktopConfig.shortcut);
-    applyFloating(desktopConfig.floating);
-    applyAutoUpdate(desktopConfig.autoupdate);
-    const r = applyAutostart(desktopConfig.autostart);
-    if (!r.ok) log('WARN', 'desktop', `登录自启动未生效：${r.reason}`);
-    log('INFO', 'desktop', `桌面集成已应用：${desktopSummary()}`);
-  } catch (err) {
-    log('WARN', 'desktop', `桌面集成应用异常：${(err as Error).message}`);
-  }
-}
-
-function desktopSummary(): string {
-  return (Object.keys(desktopConfig) as DesktopKey[])
-    .map((k) => `${DESKTOP_LABELS[k]}=${desktopConfig[k] ? '开' : '关'}`)
-    .join(' / ');
-}
 
 // ---------------------------------------------------------------------------
 // 桥接：渲染进程 → 主进程（持久化 + 模型回合）
@@ -1988,6 +765,9 @@ ipcMain.handle('orchdesk:persist-projects', async (_e, projects: unknown[]) => {
 ipcMain.handle('orchdesk:run-agent-turn', async (_e, sessionId: string, text: string, opts: unknown) => {
   return runAgentTurn(sessionId, text, opts as { models?: string[]; thinkLevel?: string });
 });
+ipcMain.handle('orchdesk:abort-agent-turn', async (_e, sessionId: string) => {
+  return abortAgentTurn(String(sessionId || ''));
+});
 
 // ---- FR-5 模型管理桥接 ----
 ipcMain.handle('orchdesk:models-get', async () => {
@@ -2091,7 +871,7 @@ async function bootRuntime(): Promise<void> {
         // 渲染层未就绪 → 零等待 fail-closed：没有渲染层就没有用户输入源，
         // 审批弹窗不可能被应答，与其等满超时不如立即拒绝（与 host-services
         // 「无应答方」同语义的快路径）。
-        if (!rendererReady || !mainWindow || mainWindow.isDestroyed()) return 'unavailable';
+        if (!rendererReady || !bootDesktop.mainWindow || bootDesktop.mainWindow.isDestroyed()) return 'unavailable';
         const id = `apr-${++approvalSeq}`;
         return new Promise<string>((resolve) => {
           const timer = setTimeout(() => {
@@ -2099,7 +879,7 @@ async function bootRuntime(): Promise<void> {
             resolve('unavailable'); // fail-closed：超时不开门
           }, 120000);
           pendingApprovals.set(id, { resolve, timer });
-          mainWindow?.webContents.send('orchdesk:authz-approval-request', {
+          bootDesktop.mainWindow?.webContents.send('orchdesk:authz-approval-request', {
             id,
             toolName: req.toolName,
             reason: req.reason,
@@ -2442,359 +1222,6 @@ function promotionFile(): string {
   return path.join(dataDir(), DATA_FILE_NAMES.promotions);
 }
 
-// ---------------------------------------------------------------------------
-// PRD FR-3 连接器注册表
-// ---------------------------------------------------------------------------
-// 目录定义 / 探测请求构造 / 结果判定 / 审计环形缓冲全在 connector-registry.ts
-// （纯逻辑、零 electron）。这里只管三件必须摸到本机的事：文件读写、真实 HTTP 探测、
-// 以及把结论挂到 IPC 上。
-// ---------------------------------------------------------------------------
-
-let connectorFile: ConnectorFile = emptyConnectorFile();
-
-function connectorsFilePath(): string {
-  return path.join(dataDir(), DATA_FILE_NAMES.connectors);
-}
-
-/** 启动装载：坏文件 / 缺文件 → 空注册表（凭证丢了可以重录，不该阻断启动）。 */
-function loadConnectors(): number {
-  try {
-    connectorFile = normalizeConnectorFile(JSON.parse(fs.readFileSync(connectorsFilePath(), 'utf-8')));
-  } catch {
-    connectorFile = emptyConnectorFile();
-  }
-  return Object.values(connectorFile.creds).length;
-}
-
-/**
- * 写穿落盘（与沙箱日志 / 晋升审计同节奏）。
- * 失败只 WARN：凭证已经写进内存里的注册表，UI 上就是可用的状态；因为落盘失败就
- * 回滚，会让用户刚填完的凭证凭空消失且没有任何提示。
- */
-function persistConnectors(): boolean {
-  try {
-    const file = connectorsFilePath();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(connectorFile, null, 2), 'utf-8');
-    return true;
-  } catch (err) {
-    log('WARN', 'connector', `连接器注册表落盘失败（内存态仍生效）: ${(err as Error).message}`);
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// MCP（Model Context Protocol）真接入
-// ---------------------------------------------------------------------------
-// 客户端协议 / 配置归一化 / stdio 子进程管理全在 mcp-client.ts（纯逻辑、零 electron）。
-// 这里只管摸到本机的四件事：文件读写、env 值加密落盘 / 解密回显、把结论挂到 IPC、
-// 以及真实探测。
-// ---------------------------------------------------------------------------
-
-let mcpStore: McpStore = emptyMcpStore();
-
-function mcpFilePath(): string {
-  return path.join(dataDir(), DATA_FILE_NAMES.mcp);
-}
-
-/** 启动装载：坏文件 / 缺文件 → 空表（配置丢了可以重配，不该阻断启动）。 */
-function loadMcp(): number {
-  try {
-    const raw = fs.readFileSync(mcpFilePath(), 'utf-8');
-    const parsed = parseMcpStore(raw);
-    if (!parsed.ok) {
-      log('WARN', 'mcp', `MCP 配置解析失败，按空表启动: ${parsed.reason}`);
-      mcpStore = emptyMcpStore();
-      return 0;
-    }
-    mcpStore = parsed.store;
-    if (parsed.dropped > 0) log('WARN', 'mcp', `MCP 配置有 ${parsed.dropped} 条非法条目已丢弃`);
-    return Object.keys(mcpStore.servers).length;
-  } catch {
-    mcpStore = emptyMcpStore();
-    return 0;
-  }
-}
-
-/**
- * 写穿落盘。env 里的密钥值在落盘前加密（同凭据纪律），读回时解密。
- * 失败只 WARN：配置已在内存态生效，落盘失败不该让用户刚填的 MCP 凭空消失。
- */
-function persistMcp(): boolean {
-  try {
-    const file = mcpFilePath();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const toWrite: McpStore = {
-      servers: {},
-      states: {},
-    };
-    for (const [id, cfg] of Object.entries(mcpStore.servers)) {
-      const envEnc: Record<string, string> = {};
-      if (cfg.env) {
-        for (const [k, v] of Object.entries(cfg.env)) {
-          envEnc[k] = /^v1:/.test(v) ? v : encryptSecret(v);
-        }
-      }
-      toWrite.servers[id] = { ...cfg, env: Object.keys(envEnc).length ? envEnc : undefined };
-    }
-    fs.writeFileSync(file, serializeMcpStore(toWrite), 'utf-8');
-    return true;
-  } catch (err) {
-    log('WARN', 'mcp', `MCP 配置落盘失败（内存态仍生效）: ${(err as Error).message}`);
-    return false;
-  }
-}
-
-/** 解密 env 值，得到可直接用于 spawn 的配置副本。 */
-function decryptMcpConfig(cfg: McpServerConfig): McpServerConfig {
-  if (!cfg.env) return cfg;
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(cfg.env)) env[k] = /^v1:/.test(v) ? decryptSecret(v) : v;
-  return { ...cfg, env };
-}
-
-/** 组装单条 MCP 的展示态（脱敏：env 值永不回显明文）。 */
-function mcpState(id: string): McpConnectionState {
-  const cfg = mcpStore.servers[id];
-  const st: McpConnState = mcpStore.states[id] || { lastConnectOk: null, lastMessage: '', lastConnectAt: null, tools: [] };
-  return {
-    id,
-    configured: !!cfg,
-    enabled: cfg ? cfg.enabled !== false : false,
-    lastConnectOk: st.lastConnectOk,
-    lastMessage: st.lastMessage,
-    lastConnectAt: st.lastConnectAt,
-    tools: st.tools,
-  };
-}
-
-/** 全量列表 + 统计。 */
-function mcpListResult(): McpListResult {
-  const ids = Object.keys(mcpStore.servers);
-  const servers = ids.map((id) => mcpState(id));
-  return {
-    ok: true,
-    servers,
-    stats: {
-      total: ids.length,
-      configured: ids.length,
-      connected: servers.filter((s) => s.lastConnectOk === true).length,
-      tools: servers.reduce((n, s) => n + s.tools.length, 0),
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// MCP IPC
-// ---------------------------------------------------------------------------
-
-/** MCP 列表（含连接状态 + 工具清单）。 */
-ipcMain.handle('orchdesk:mcp-list', () => mcpListResult());
-
-/** 保存一条 MCP 配置并立即探测一次（同连接器「保存即探测」纪律）。 */
-ipcMain.handle('orchdesk:mcp-save', async (_e, raw: unknown) => {
-  const norm = normalizeMcpConfig(raw);
-  if (!norm.ok) return { ok: false, reason: norm.reason };
-  const cfg = norm.config;
-  // env 值先加密再入内存表，避免明文常驻。
-  if (cfg.env) {
-    const envEnc: Record<string, string> = {};
-    for (const [k, v] of Object.entries(cfg.env)) envEnc[k] = /^v1:/.test(v) ? v : encryptSecret(v);
-    cfg.env = envEnc;
-  }
-  mcpStore.servers[cfg.id] = cfg;
-  persistMcp();
-
-  if (cfg.enabled === false) {
-    mcpStore.states[cfg.id] = { lastConnectOk: null, lastMessage: '已停用（未主动连接）', lastConnectAt: Date.now(), tools: [] };
-    return { ok: true, configured: true, state: mcpState(cfg.id), probe: null };
-  }
-
-  const probe = await connectMcpServer(decryptMcpConfig(cfg));
-  if (probe.connected) {
-    mcpStore.states[cfg.id] = {
-      lastConnectOk: true,
-      lastMessage: `已连接 · ${(probe.tools || []).length} 个工具`,
-      lastConnectAt: Date.now(),
-      tools: (probe.tools || []).map((t) => t.name),
-    };
-  } else {
-    mcpStore.states[cfg.id] = {
-      lastConnectOk: false,
-      lastMessage: probe.reason || '连接失败',
-      lastConnectAt: Date.now(),
-      tools: [],
-    };
-  }
-  return { ok: true, configured: true, state: mcpState(cfg.id), probe };
-});
-
-/** 删除一条 MCP 配置（连同连接结论一起清掉）。 */
-ipcMain.handle('orchdesk:mcp-delete', (_e, id: unknown) => {
-  if (!isMcpId(id)) return { ok: false, reason: `非法 id: ${String(id)}` };
-  if (!mcpStore.servers[id]) return { ok: false, reason: '配置不存在' };
-  delete mcpStore.servers[id];
-  delete mcpStore.states[id];
-  persistMcp();
-  return { ok: true };
-});
-
-/** 启用 / 停用（停用不删配置，下次启用仍可连）。 */
-ipcMain.handle('orchdesk:mcp-set-enabled', (_e, id: unknown, enabled: unknown) => {
-  if (!isMcpId(id)) return { ok: false, reason: `非法 id: ${String(id)}` };
-  const cfg = mcpStore.servers[id];
-  if (!cfg) return { ok: false, reason: '配置不存在' };
-  cfg.enabled = enabled !== false;
-  persistMcp();
-  return { ok: true, state: mcpState(id) };
-});
-
-/** 用已存配置重新探测（拿最新工具清单）。 */
-ipcMain.handle('orchdesk:mcp-probe', async (_e, id: unknown) => {
-  if (!isMcpId(id)) return { ok: false, reason: `非法 id: ${String(id)}` };
-  const cfg = mcpStore.servers[id];
-  if (!cfg) return { ok: false, reason: '配置不存在' };
-  const probe = await connectMcpServer(decryptMcpConfig(cfg));
-  if (probe.connected) {
-    mcpStore.states[id] = {
-      lastConnectOk: true,
-      lastMessage: `已连接 · ${(probe.tools || []).length} 个工具`,
-      lastConnectAt: Date.now(),
-      tools: (probe.tools || []).map((t) => t.name),
-    };
-  } else {
-    mcpStore.states[id] = { lastConnectOk: false, lastMessage: probe.reason || '连接失败', lastConnectAt: Date.now(), tools: [] };
-  }
-  return { ok: true, state: mcpState(id), probe };
-});
-
-/** 调用 MCP 工具（供主会话 / Agent 运行时复用）。 */
-ipcMain.handle('orchdesk:mcp-call-tool', async (_e, id: unknown, toolName: unknown, args: unknown): Promise<McpCallResult> => {
-  if (!isMcpId(id)) return { ok: false, reason: `非法 id: ${String(id)}` };
-  const cfg = mcpStore.servers[id];
-  if (!cfg) return { ok: false, reason: '配置不存在' };
-  if (typeof toolName !== 'string' || !toolName.trim()) return { ok: false, reason: 'toolName 为空' };
-  return callMcpTool(decryptMcpConfig(cfg), toolName.trim(), args);
-});
-
-// ---- 本地插件市场（PRD FR-3）：启用意愿持久化（插件代码在 dataDir()/plugins/）----
-let marketEnabledMap: Record<string, boolean> = {};
-
-function marketStateFile(): string {
-  return path.join(dataDir(), DATA_FILE_NAMES.market);
-}
-
-function loadMarketEnabled(): Record<string, boolean> {
-  try {
-    const raw = JSON.parse(fs.readFileSync(marketStateFile(), 'utf-8'));
-    return normalizeEnabledMap(raw && typeof raw === 'object' ? (raw as Record<string, unknown>).enabled : null);
-  } catch {
-    return {};
-  }
-}
-
-/** 写穿：启停是用户的授权决定，「重启后丢了」比落盘失败严重得多。 */
-function persistMarketEnabled(): void {
-  try {
-    fs.mkdirSync(path.dirname(marketStateFile()), { recursive: true });
-    fs.writeFileSync(marketStateFile(), JSON.stringify({ enabled: marketEnabledMap }, null, 2), 'utf-8');
-  } catch (err) {
-    log('WARN', 'market', `插件市场状态落盘失败: ${(err as Error).message}`);
-  }
-}
-
-function recordConnectorAudit(id: string, action: ConnectorAuditAction, message: string): void {
-  const entry: ConnectorAuditEntry = {
-    id,
-    ts: Date.now(),
-    action,
-    message: String(message || '').slice(0, 240),  };
-  connectorFile.audit = appendConnectorAudit(connectorFile.audit, entry);
-  persistConnectors();
-}
-
-/** 执行一次真实探测（只发请求，不落状态；状态更新由调用方决定）。 */
-async function probeConnector(id: string): Promise<{ ok: boolean; message: string; manual?: boolean }> {
-  const def = getConnectorDef(id);
-  if (!def) return { ok: false, message: `未知连接器: ${id}` };
-  // manual 连接器没有探测端点，直接把原因回给用户，不要伪造一个「已连接」。
-  if (def.probe.kind !== 'http') {
-    return { ok: false, manual: true, message: def.probe.manualReason || '该连接器不支持自动探测' };
-  }
-  const creds = readCreds(connectorFile, id);
-  const built = buildProbeRequest(def, creds);
-  if (!built.ok) return { ok: false, message: built.error };
-
-  try {
-    const req = built.request;
-    const res = await fetch(req.url, {
-      method: req.method,
-      headers: req.headers,
-      ...(req.body ? { body: req.body } : {}),
-      signal: AbortSignal.timeout(CONNECTOR_PROBE_TIMEOUT_MS),
-    });
-    const text = await res.text();
-    let body: unknown = null;
-    try { body = JSON.parse(text); } catch { body = null; }
-    return interpretProbeResult(def, { status: res.status, body });
-  } catch (err) {
-    const e = err as Error;
-    // AbortSignal.timeout 抛出的是 TimeoutError，单独说人话。
-    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
-      return { ok: false, message: `探测超时（${CONNECTOR_PROBE_TIMEOUT_MS / 1000}s）：网络不可达或被拦截` };
-    }
-    return { ok: false, message: `网络请求失败：${e?.message || String(err)}` };
-  }
-}
-
-/** 探测并把结论写进状态表（成功与失败都要记 —— 失败记录才是排查凭证问题的依据）。 */
-async function testConnector(id: string): Promise<{ ok: boolean; message: string; manual?: boolean }> {
-  const result = await probeConnector(id);
-  const st = connectorFile.states[id];
-  if (st) {
-    if (!result.manual) {
-      st.lastTestAt = Date.now();
-      st.lastTestOk = result.ok;
-      st.lastTestMessage = result.message;
-    } else {
-      // manual 连接器「没探测」不等于「探测失败」：把 manual 原因写进 lastTestOk=false
-      // 会让 UI 显示「连通失败」，把「不支持自动探测」伪装成鉴权问题。
-      st.lastTestAt = null;
-      st.lastTestOk = null;
-      st.lastTestMessage = '';
-    }
-  }
-  if (!result.manual) {
-    recordConnectorAudit(id, result.ok ? 'test' : 'test-fail', result.message);
-  } else {
-    persistConnectors();
-  }
-  return result;
-}
-
-/** 供渲染层列表用的一条连接器视图（凭证已脱敏，密文绝不出主进程）。 */
-function connectorView(id: string) {
-  const def = getConnectorDef(id)!;
-  const creds = readCreds(connectorFile, id);
-  return {
-    id: def.id,
-    name: def.name,
-    kind: def.kind,
-    desc: def.desc,
-    caps: def.caps,
-    docsUrl: def.docsUrl,
-    manual: def.probe.kind !== 'manual' ? false : true,
-    manualReason: def.probe.manualReason || '',
-    manualHint: def.probe.manualHint || '',
-    fields: def.fields.map((f) => ({
-      key: f.key, label: f.label, type: f.type,
-      placeholder: f.placeholder || '', hint: f.hint || '', required: f.required !== false,
-    })),
-    values: redactCreds(def, creds),
-    state: connectorFile.states[id] || null,
-  };
-}
-
 /** 启动装载：坏文件 / 缺文件 → 空审计（与沙箱日志同策略，不猜内容）。 */
 function loadPromotionLog(): number {
   try {
@@ -2953,309 +1380,10 @@ ipcMain.handle('orchdesk:open-external', async (_e, url: unknown) => {
   catch (err) { return { ok: false, reason: (err as Error).message }; }
 });
 
-// ---------------------------------------------------------------------------
-// 浏览器（CDP）IPC：渲染层「浏览器」面板
-// ---------------------------------------------------------------------------
-// 面板不是装饰：Agent 默认在**后台隐藏窗口**里操作网页，用户若没有一个入口
-// 查看「现在在哪个页面 / 截了什么图 / 能随时关掉」，浏览器工具就是黑箱。
-// 这也是本 Phase 的「端到端可用」底线（禁止后端先行、UI 后补）。
-
-/** 状态推送：浏览器窗口由工具或用户改变时，面板实时跟着变。 */
-function pushBrowserState(st?: BrowserStateSnapshot): void {
-  const snapshot = st || getBrowserState();
-  try {
-    const w = rendererWindow();
-    if (w) w.webContents.send('orchdesk:browser-state', snapshot);
-  } catch { /* 窗口已关闭 */ }
-}
-
-onBrowserStateChange((st) => pushBrowserState(st));
-
-/** 浏览器状态（含最近截图缩略图与截图目录）。 */
-ipcMain.handle('orchdesk:browser-status', async () => {
-  const st = getBrowserState();
-  return { ...st, shotsDir: browserShotDir(dataDir()) };
-});
-
-/** 显示 / 隐藏浏览器窗口（false = 收回后台）。 */
-ipcMain.handle('orchdesk:browser-toggle-visible', async (_e, visible: unknown) => {
-  const st = setBrowserVisible(Boolean(visible));
-  return { ok: st.open, state: st };
-});
-
-/** 关闭浏览器窗口（面板的「关闭」按钮 = 用户侧的紧急制动）。 */
-ipcMain.handle('orchdesk:browser-close', async () => {
-  const closed = cdpCloseBrowser();
-  return { ok: true, closed, state: getBrowserState() };
-});
-
-/**
- * 关闭单个页面快照 TAB（侧栏卡片「×」）。
- * 注意关的是**卡片**不是窗口：底层只有一个隐藏窗口，关活跃卡才会连带收起窗口，
- * 关非活跃卡只是把它从登记簿里移除。
- */
-ipcMain.handle('orchdesk:browser-close-page', async (_e, id: unknown) => {
-  if (typeof id !== 'string' || !id) return { ok: false, reason: '缺少页面 id', state: getBrowserState() };
-  return { ok: true, state: closeBrowserPage(id) };
-});
-
-/** 关闭全部页面快照 TAB（侧栏「全部关闭」）：清空登记簿并收起窗口。 */
-ipcMain.handle('orchdesk:browser-clear-pages', async () => {
-  return { ok: true, state: clearBrowserPages() };
-});
-
-/**
- * 用户亲手把窗口切到某个已访问过的页面（侧栏点 TAB 卡片）。
- * 这是**用户操作**不是 Agent 工具调用，按 ADR-0011「文件 Tab 用户亲手操作不走授权门」
- * 的同一口径不过授权门；且目标 URL 本来就是 Agent 已经访问过的。
- */
-ipcMain.handle('orchdesk:browser-goto', async (_e, url: unknown) => {
-  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
-    return { ok: false, reason: 'URL 不合法（仅支持 http/https）', state: getBrowserState() };
-  }
-  try {
-    await cdpOpenBrowser(url, { timeoutMs: 20_000 });
-    return { ok: true, state: getBrowserState() };
-  } catch (err) {
-    return { ok: false, reason: (err as Error).message, state: getBrowserState() };
-  }
-});
-
-/** 在系统文件管理器中打开截图目录。 */
-ipcMain.handle('orchdesk:browser-open-shot-dir', async () => {
-  const dir = browserShotDir(dataDir());
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const opened = await shell.openPath(dir);
-    // openPath 返回空串表示成功；非空是错误信息。
-    return { ok: opened === '', dir, reason: opened || undefined };
-  } catch (err) {
-    return { ok: false, dir, reason: (err as Error).message };
-  }
-});
-
-// ---------------------------------------------------------------------------
-// 终端（PTY）IPC：渲染层「终端」Tab（吸收计划 P2-10）
-// ---------------------------------------------------------------------------
-// 终端是「用户亲手操作」的入口，不走 Agent 授权门；但环境净化（NODE_OPTIONS 等
-// shim 变量）在 terminal-pty.ts 的 sanitizeTerminalEnv 里强制执行。
-// 数据/退出事件用推送（与 browser-state 同模式），Tab 栏状态用拉取。
-
-/** 终端应用目录：dev = apps/desktop，packaged = app.asar（asarUnpack 透明重定向）。 */
-const TERMINAL_APP_DIR = path.resolve(__dirname, '..');
-
-/** dsh 运行时自建的 profile node_modules（dev 环境常有 node-pty，作最后候选）。 */
-function terminalExtraPtyDirs(): string[] {
-  const cands = [
-    path.join(TERMINAL_APP_DIR, '..', '.dsh-home', 'profiles', 'node_modules'),
-    path.join(process.cwd(), '.dsh-home', 'profiles', 'node_modules'),
-  ];
-  return [...new Set(cands)];
-}
-
-/** 终端数据推送：攒批后的输出块（节流在 terminal-pty.ts 内）。 */
-onTerminalData((ev) => {
-  try {
-    const w = rendererWindow();
-    if (w) w.webContents.send('orchdesk:terminal-data', ev);
-  } catch { /* 窗口已关闭 */ }
-});
-
-/** 终端退出推送：Tab 栏把该会话标记为已退出（不自动关闭，保留回看）。 */
-onTerminalExit((ev) => {
-  try {
-    const w = rendererWindow();
-    if (w) w.webContents.send('orchdesk:terminal-exit', ev);
-  } catch { /* 窗口已关闭 */ }
-});
-
-/** 创建终端会话。via='pipe' 时渲染层必须显示「管道模式」提示（降级可见）。 */
-ipcMain.handle('orchdesk:terminal-create', async (_e, input: unknown) => {
-  const req = (input && typeof input === 'object' ? input : {}) as { cwd?: string; cols?: number | string; rows?: number | string };
-  // BUG-023：渲染层会把项目绑定目录作为终端 cwd 传入——目录可能已被删/移动，
-  // 此时回退宿主默认（删除该字段），不让整个终端创建失败；会话返回的 cwd
-  // 字段反映真实落点，降级可见。
-  if (typeof req.cwd === 'string' && req.cwd.trim()) {
-    let dirOk = false;
-    try { dirOk = fs.statSync(req.cwd.trim()).isDirectory(); } catch { /* 不存在 */ }
-    if (!dirOk) delete req.cwd;
-  }
-  return createTerminal(
-    req,
-    {
-      appDir: TERMINAL_APP_DIR,
-      extraPtyDirs: terminalExtraPtyDirs(),
-      fallbackCwd: process.cwd(),
-    },
-  );
-});
-
-/** 写入用户键入。 */
-ipcMain.handle('orchdesk:terminal-write', async (_e, id: unknown, data: unknown) => {
-  if (typeof id !== 'string' || typeof data !== 'string') {
-    return { ok: false, reason: '参数不合法' };
-  }
-  return { ok: writeTerminal(id, data) };
-});
-
-/** 调整尺寸（管道模式 no-op）。 */
-ipcMain.handle('orchdesk:terminal-resize', async (_e, id: unknown, cols: unknown, rows: unknown) => {
-  if (typeof id !== 'string') return { ok: false, reason: '参数不合法' };
-  return { ok: resizeTerminal(id, cols, rows) };
-});
-
-/** 关闭会话（幂等）。 */
-ipcMain.handle('orchdesk:terminal-kill', async (_e, id: unknown) => {
-  if (typeof id !== 'string') return { ok: false, reason: '参数不合法' };
-  return { ok: killTerminal(id) };
-});
-
-/** 全量状态：Tab 栏 + 每会话回放缓冲（重开 Tab 补看历史输出）。 */
-ipcMain.handle('orchdesk:terminal-status', async () => getTerminalState());
-
-// ---------------------------------------------------------------------------
-// 文件 Tab IPC（吸收计划 P2-11，只读优先）
-// ---------------------------------------------------------------------------
-// 目录逐层懒加载（每次只列一层，防巨大目录树一次全量扫描）；
-// 文件读取限 2MB + 二进制嗅探（NUL 字节），「截断」必须显式返回，不许静默。
-
-ipcMain.handle('orchdesk:file-tree', async (_e, input: unknown) => {
-  const norm = normalizeFileTree(input as { dir?: string; depth?: number | string });
-  if (!norm.ok) return { ok: false as const, reason: norm.reason };
-  try {
-    const dirents = fs.readdirSync(norm.dir, { withFileTypes: true });
-    const raw: Array<{ name: string; kind: 'file' | 'dir'; size: number; mtime: number }> = [];
-    let overflow = false;
-    // scanned 与 raw 分开计数：被跳过（符号链接/无权限）的条目也计入扫描量，
-    // 否则一个 5 万条目、绝大部分是坏链接的目录会被全量 stat 一遍才肯停。
-    let scanned = 0;
-    for (const de of dirents) {
-      if (raw.length >= FILE_TREE_MAX_ENTRIES || scanned >= FILE_TREE_MAX_ENTRIES * 4) {
-        overflow = true;
-        break;
-      }
-      scanned++;
-      // 目录不 stat：渲染层不显示目录大小，省下 500 次里的大半 syscall
-      // （实测 500 次 statSync ≈ 17ms，主进程同步阻塞）。
-      if (de.isDirectory()) {
-        raw.push({ name: de.name, kind: 'dir', size: 0, mtime: 0 });
-        continue;
-      }
-      if (!de.isFile()) continue; // 符号链接等其它类型：跳过（防环）。
-      try {
-        const st = fs.statSync(path.join(norm.dir, de.name));
-        raw.push({ name: de.name, kind: 'file', size: st.size, mtime: st.mtimeMs });
-      } catch {
-        // 无权限 / 竞态删除：跳过该条目，不让一个坏条目毁掉整棵树。
-      }
-    }
-    return {
-      ok: true as const,
-      dir: norm.dir,
-      entries: sortTreeEntries(raw),
-      truncated: overflow,
-      total: dirents.length,
-    };
-  } catch (err) {
-    return { ok: false as const, reason: (err as Error).message };
-  }
-});
-
-ipcMain.handle('orchdesk:file-read', async (_e, input: unknown) => {
-  const norm = normalizeFileRead(input as { path?: string });
-  if (!norm.ok) return { ok: false as const, reason: norm.reason };
-  try {
-    const st = fs.statSync(norm.path);
-    if (st.isDirectory()) return { ok: false as const, reason: '目标是目录，不是文件' };
-    // languageOf / looksBinaryByName 都接受完整路径（内部先切 basename），
-    // 不在这里自己 lastIndexOf('.')——路径里有带点目录时会取错扩展名。
-    const lang = languageOf(norm.path);
-    const binaryByName = looksBinaryByName(norm.path);
-    // 只读 maxBytes 字节；是否截断由 stat.size 与 maxBytes 比较得出（显式字段）。
-    const fd = fs.openSync(norm.path, 'r');
-    try {
-      const want = Math.min(st.size, norm.maxBytes);
-      const buf = Buffer.alloc(want);
-      // readSync 不保证一次读满（大文件 / 网络盘常见短读）。循环读满 want，
-      // 否则会产出「内容比磁盘短却声称完整」的假象——「截断必须显式」的底线。
-      let read = 0;
-      while (read < want) {
-        const n = fs.readSync(fd, buf, read, want - read, read);
-        if (n <= 0) break;
-        read += n;
-      }
-      const head = buf.subarray(0, Math.min(read, SNIFF_WINDOW));
-      const binary = binaryByName || sniffBinary(head);
-      if (binary) {
-        // 二进制文件：只给元信息，不吐内容（渲染层显示「二进制文件」占位）。
-        return {
-          ok: true as const, path: norm.path, binary: true, truncated: false,
-          size: st.size, sizeLabel: humanSize(st.size), lang: null, content: '',
-          mtimeMs: st.mtimeMs, encodingSuspicious: false, editable: false,
-        };
-      }
-      const truncated = st.size > norm.maxBytes || read < want;
-      // 编辑资格判定（P3）：截断过的文件保存会丢数据、非 UTF-8 保存即乱码
-      // ——一律 editable=false 且渲染层显式给原因。
-      // 严格校验用 TextDecoder(fatal) 而不是「解出 U+FFFD 就判定」：后者会把
-      // 本来就合法含 U+FFFD 的文本（译不准的占位符很常见）误判成非 UTF-8，
-      // 结果是可编辑的文件被禁掉编辑。
-      const decoded = buf.subarray(0, read).toString('utf8');
-      let encodingSuspicious = false;
-      try {
-        new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, read));
-      } catch {
-        encodingSuspicious = true;
-      }
-      return {
-        ok: true as const, path: norm.path, binary: false, truncated,
-        size: st.size, sizeLabel: humanSize(st.size), lang,
-        content: decoded,
-        mtimeMs: st.mtimeMs, encodingSuspicious,
-        editable: !truncated && !encodingSuspicious,
-      };
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch (err) {
-    return { ok: false as const, reason: (err as Error).message };
-  }
-});
-
-ipcMain.handle('orchdesk:file-write', async (_e, input: unknown) => {
-  const norm = normalizeFileWrite(input as {
-    path?: string; content?: string; expectedMtimeMs?: number | string;
-  });
-  if (!norm.ok) return { ok: false as const, reason: norm.reason };
-  try {
-    const st = fs.statSync(norm.path);
-    if (st.isDirectory()) return { ok: false as const, reason: '目标是目录，不是文件' };
-    // 乐观并发检查：读取之后磁盘上又被改过（编辑器 / git / Agent 工具）就拒绝。
-    // mtimeMs 是浮点，不同文件系统精度不一，留 2ms 容差。
-    if (Math.abs(st.mtimeMs - norm.expectedMtimeMs) > 2) {
-      return {
-        ok: false as const, code: 'modified-externally' as const,
-        reason: '文件在读取后被外部修改过，保存会覆盖那些改动；请先重新加载',
-      };
-    }
-    // 同目录临时文件 + rename：写一半崩溃不会留下半截文件损坏原文件。
-    const tmp = path.join(path.dirname(norm.path), '.' + path.basename(norm.path) + '.orchdesk-tmp');
-    fs.writeFileSync(tmp, norm.content, 'utf8');
-    try {
-      fs.renameSync(tmp, norm.path);
-    } catch (err) {
-      try { fs.unlinkSync(tmp); } catch { /* 临时文件清理失败可忽略 */ }
-      throw err;
-    }
-    const st2 = fs.statSync(norm.path);
-    return {
-      ok: true as const, path: norm.path,
-      size: st2.size, sizeLabel: humanSize(st2.size), mtimeMs: st2.mtimeMs,
-    };
-  } catch (err) {
-    return { ok: false as const, reason: (err as Error).message };
-  }
-});
+// --- 面板 IPC：见 ipc-browser.ts / ipc-terminal.ts / ipc-file-panel.ts ---
+registerBrowserIpc(ipcMain, { dataDir, notify: sendToRenderer });
+registerTerminalIpc(ipcMain, { notify: sendToRenderer });
+registerFilePanelIpc(ipcMain);
 
 ipcMain.handle('orchdesk:memory-promotions-clear', async () => {  const cleared = promotionLog.length;
   promotionLog = [];
@@ -3263,137 +1391,9 @@ ipcMain.handle('orchdesk:memory-promotions-clear', async () => {  const cleared 
   return { ok: true, cleared };
 });
 
-// ---------------------------------------------------------------------------
-// PRD FR-3 连接器 IPC
-// ---------------------------------------------------------------------------
-
-/** 连接器列表（含脱敏后的凭证回显与探测状态）。 */
-ipcMain.handle('orchdesk:connectors', async () => {
-  const items = CONNECTOR_CATALOG.map((c) => connectorView(c.id));
-  const states = Object.values(connectorFile.states);
-  return {
-    items,
-    stats: {
-      total: items.length,
-      configured: states.filter((s) => s.configured).length,
-      tested: states.filter((s) => s.lastTestOk !== null).length,
-      ok: states.filter((s) => s.lastTestOk === true).length,
-    },
-  };
-});
-
-/**
- * 保存凭证并立即探测一次。
- * 为什么保存即探测：只保存不探测的话，界面会显示「已配置」，而用户完全不知道
- * 令牌是不是打错了一位 —— 「配了但连不上」正是连接器最典型的假状态。
- * 探测失败**不回滚凭证**（可能是临时网络问题），但状态里明确记 test-fail。
- */
-ipcMain.handle('orchdesk:connector-save', async (_e, id: unknown, creds: unknown) => {
-  if (!isConnectorId(id)) return { ok: false, reason: `未知连接器: ${String(id)}` };
-  const def = getConnectorDef(id)!;
-  const prev = readCreds(connectorFile, id);
-  const src = (creds && typeof creds === 'object' ? creds as Record<string, unknown> : {});
-  const clean: Record<string, string> = {};
-  for (const f of def.fields) {
-    const raw = typeof src[f.key] === 'string' ? String(src[f.key]).trim() : '';
-    // secret 字段在 UI 上只回显「••••1234」，用户没改动时会原样提交回来。
-    // 必须按「保持原值」处理：直接写回去会把真凭证覆盖成一串圆点 ——
-    // 表现为「我只改了 AppSecret，AppID 怎么突然失效了」。
-    // 空串是用户主动清空，不沿用旧值，否则没法单独删掉某个字段。
-    clean[f.key] = /^••••/.test(raw) ? String(prev[f.key] || '') : raw;
-  }
-  writeCreds(connectorFile, id, clean);
-  const missing = def.fields.filter((f) => f.required !== false && !clean[f.key]).map((f) => f.key);
-  recordConnectorAudit(id, 'save', missing.length ? `凭证已保存（不完整：缺少 ${missing.join(', ')}）` : '凭证已保存');
-
-  if (missing.length) {
-    return { ok: true, configured: false, state: connectorFile.states[id] || null, probe: null };
-  }
-  const probe = await testConnector(id);
-  return { ok: true, configured: true, state: connectorFile.states[id] || null, probe };
-});
-
-/** 清除凭证（含探测结论：凭证都没了，旧结论同样是过期信息）。 */
-ipcMain.handle('orchdesk:connector-clear', async (_e, id: unknown) => {
-  if (!isConnectorId(id)) return { ok: false, reason: `未知连接器: ${String(id)}` };
-  clearCreds(connectorFile, id);
-  recordConnectorAudit(id, 'clear', '凭证已清除');
-  return { ok: true, state: connectorFile.states[id] || null };
-});
-
-/** 用已存凭证重新探测。 */
-ipcMain.handle('orchdesk:connector-test', async (_e, id: unknown) => {
-  if (!isConnectorId(id)) return { ok: false, reason: `未知连接器: ${String(id)}` };
-  const probe = await testConnector(id);
-  // ok 必须取 probe 的：展开顺序写反的话外层恒 true，探测失败也会显示成功。
-  return { ok: probe.ok, message: probe.message, manual: probe.manual, state: connectorFile.states[id] || null };
-});
-
-/**
- * 连接器自动发现：从本机 CLI 登录态识别该连接器是否已可用。
- * 只「找到」不写入——返回的 secret 供渲染层回填到表单，是否保存由用户点
- * 「保存并测试」决定（避免把用户没授权存的 token 悄悄落盘）。
- */
-ipcMain.handle('orchdesk:connector-discover', async (_e, id: unknown) => {
-  if (!isConnectorId(id)) return { ok: false, reason: `未知连接器: ${String(id)}` };
-  let home = '';
-  try { home = os.homedir(); } catch { /* ignore */ }
-  if (!home) return { ok: false, reason: '无法定位用户主目录' };
-  return discoverConnector(String(id), { home });
-});
-
-/** 连接器审计（按连接器 / 动作 / 关键词过滤）。 */
-ipcMain.handle('orchdesk:connector-audit', async (_e, query: unknown) => {
-  const q = (query || {}) as Parameters<typeof searchConnectorAudit>[1];
-  return {
-    entries: searchConnectorAudit(connectorFile.audit, q || {}),
-    stats: connectorAuditStats(connectorFile.audit),
-    total: connectorFile.audit.length,
-    max: 200,
-  };
-});
-
-ipcMain.handle('orchdesk:connector-audit-clear', async () => {
-  const cleared = connectorFile.audit.length;
-  connectorFile.audit = [];
-  persistConnectors();
-  return { ok: true, cleared };
-});
-
-// ---- 本地插件市场（PRD FR-3）----
-ipcMain.handle('orchdesk:market-plugins', async () => {
-  return {
-    items: listMarketPlugins(marketEnabledMap),
-    dir: marketDir(),
-    count: Object.values(marketEnabledMap).filter(Boolean).length,
-  };
-});
-
-ipcMain.handle('orchdesk:market-toggle', async (_e, dir: unknown, enabled: unknown) => {
-  if (typeof dir !== 'string' || typeof enabled !== 'boolean') {
-    return { ok: false, reason: '参数非法' };
-  }
-  try {
-    const state = await setMarketPluginEnabled(dir, enabled);
-    marketEnabledMap[dir] = enabled;
-    persistMarketEnabled();
-    // 未激活也要如实回传：装载完成 ≠ 激活（依赖未满足时 fiber.state != 2）。
-    return { ok: true, state };
-  } catch (err) {
-    return { ok: false, reason: (err as Error).message };
-  }
-});
-
-ipcMain.handle('orchdesk:market-open-dir', async () => {
-  const dir = marketDir();
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const err = await shell.openPath(dir);
-    return err ? { ok: false, reason: err } : { ok: true, dir };
-  } catch (e) {
-    return { ok: false, reason: (e as Error).message };
-  }
-});
+registerConnectorIpc(ipcMain);
+registerMcpIpc(ipcMain);
+registerMarketIpc(ipcMain);
 
 // ---- 系统提示词库（prompt 插件）----
 interface PromptServiceLike {
@@ -3598,39 +1598,39 @@ ipcMain.handle('orchdesk:check-updates', async () => checkForUpdates());
 // 桌面集成（PRD FR-4.2）：设置页 6 个开关此前是 data-action="todo" 空壳
 // ---------------------------------------------------------------------------
 ipcMain.handle('orchdesk:desktop-get', async () => {
-  desktopConfig = loadDesktopConfig(dataDir());
+  bootDesktop.setDesktopConfig(loadDesktopConfig(dataDir()));
   return {
-    config: { ...desktopConfig },
+    config: { ...bootDesktop.desktopConfig },
     shortcutLabel: SHORTCUT_LABEL,
     labels: { ...DESKTOP_LABELS },
     /** 自启动真实生效状态（系统可能拒绝写入，UI 需如实展示）。 */
-    autostartEffective: readLoginItemSettings().openAtLogin === true,
+    autostartEffective: bootDesktop.readLoginItemSettings().openAtLogin === true,
   };
 });
 
 ipcMain.handle('orchdesk:desktop-set', async (_e, key: unknown, value: unknown) => {
-  const res = setDesktopKey(desktopConfig, key, value);
-  if (!res.ok || !res.key) return { ok: false, config: { ...desktopConfig }, reason: res.reason };
-  desktopConfig = saveDesktopConfig(res.config, dataDir());
+  const res = setDesktopKey(bootDesktop.desktopConfig, key, value);
+  if (!res.ok || !res.key) return { ok: false, config: { ...bootDesktop.desktopConfig }, reason: res.reason };
+  bootDesktop.setDesktopConfig(saveDesktopConfig(res.config, dataDir()));
   // 只重放受影响的那一项：切换「自动更新」不该去动系统登录项。
   switch (res.key) {
-    case 'tray': applyTray(desktopConfig.tray); break;
-    case 'shortcut': applyShortcut(desktopConfig.shortcut); break;
+    case 'tray': bootDesktop.applyTray(bootDesktop.desktopConfig.tray); break;
+    case 'shortcut': bootDesktop.applyShortcut(bootDesktop.desktopConfig.shortcut); break;
     case 'autostart': {
-      const r = applyAutostart(desktopConfig.autostart);
-      if (!r.ok) return { ok: true, config: { ...desktopConfig }, warning: `系统未接受自启动设置：${r.reason}` };
+      const r = bootDesktop.applyAutostart(bootDesktop.desktopConfig.autostart);
+      if (!r.ok) return { ok: true, config: { ...bootDesktop.desktopConfig }, warning: `系统未接受自启动设置：${r.reason}` };
       break;
     }
-    case 'autoupdate': if (desktopConfig.autoupdate) applyAutoUpdate(true); break;
-    case 'floating': applyFloating(desktopConfig.floating); break;
-    case 'notify': if (desktopConfig.notify) notifyDesktop('OrchDesk', '系统通知已开启'); break;
+    case 'autoupdate': if (bootDesktop.desktopConfig.autoupdate) bootDesktop.applyAutoUpdate(true); break;
+    case 'floating': bootDesktop.applyFloating(bootDesktop.desktopConfig.floating); break;
+    case 'notify': if (bootDesktop.desktopConfig.notify) bootDesktop.notifyDesktop('OrchDesk', '系统通知已开启'); break;
   }
-  log('INFO', 'desktop', `桌面集成开关变更：${DESKTOP_LABELS[res.key]} → ${desktopConfig[res.key] ? '开' : '关'}`);
+  log('INFO', 'desktop', `桌面集成开关变更：${DESKTOP_LABELS[res.key]} → ${bootDesktop.desktopConfig[res.key] ? '开' : '关'}`);
   return {
     ok: true,
-    config: { ...desktopConfig },
+    config: { ...bootDesktop.desktopConfig },
     changed: res.changed,
-    autostartEffective: readLoginItemSettings().openAtLogin === true,
+    autostartEffective: bootDesktop.readLoginItemSettings().openAtLogin === true,
   };
 });
 
@@ -3638,9 +1638,9 @@ ipcMain.handle('orchdesk:desktop-set', async (_e, key: unknown, value: unknown) 
 ipcMain.handle('orchdesk:desktop-floating-context', async (_e, ctx: { title?: string; sessions?: number }) => {
   const safeTitle = String(ctx?.title || '').trim().slice(0, 80);
   const safeSessions = Number.isFinite(ctx?.sessions) ? Math.max(0, Math.trunc(Number(ctx.sessions))) : 0;
-  floatingContext = { title: safeTitle, sessions: safeSessions };
-  if (floatingWindow && !floatingWindow.isDestroyed()) renderFloatingWindow();
-  return { ok: true, context: { ...floatingContext } };
+  bootDesktop.setFloatingContext({ title: safeTitle, sessions: safeSessions });
+  if (bootDesktop.floatingWindow && !bootDesktop.floatingWindow.isDestroyed()) bootDesktop.renderFloatingWindow();
+  return { ok: true, context: { ...bootDesktop.floatingContext } };
 });
 
 /**
@@ -3709,7 +1709,7 @@ ipcMain.handle('orchdesk:set-session-cwd', async (_e, sessionId: unknown, dir: u
   let isDir = false;
   try { isDir = fs.statSync(resolved).isDirectory(); } catch { /* 不存在 */ }
   if (!isDir) return { ok: false, reason: `目录不存在或不是文件夹：${resolved}` };
-  sessionCwds.set(sid, resolved);
+  setSessionCwd(sid, resolved);
   recordSandbox({
     tool: 'set_session_cwd', kind: 'path', target: resolved, decision: 'allowed',
     reason: '用户绑定项目工作区（GUI 驱动，非 Agent 路径）', sessionId: sid,
@@ -3743,7 +1743,7 @@ ipcMain.handle('orchdesk:pick-folder', async () => {
     const { dialog } = await import('electron');
     const opts = { properties: ['openDirectory' as const], title: '选择项目本地文件夹' };
     // 主窗可能尚未创建（托盘/菜单触发），勿用非空断言
-    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, opts) : await dialog.showOpenDialog(opts);
+    const result = bootDesktop.mainWindow ? await dialog.showOpenDialog(bootDesktop.mainWindow, opts) : await dialog.showOpenDialog(opts);
     if (!result.canceled && result.filePaths.length) return { ok: true, path: result.filePaths[0] };
     return { ok: false, reason: 'cancelled' };
   } catch (err) {
@@ -3810,7 +1810,7 @@ ipcMain.handle('orchdesk:export-data', async () => {
       filters: [{ name: 'OrchDesk 备份', extensions: ['json'] }],
     };
     // 主窗可能尚未创建（如托盘菜单触发）：electron 允许无窗调用，勿用非空断言
-    const result = mainWindow ? await dialog.showSaveDialog(mainWindow, opts) : await dialog.showSaveDialog(opts);
+    const result = bootDesktop.mainWindow ? await dialog.showSaveDialog(bootDesktop.mainWindow, opts) : await dialog.showSaveDialog(opts);
     if (result.canceled || !result.filePath) return { ok: false, reason: 'cancelled' };
     const root = dataDir();
     const bundle: Record<string, unknown> = {
@@ -3837,7 +1837,7 @@ ipcMain.handle('orchdesk:import-data', async () => {
       properties: ['openFile' as const],
       filters: [{ name: 'OrchDesk 备份', extensions: ['json'] }],
     };
-    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, openOpts) : await dialog.showOpenDialog(openOpts);
+    const result = bootDesktop.mainWindow ? await dialog.showOpenDialog(bootDesktop.mainWindow, openOpts) : await dialog.showOpenDialog(openOpts);
     if (result.canceled || !result.filePaths.length) return { ok: false, reason: 'cancelled' };
     const srcFile = result.filePaths[0]!;
     try {
@@ -3916,7 +1916,7 @@ app.whenReady().then(async () => {
   // 终端（P2-10）：启动期探测 node-pty 可用性，让 getTerminalState 的
   // ptyAvailable 从一开始就是确定值（未探测 ≠ 不可用，不许混淆）。
   try {
-    const ok = ensurePtyLoaded(TERMINAL_APP_DIR, terminalExtraPtyDirs());
+    const ok = preloadTerminalPty();
     log('INFO', 'terminal', ok ? 'node-pty 已加载（真 PTY 模式）' : 'node-pty 不可用，终端将以管道模式降级');
   } catch (err) {
     log('WARN', 'terminal', 'node-pty 探测异常：' + (err as Error).message);
@@ -3953,7 +1953,7 @@ app.whenReady().then(async () => {
 
   // PRD FR-3：本地插件市场启用状态装载（插件代码在 dataDir()/plugins/，这里只存意愿）。
   try {
-    marketEnabledMap = loadMarketEnabled();
+    hydrateMarketEnabled();
   } catch (err) {
     console.warn('[orchdesk] 插件市场状态装载失败:', (err as Error).message);
   }
@@ -3968,17 +1968,17 @@ app.whenReady().then(async () => {
 
   // PRD FR-4.2：桌面集成开关全量重放（此前 6 项全是设置页空壳，见第十个死挂点）。
   // 必须在 createWindow 之前——全局快捷键/托盘都依赖 mainWindow 存在与否。
-  desktopConfig = loadDesktopConfig(dataDir());
-  applyDesktopConfig();
+  bootDesktop.setDesktopConfig(loadDesktopConfig(dataDir()));
+  bootDesktop.applyDesktopConfig();
 
-  createWindow();
+  bootDesktop.createWindow();
   // 托盘由 applyTray 按配置决定是否创建；此处不再无条件 createTray()。
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) bootDesktop.createWindow();
   });
 
   // 开机提醒（FR-4.2）：启动完成发一条系统通知，配置关闭时静默跳过。
-  if (desktopConfig.notify) notifyDesktop('OrchDesk 已启动', '点击托盘图标或按 ' + SHORTCUT_LABEL + ' 唤起主窗');
+  if (bootDesktop.desktopConfig.notify) bootDesktop.notifyDesktop('OrchDesk 已启动', '点击托盘图标或按 ' + SHORTCUT_LABEL + ' 唤起主窗');
 });
 
 app.on('window-all-closed', () => {
@@ -3988,7 +1988,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   // 注销全局快捷键：不注销会在进程退出后残留加速器（Windows 上表现为快捷键失灵）
   try { globalShortcut.unregisterAll(); } catch { /* 忽略 */ }
-  destroyFloatingWindow();
+  bootDesktop.destroyFloatingWindow();
   // 触发全部插件的逆效应（卸载无残留）
   void stopRuntime();
 });

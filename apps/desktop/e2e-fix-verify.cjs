@@ -17,7 +17,7 @@
 
 const { chromium } = require('playwright');
 
-const HTML_PATH = 'file://' + require('path').resolve('D:/Code/OrchDesk/apps/desktop/renderer/index.html');
+const HTML_PATH = 'file://' + require('path').resolve(__dirname, 'renderer/index.html');
 const url = process.argv.includes('--url') ? process.argv[process.argv.indexOf('--url') + 1] : HTML_PATH;
 
 let passed = 0;
@@ -178,6 +178,7 @@ async function run() {
       // 死挂点修复 e2e：捕获 onToolStep 订阅回调，测试侧才能向渲染层推送真实工具事件
       // （live 工具步骤行 = 订阅写 + 读，两者都要真实走通）。旧实现丢弃回调。
       onToolStep: (cb) => { window.__toolStepCb = typeof cb === 'function' ? cb : null; },
+      onAgentDelta: (cb) => { window.__agentDeltaCb = typeof cb === 'function' ? cb : null; },
       // localStorage __rt='1' 时返回「运行时就绪 + 插件状态」（statbar/技能标签真实分支断言）；
       // 缺省 ready:false 与旧行为一致，不影响前 14 组。
       getPluginRuntime: () => Promise.resolve(
@@ -240,6 +241,7 @@ async function run() {
         text: '[E2E] 回复：已收到「' + text.slice(0, 30) + '」',
         intent: 'ACT'
       }),
+      abortAgentTurn: () => Promise.resolve({ ok: false, reason: 'no-active-turn' }),
       getAuthMode: () => Promise.resolve({ mode: 'default' }),
       setAuthMode: () => Promise.resolve({ ok: true }),
       getAuthLevels: () => Promise.resolve([]),
@@ -1695,6 +1697,68 @@ async function run() {
     await assert(/1 步 · 1 个动作/.test(doneText), '静态 tools 摘要渲染正确');
   } catch (e) {
     await assert(false, `死挂点 ①② 工具步骤链路交互完成 (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ---- 流式缝：delta 追加到 typing，回合结束被静态回复替换 ----
+  try {
+    await page.evaluate(() => {
+      window.orchdesk.runAgentTurn = (sid, text, opts) => new Promise((resolve) => {
+        window.__turnResolve = (r) => resolve(r);
+      });
+    });
+    await page.locator('#composer').fill('请流式输出');
+    await page.locator('[data-action="send"]').first().click();
+    await page.waitForTimeout(300);
+    const pushed = await page.evaluate(() => {
+      if (typeof window.__agentDeltaCb !== 'function') return false;
+      window.__agentDeltaCb({ sessionId: 's3', text: '春' });
+      window.__agentDeltaCb({ sessionId: 's3', text: '秋' });
+      return true;
+    });
+    await assert(pushed, 'onAgentDelta 已订阅');
+    await page.waitForTimeout(200);
+    const liveStream = await page.locator('#msgScroll').innerText();
+    await assert(/春/.test(liveStream) && /秋/.test(liveStream), 'typing 实时显示增量文本');
+    await page.evaluate(() => {
+      if (typeof window.__turnResolve === 'function') {
+        window.__turnResolve({ text: '春秋完整', intent: 'ACT' });
+      }
+    });
+    await page.waitForTimeout(400);
+    const afterStream = await page.locator('#msgScroll').innerText();
+    await assert(/春秋完整/.test(afterStream), '回合结束增量被静态回复替换');
+  } catch (e) {
+    await assert(false, `流式增量交互 (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ---- 停止生成：composer 发送钮变「停止」，abort 把 typing 换成「已停止」 ----
+  try {
+    await page.evaluate(() => {
+      window.__abortCalls = [];
+      window.orchdesk.abortAgentTurn = (sid) => {
+        window.__abortCalls.push(sid);
+        if (typeof window.__turnResolve === 'function') {
+          window.__turnResolve({ text: '（已停止）', intent: 'CONFIRM', aborted: true });
+        }
+        return Promise.resolve({ ok: true });
+      };
+      window.orchdesk.runAgentTurn = (sid, text, opts) => new Promise((resolve) => {
+        window.__turnResolve = (r) => resolve(r);
+      });
+    });
+    await page.locator('#composer').fill('请写一篇很长的文章');
+    await page.locator('[data-action="send"]').first().click();
+    await page.waitForTimeout(300);
+    await assert(await page.locator('[data-action="abort-send"]').count() > 0, '生成中发送按钮变为「停止」');
+    await page.locator('[data-action="abort-send"]').first().click();
+    await page.waitForTimeout(400);
+    const abortCalls = await page.evaluate(() => window.__abortCalls);
+    await assert(Array.isArray(abortCalls) && abortCalls.includes('s3'), '停止调用 abortAgentTurn(s3)');
+    const afterAbort = await page.locator('#msgScroll').innerText();
+    await assert(/已停止/.test(afterAbort), '停止后 typing 替换为「已停止」');
+    await assert(await page.locator('[data-action="send"]').count() > 0, '停止后恢复「发送」按钮');
+  } catch (e) {
+    await assert(false, `停止生成交互 (error: ${e.message.slice(0, 80)})`);
   }
 
   // ---- ④ 任务监控「能力」：插件状态按运行时真实装载标注 + 技能取磁盘真实扫描 ----
