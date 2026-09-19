@@ -92,10 +92,12 @@ import {
   extractToolCalls,
   isKnownTool,
   normalizeNativeToolCalls,
+  MAX_TOOL_ITERATIONS_CAP,
+  MAX_TOOL_ITERATIONS_DEFAULT,
 } from './agent-runtime';
 import { isAbsoluteLike } from './common-tools';
 import { callModel as callModelHttp, initModelClient } from './model-client';
-import { abortAgentTurn, initAgentTurn, runAgentTurn } from './agent-turn';
+import { abortAgentTurn, clearToolRejectMemo, initAgentTurn, runAgentTurn } from './agent-turn';
 import { executeTool, initToolExec, sessionCwd, setSessionCwd } from './tool-exec';
 import { registerBrowserIpc } from './ipc-browser';
 import { preloadTerminalPty, registerTerminalIpc } from './ipc-terminal';
@@ -352,9 +354,9 @@ const MODELS_FILE = () => path.join(dataDir(), DATA_FILE_NAMES.models);
 function loadModelConfig(): ModelConfig {
   try {
     const file = MODELS_FILE();
-    // 三路径默认一致（20 = 无配置时的保守兜底；用户显式配置最多到 200，见 saveModelConfig 钳制）。
+    // 三路径默认一致（MAX_TOOL_ITERATIONS_DEFAULT = 200；用户显式配置最多到 500，见 saveModelConfig 钳制）。
     // 坏文件回落到保守值而非「假装健康」，与项目 fail-closed 纪律一致。
-    if (!fs.existsSync(file)) return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: 20 };
+    if (!fs.existsSync(file)) return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: MAX_TOOL_ITERATIONS_DEFAULT };
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
     let migrated = false;
     const providers = (raw.providers as Array<Record<string, unknown>> | undefined)?.map(p => {
@@ -373,12 +375,12 @@ function loadModelConfig(): ModelConfig {
       defaultProvider: (raw.defaultProvider as string | undefined) || 'ollama',
       defaultModel: (raw.defaultModel as string | undefined) || 'qwen3:14b',
       // ?? 而非 ||：显式配置 0 不应用默认值吞掉（虽随后被消费端钳到 1）。
-      maxToolIterations: (raw.maxToolIterations as number | undefined) ?? 20,
+      maxToolIterations: (raw.maxToolIterations as number | undefined) ?? MAX_TOOL_ITERATIONS_DEFAULT,
     };
     const hasPlainKey = migrated;
     if (hasPlainKey) saveModelConfig(cfg);
     return cfg;
-  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: 20 }; }
+  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: MAX_TOOL_ITERATIONS_DEFAULT }; }
 }
 
 function saveModelConfig(cfg: ModelConfig): void {
@@ -460,7 +462,7 @@ function nowTime(): string { return new Date().toLocaleTimeString('zh-CN', { hou
  * 走此门的操作兜底不足：命令白名单含万能 shell、file_write 可覆盖白名单内任意文件）。
  * @returns null = 放行；字符串 = 拒绝原因。
  */
-async function approvalGate(toolName: string, reason: string, sessionId?: string, target?: string): Promise<string | null> {
+async function approvalGate(toolName: string, reason: string, sessionId?: string, target?: string, signal?: AbortSignal): Promise<string | null> {
   let mode = 'default';
   try { mode = (await authzService?.getMode()) || 'default'; } catch { /* 缺省 default */ }
   lastAuthMode = mode;
@@ -477,7 +479,8 @@ async function approvalGate(toolName: string, reason: string, sessionId?: string
 
   const approval = getHostServices()?.approval;
   if (!approval) return '授权审批服务不可用，操作被拒绝（fail-closed）';
-  const outcome = await approval.request({ toolName, reason: reason.slice(0, 200), sessionId, target });
+  // M-8：signal 下传——回合中止时审批请求一并取消，不等用户应答/超时。
+  const outcome = signal?.aborted ? 'cancelled' : await approval.request({ toolName, reason: reason.slice(0, 200), sessionId, target }, signal);
   return outcome === 'allowed-once' ? null : `操作未获批准（${outcome}）`;
 }
 
@@ -787,8 +790,10 @@ ipcMain.handle('orchdesk:models-save', async (_e, config: unknown) => {
     });
     if (incoming.defaultProvider) current.defaultProvider = incoming.defaultProvider;
     if (incoming.defaultModel) current.defaultModel = incoming.defaultModel;
-    // 与运行时钳制一致（1–200，见 runAgentTurn 的 MAX_ITERATIONS），保证所见即所得。
-    if (incoming.maxToolIterations) current.maxToolIterations = Math.max(1, Math.min(200, incoming.maxToolIterations));
+    // 与运行时钳制一致（1–500，单源常量 MAX_TOOL_ITERATIONS_CAP），保证所见即所得。
+    if (incoming.maxToolIterations) current.maxToolIterations = Math.max(1, Math.min(MAX_TOOL_ITERATIONS_CAP, incoming.maxToolIterations));
+    // M-1：模型配置变更后失效「网关拒 tools」毒化 memo，重新尝试原生协议。
+    clearToolRejectMemo();
     saveModelConfig(current);
     return { ok: true };
   } catch (err) {

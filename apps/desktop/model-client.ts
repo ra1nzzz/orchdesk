@@ -461,6 +461,11 @@ export async function callOpenAICompatible(
 
   let lastErr = '';
   let preferStream = mode === 'chat';
+  // M-1：只有「明确指向工具协议」的拒绝才允许把 provider 标记为不吃工具。
+  // 空 content / finish=length / 内容过滤 / 网关抖动 → 继续按普通失败爬梯，绝不毒化。
+  let toolProtocolRejected = false;
+  // 轮内软降级计数：带 tools 的尝试失败次数（去掉 tools 才成功 → softToolsFallback）。
+  let toolsAttemptFailed = 0;
   attLoop: for (const att of attempts) {
     const streamTries = preferStream ? [true, false] : [false];
     for (const useStream of streamTries) {
@@ -497,7 +502,14 @@ export async function callOpenAICompatible(
         preferStream = false;
         continue;
       }
-      if (att.tools && [400, 404, 415, 422].includes(res.status)) continue attLoop;
+      // 工具相关参数被拒绝 → 降级重试；其余错误直接抛出。
+      // M-1：仅当错误体明确提及 tool/function 时才记为「工具协议拒绝」；
+      // 上下文超长等无关 400 不该把原生工具能力毒化掉。
+      if (att.tools && [400, 404, 415, 422].includes(res.status)) {
+        if (/tool|function/i.test(txt)) toolProtocolRejected = true;
+        toolsAttemptFailed++;
+        continue attLoop;
+      }
       throw new Error(lastErr);
     }
 
@@ -510,6 +522,7 @@ export async function callOpenAICompatible(
       const toolCalls = normalizeNativeToolCalls(streamed.toolCalls);
       if (!streamed.content && !toolCalls.length && att.tools) {
         lastErr = emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish: streamed.finish, bodySnippet: rawBody.slice(0, 200) });
+        toolsAttemptFailed++;
         continue attLoop;
       }
       logModel('response', {
@@ -522,6 +535,8 @@ export async function callOpenAICompatible(
         toolCalls,
         source: toolCalls.length ? 'native' : 'none',
         usage: normalizeApiUsage({ usage: streamed.usage }) || undefined,
+        toolsRejected: canUseTools && !att.tools && streamed.content && toolProtocolRejected ? true : undefined,
+        softToolsFallback: canUseTools && !att.tools && streamed.content && !toolProtocolRejected && toolsAttemptFailed > 0 ? true : undefined,
         emptyReason: (!streamed.content && !toolCalls.length)
           ? emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish: streamed.finish, bodySnippet: rawBody.slice(0, 200) })
           : undefined,
@@ -535,6 +550,7 @@ export async function callOpenAICompatible(
         const toolCalls = normalizeNativeToolCalls(streamed.toolCalls);
         if (!streamed.content && !toolCalls.length && att.tools) {
           lastErr = emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish: streamed.finish, bodySnippet: rawBody.slice(0, 200) });
+        toolsAttemptFailed++;
           continue attLoop;
         }
         logModel('response', {
@@ -547,6 +563,8 @@ export async function callOpenAICompatible(
           toolCalls,
           source: toolCalls.length ? 'native' : 'none',
           usage: normalizeApiUsage({ usage: streamed.usage }) || undefined,
+        toolsRejected: canUseTools && !att.tools && streamed.content && toolProtocolRejected ? true : undefined,
+        softToolsFallback: canUseTools && !att.tools && streamed.content && !toolProtocolRejected && toolsAttemptFailed > 0 ? true : undefined,
           emptyReason: (!streamed.content && !toolCalls.length)
             ? emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish: streamed.finish, bodySnippet: rawBody.slice(0, 200) })
             : undefined,
@@ -561,7 +579,11 @@ export async function callOpenAICompatible(
         preferStream = false;
         continue;
       }
-      if (att.tools && /tool|function/i.test(errMsg)) continue attLoop;
+      if (att.tools && /tool|function\s*call|function calling/i.test(errMsg)) {
+        toolProtocolRejected = true;
+        toolsAttemptFailed++;
+        continue attLoop;
+      }
       throw new Error(errMsg);
     }
 
@@ -573,6 +595,7 @@ export async function callOpenAICompatible(
     if (!content && !toolCalls.length && att.tools) {
       lastErr = emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish, bodySnippet: rawBody.slice(0, 200) });
       logModel('error', { provider: provider.name, model, apiMode: mode, url, status: res.status, ms: Date.now() - t0, error: `[softReject] ${lastErr}` });
+      toolsAttemptFailed++;
       continue attLoop;
     }
 
@@ -587,7 +610,10 @@ export async function callOpenAICompatible(
       toolCalls,
       source: toolCalls.length ? 'native' : 'none',
       usage: normalizeApiUsage(data) || undefined,
-      toolsRejected: canUseTools && !att.tools && content ? true : undefined,
+      // 本次是靠「确认了工具协议拒绝 + 去掉 tools」才成功的 → 告知上层别再下发工具定义。
+      // 空 content 爬梯成功（toolProtocolRejected=false）不算数——只记轮内软降级。
+      toolsRejected: canUseTools && !att.tools && content && toolProtocolRejected ? true : undefined,
+      softToolsFallback: canUseTools && !att.tools && content && !toolProtocolRejected && toolsAttemptFailed > 0 ? true : undefined,
       emptyReason: (!content && !toolCalls.length)
         ? emptyContentReason({ provider: provider.name, model, mode, status: res.status, finish, bodySnippet: rawBody.slice(0, 200) })
         : undefined,

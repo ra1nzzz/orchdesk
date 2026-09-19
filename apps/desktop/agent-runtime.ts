@@ -50,11 +50,17 @@ export interface ModelReply {
   /** 来源：native = API 原生 tool_calls；text = 正文解析；none = 无。 */
   source: 'native' | 'text' | 'none';
   /**
-   * 网关明确拒绝工具协议（400/404/422 或错误信息含 tool）。
+   * 网关明确拒绝工具协议（400/404/422 或错误信息含 tool/function 语义）。
    * 上层据此在本次会话内停止下发 tools，避免每轮重复三次降级重试，
-   * 并转为「文本兜底解析」模式。
+   * 并转为「文本兜底解析」模式。**跨会话记忆（memo）只认这个信号**——
+   * 空内容/网关抖动不得毒化原生工具能力（2026-09 安全/稳定性审查 M-1）。
    */
   toolsRejected?: boolean;
+  /**
+   * 轮内软降级：带 tools 的尝试都未产出内容、去掉 tools 才成功（非协议拒绝）。
+   * 上层据此**仅在本回合**停止下发 tools（省无效重试），但**不写跨会话 memo**。
+   */
+  softToolsFallback?: boolean;
   /**
    * 内容为空时的诊断信息（HTTP 状态 / apiMode / finish_reason / 响应片段）。
    * 上层在 content 为空时优先展示，避免「模型返回空内容」这种无法定位的提示。
@@ -105,14 +111,56 @@ export interface ToolDef {
   function: ToolDefFunction;
 }
 
-/** 命令白名单（executeTool 与描述文案共用，避免两处漂移）。 */
+/** 命令白名单（executeTool 与描述文案共用，避免两处漂移）。
+ * 不含 cmd/powershell/pwsh/node/python/pip/npx 等可执行任意代码的万能 shell/解释器——
+ * 它们以单 token 形态即可运行任意代码，白名单形同虚设（安全审查 B1）。
+ * shell_command 的真正安全边界是授权门（approvalGate）+ 沙箱日志，白名单只挡「明显无害」。 */
 export const ALLOWED_COMMANDS: string[] = [
   'dir', 'ls', 'cat', 'type', 'head', 'tail', 'find', 'where', 'grep',
   'echo', 'pwd', 'cd', 'mkdir', 'rmdir', 'copy', 'xcopy', 'move',
-  'git', 'npm', 'pnpm', 'npx', 'node', 'python', 'python3', 'pip',
+  'git', 'npm', 'pnpm',
   'ping', 'ipconfig', 'netstat', 'tasklist', 'curl', 'wget',
-  'notepad', 'code', 'cmd', 'powershell', 'pwsh',
+  'notepad', 'code',
 ];
+
+/**
+ * shell 元字符：命令串含任一枚即拒绝（agent-runtime 安全审查 B-2）。
+ * `&&` / `|` / `;` 等拼接可让「白名单首词 + 任意后随命令」整条执行，
+ * 是命令白名单被结构绕过的唯一入口。授权门确认的是「用户看过这条命令」，
+ * 拦不住串本身携带的第二条命令。
+ */
+const SHELL_METACHARS = /(?:&&|\|\||[&|;<>$`\n\r])/;
+export function hasShellMetachars(command: string): boolean {
+  return SHELL_METACHARS.test(String(command || ''));
+}
+
+/** maxToolIterations 上限与默认值（渲染层滑块 / 保存钳制 / 回合循环三处共用，防漂移）。 */
+export const MAX_TOOL_ITERATIONS_CAP = 500;
+export const MAX_TOOL_ITERATIONS_DEFAULT = 200;
+
+/**
+ * 会话历史归一化（B-1：渲染层写 {r:'user',t,x}，主进程写 {role,text}，双轨制会让
+ * 第二轮起的历史全被 role/text 过滤丢弃 → Agent「单轮失忆」）。读侧统一：
+ * r/x 是渲染层 schema，role/text 是主进程 schema，二者都归一为 ApiMessage。
+ */
+export interface StoredMessageLike {
+  role?: string;
+  r?: string;
+  text?: string;
+  x?: string;
+}
+export function normalizeHistory(msgs: StoredMessageLike[] | undefined, limit = 20): ApiMessage[] {
+  const out: ApiMessage[] = [];
+  for (const m of msgs || []) {
+    const content = typeof m?.text === 'string' && m.text ? m.text : (typeof m?.x === 'string' ? m.x : '');
+    if (!content) continue;
+    const rawRole = m.role || m.r;
+    const role = rawRole === 'user' ? 'user' : rawRole === 'assistant' || rawRole === 'agent' ? 'assistant' : null;
+    if (!role) continue; // tool/typing 等 UI 步骤消息不回灌模型
+    out.push({ role, content });
+  }
+  return out.slice(-limit);
+}
 
 /**
  * ④M-3：file_read / web_fetch 回传宿主结果的内容上限（字节字符）。

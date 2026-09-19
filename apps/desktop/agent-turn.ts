@@ -15,6 +15,9 @@ import {
   buildToolResultMessage,
   extractToolCalls,
   isKnownTool,
+  MAX_TOOL_ITERATIONS_CAP,
+  MAX_TOOL_ITERATIONS_DEFAULT,
+  normalizeHistory,
 } from './agent-runtime';
 import { DATA_FILE_NAMES } from './data-dir';
 import { emitCanonicalEvent } from './event-emit';
@@ -45,7 +48,7 @@ export type AgentTurnHost = {
   saveStore: () => void;
   dataDir: () => string;
   sessionCwd: (sessionId?: string) => string;
-  executeTool: (tool: ToolCall, ctx?: { sessionId?: string }) => Promise<ToolResult>;
+  executeTool: (tool: ToolCall, ctx?: { sessionId?: string; signal?: AbortSignal }) => Promise<ToolResult>;
   notifyAgentDelta: (sessionId: string, text: string) => void;
   notifyToolStep: (sessionId: string, name: string, ph: 'running' | 'done' | 'error', result?: string) => void;
 };
@@ -70,7 +73,11 @@ function requireHost(): AgentTurnHost {
   return host;
 }
 
-const toolRejectMemo = new Map<string, true>();
+const toolRejectMemo = new Map<string, { t: number }>();
+export function clearToolRejectMemo(providerId?: string): void {
+  if (!providerId) { toolRejectMemo.clear(); return; }
+  for (const k of [...toolRejectMemo.keys()]) if (k.startsWith(providerId + '|')) toolRejectMemo.delete(k);
+}
 function toolRejectKey(provider: AgentTurnProvider, model: string): string {
   return `${provider.id}|${model}`;
 }
@@ -85,9 +92,6 @@ function beginTurn(sessionId: string): AbortController {
 }
 function finishTurn(sessionId: string, ac: AbortController): void {
   if (turnAborts.get(sessionId) === ac) turnAborts.delete(sessionId);
-}
-function abortedTurn(tools: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }>, steps: number): AgentTurnResult {
-  return { text: '（已停止）', intent: 'CONFIRM', aborted: true, tools, steps };
 }
 
 export function abortAgentTurn(sessionId: string): { ok: boolean; reason?: string } {
@@ -129,10 +133,9 @@ export async function runAgentTurn(
   );
 
   const sessionMsgs = h.getSession(sessionId)?.msgs || [];
-  const apiMessages: ApiMessage[] = sessionMsgs
-    .filter(m => (m.role === 'user' || m.role === 'assistant') && m.text)
-    .slice(-20)
-    .map(m => ({ role: m.role as 'user' | 'assistant', content: m.text as string }));
+  // B-1：渲染层 schema（r/x）与主进程 schema（role/text）双轨 → 读侧统一归一化，
+  // 否则第二轮起历史全被过滤，Agent 处于「单轮失忆」状态。
+  const apiMessages: ApiMessage[] = normalizeHistory(sessionMsgs as Parameters<typeof normalizeHistory>[0], 20);
   let memories: string[] = [];
   try {
     const memSvc = getService<MemoryServiceLike>('memory');
@@ -164,12 +167,20 @@ export async function runAgentTurn(
   let finalReply = '';
   let stepCount = 0;
   let turnUsage: { p: number; c: number; t: number } | null = null;
-  const MAX_ITERATIONS = Math.max(1, Math.min(200, modelCfg.maxToolIterations || 20));
+  // BUG 修复前 maxToolIterations 上限三处不一致（渲染层滑块 500 / 保存钳制 200 / 回合 200）：
+  // 统一收敛到 agent-runtime 单源常量，所见即所得。
+  const MAX_ITERATIONS = Math.max(1, Math.min(MAX_TOOL_ITERATIONS_CAP, modelCfg.maxToolIterations || MAX_TOOL_ITERATIONS_DEFAULT));
   const rejectKey = toolRejectKey(provider, model);
-  let providerRejectsTools = toolRejectMemo.has(rejectKey);
+  // M-1：memo 带 TTL——一次误判（如模型合法空回复被当成「不吃工具」）不应把
+  // 该模型在整个进程生命周期内永久打回文本兜底。10 分钟后自动重试原生协议。
+  const rejectHit = toolRejectMemo.get(rejectKey);
+  let providerRejectsTools = rejectHit ? Date.now() - rejectHit.t < 10 * 60 * 1000 : false;
+  // 中止回合也走完整落盘/事件/记账（修复「已停止后消息在磁盘上无迹可查」）。
+  let aborted = false;
+  const bail = (): boolean => { if (!signal.aborted) return false; aborted = true; return true; };
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-    if (signal.aborted) return abortedTurn(toolSteps, stepCount);
+    if (bail()) break;
     if (iter === 0) {
       let gate: { kind?: string; reason?: string } | null = null;
       try {
@@ -193,7 +204,7 @@ export async function runAgentTurn(
         onDelta: (chunk) => h.notifyAgentDelta(sessionId, chunk),
       });
     } catch (err) {
-      if (signal.aborted || isAbortError(err)) return abortedTurn(toolSteps, stepCount);
+      if (bail() || isAbortError(err)) break;
       return { text: `（模型调用失败）${(err as Error).message}`, intent: 'CONFIRM' };
     }
     if (reply.usage) {
@@ -202,10 +213,17 @@ export async function runAgentTurn(
         ? { p: turnUsage.p + u.promptTokens, c: turnUsage.c + u.completionTokens, t: turnUsage.t + u.totalTokens }
         : { p: u.promptTokens, c: u.completionTokens, t: u.totalTokens };
     }
+    // M-1：只有「明确指向工具协议」的拒绝才写跨会话 memo（带 TTL）；
+    // 空 content / finish=length / 网关抖动 → 绝不毒化，只在本回合内兜底。
     if (reply.toolsRejected) {
       providerRejectsTools = true;
-      toolRejectMemo.set(rejectKey, true);
-      console.warn(`[orchdesk] 提供商「${provider.name}」不接受工具定义，后续会话转为文本兜底解析。`);
+      toolRejectMemo.set(rejectKey, { t: Date.now() });
+      console.warn(`[orchdesk] 提供商「${provider.name}」不接受工具定义，后续会话转为文本兜底解析（10 分钟后自动重试）。`);
+    } else if (reply.softToolsFallback) {
+      // 轮内软降级：本回合后续迭代不再带 tools（省无效重试），但不写 memo——
+      // 下一会话仍会重新尝试原生协议（防一次误判永久失效）。
+      providerRejectsTools = true;
+      console.warn(`[orchdesk] 提供商「${provider.name}」带 tools 未产出内容，本回合转为文本兜底（不记录跨会话毒化）。`);
     }
 
     if (reply.toolCalls.length) {
@@ -213,11 +231,11 @@ export async function runAgentTurn(
       apiMessages.push(assistantMsg);
 
       for (const tc of reply.toolCalls) {
-        if (signal.aborted) return abortedTurn(toolSteps, stepCount);
+        if (bail()) break;
         stepCount++;
         h.notifyToolStep(sessionId, tc.name, 'running');
-        const result = await h.executeTool(tc, { sessionId });
-        if (signal.aborted) return abortedTurn(toolSteps, stepCount);
+        const result = await h.executeTool(tc, { sessionId, signal });
+        if (bail()) break;
         toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
         h.notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
         void emitCanonicalEvent(
@@ -229,6 +247,7 @@ export async function runAgentTurn(
         );
         apiMessages.push(buildToolResultMessage(tc, result, 'native'));
       }
+      if (aborted) break;
       continue;
     }
 
@@ -241,11 +260,11 @@ export async function runAgentTurn(
 
     apiMessages.push({ role: 'assistant', content: parsed.stripped || `（调用工具：${usable.map(c => c.name).join(', ')}）` });
     for (const tc of usable) {
-      if (signal.aborted) return abortedTurn(toolSteps, stepCount);
+      if (bail()) break;
       stepCount++;
       h.notifyToolStep(sessionId, tc.name, 'running');
-      const result = await h.executeTool(tc, { sessionId });
-      if (signal.aborted) return abortedTurn(toolSteps, stepCount);
+      const result = await h.executeTool(tc, { sessionId, signal });
+      if (bail()) break;
       toolSteps.push({ n: tc.name, ph: result.error ? 'error' : 'done', result: result.error || result.result });
       h.notifyToolStep(sessionId, tc.name, result.error ? 'error' : 'done', result.error || result.result);
       void emitCanonicalEvent(
@@ -257,7 +276,10 @@ export async function runAgentTurn(
       );
       apiMessages.push(buildToolResultMessage({ name: tc.name }, result, 'text'));
     }
+    if (aborted) break;
   }
+
+  if (aborted && !finalReply) finalReply = '（已停止）';
 
   if (!finalReply) finalReply = `（已完成 ${stepCount} 个工具步骤，但模型未给出最终总结）`;
 
@@ -314,10 +336,11 @@ export async function runAgentTurn(
     'task.completed',
     { type: 'agent', id: sessionId },
     { type: 'Session', id: sessionId },
-    { text: finalReply, tools: toolSteps, steps: stepCount, model },
+    { text: finalReply, tools: toolSteps, steps: stepCount, model, ...(aborted ? { aborted: true } : {}) },
     { file: eventFileFor(h.dataDir(), sessionId), context: { sessionId, turn: stepCount } },
   );
 
+  if (aborted) return { text: finalReply, intent: 'CONFIRM', aborted: true, tools: toolSteps, steps: stepCount };
   return { text: finalReply, intent: 'ACT', tools: toolSteps, steps: stepCount };
   } finally {
     finishTurn(sessionId, ac);
