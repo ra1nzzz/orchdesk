@@ -40,6 +40,16 @@ async function run() {
 
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
+  // 渲染层未捕获异常立即 fail-fast：固定 sleep 模式让 JS 报错只在对应断言失败时间接
+  // 可见，CI 上表现为「慢机器 flaky」而非真实错误。
+  page.on('pageerror', (err) => { console.error('  ❌ [pageerror]', err.message); process.exitCode = 1; });
+  // 条件等待替代固定 sleep：等 DOM 到达目标态，慢机器不靠拉长 sleep 碰运气。
+  async function waitForCount(sel, n, timeout = 6000) {
+    await page.waitForFunction(([a, b]) => document.querySelectorAll(a).length >= b, [sel, n], { timeout });
+  }
+  async function waitForVisible(sel, timeout = 6000) {
+    await page.waitForFunction((a) => !!document.querySelector(a), sel, { timeout });
+  }
 
   // 拦截 fetch/XHR 以模拟 bridge
   await page.addInitScript(() => {
@@ -586,7 +596,7 @@ async function run() {
   await assert(await themeInNav.count() > 0, '主题切换仍有入口（左下角导航底部）');
 
   // 需求3：浏览器 / 终端 的文字按钮已从标题栏下移为状态栏右下角图标。
-  await page.waitForTimeout(600);   // 等 init 的 Promise.allSettled 建完图标区
+  await waitForVisible('#sbActions .sb-icon'); // 等 init 的 Promise.allSettled 建完图标区
   const sbIcons = page.locator('#sbActions .sb-icon');
   await assert(await sbIcons.count() === 2, '状态栏右下角有浏览器 / 终端两个图标');
 
@@ -595,7 +605,7 @@ async function run() {
   // ================================================================
   console.log('📋 测试组 2：主区渲染');
 
-  await page.waitForTimeout(300);
+  await waitForVisible('.home-screen');
   const homeScreen = page.locator('.home-screen');
   await assert(await homeScreen.count() > 0, 'home-screen 欢迎页存在');
 
@@ -619,9 +629,7 @@ async function run() {
 
   await homeComposer.fill('这是E2E测试消息');
   await homeSendBtn.click();
-  await page.waitForTimeout(1500);
-
-  // 验证：消息出现在 DOM 中 — 轮询等待
+  // 验证：消息出现在 DOM 中 — 直接从轮询等待开始（不再前置固定 sleep）
   let userCount = 0;
   const startTime = Date.now();
   while (Date.now() - startTime < 10000) {
@@ -648,7 +656,7 @@ async function run() {
   await assert(firstUserMsgText.includes('E2E测试消息'), '消息文本："' + (firstUserMsgText || '').slice(0, 80) + '"');
 
   // 验证：有 agent 回复
-  await page.waitForTimeout(1000);
+  await waitForCount('.msg.agent', 1);
   const agentCount = await page.locator('.msg.agent').count();
   await assert(agentCount >= 1, 'Agent 回复已出现（count=' + agentCount + ')');
 
@@ -718,11 +726,11 @@ async function run() {
 
     // ① p1 已绑定 D:/Code/Demo —— 传参必须是该路径
     await clearMenu();
-    await page.waitForTimeout(120);
+    await waitForVisible('.proj-head .opbtn[data-action="proj-menu"][data-id="p1"]');
     const p1Btn = page.locator('.proj-head .opbtn[data-action="proj-menu"][data-id="p1"]');
     await assert(await p1Btn.count() > 0, 'BUG-022 项目 p1 的 ··· 菜单按钮存在');
     await p1Btn.first().click();
-    await page.waitForTimeout(250);
+    await waitForVisible('.pop [data-id="open"]');
     const p1Open = page.locator('.pop [data-id="open"]');
     if (await p1Open.count() > 0) {
       await p1Open.first().click();
@@ -737,11 +745,11 @@ async function run() {
 
     // ② p2 未绑定 —— 不得调用 bridge，且必须明确提示（静默回退数据目录正是本 BUG 的形态）
     await clearMenu();
-    await page.waitForTimeout(150);
+    await waitForVisible('.proj-head .opbtn[data-action="proj-menu"][data-id="p2"]');
     const p2Btn = page.locator('.proj-head .opbtn[data-action="proj-menu"][data-id="p2"]');
     await assert(await p2Btn.count() > 0, 'BUG-022 未绑定项目 p2 的 ··· 菜单按钮存在');
     await p2Btn.first().click();
-    await page.waitForTimeout(250);
+    await waitForVisible('.pop [data-id="open"]');
     const p2Open = page.locator('.pop [data-id="open"]');
     if (await p2Open.count() > 0) {
       await p2Open.first().click();
@@ -830,7 +838,7 @@ async function run() {
     container.innerHTML = '<div class="msg user"><div class="avatar">我</div><div class="body"><div class="meta"><b>你</b><span>刚刚</span></div><div>旧格式消息 r/x</div></div></div><div class="msg agent"><div class="avatar">AI</div><div class="body"><div class="meta"><b>OrchDesk</b><span>刚刚</span></div><div>新格式回复 role/text</div></div></div>';
     document.body.appendChild(container);
   });
-  await page.waitForTimeout(200);
+  await waitForVisible('[data-test="compat"] .msg');
   const compatMsgs = page.locator('[data-test="compat"] .msg');
   const compatCount = await compatMsgs.count();
   await assert(compatCount === 2, '消息渲染兼容 m.r/m.role 和 m.x/m.text（count=' + compatCount + '）');
@@ -892,7 +900,7 @@ async function run() {
   await page.locator('#grant-pattern').fill('D:/work/*');
   await page.locator('#grant-scope').selectOption('permanent');
   await page.locator('[data-action="grant-add"]').click();
-  await page.waitForTimeout(500);
+  await waitForVisible('.grant-list .gr-item');
 
   const grantItems = page.locator('.grant-list .gr-item');
   await assert(await grantItems.count() === 1, '添加后白名单列表有 1 条（count=' + await grantItems.count() + ')');
@@ -1132,7 +1140,7 @@ async function run() {
 
   // 批量晋升：回 worker 域，把剩下 1 条一次性升走
   await page.locator('[data-action="mem-domain"][data-domain="worker"]').click();
-  await page.waitForTimeout(700);
+  await waitForVisible('[data-action="mem-promote-worker"]');
   const batchBtn = page.locator('[data-action="mem-promote-worker"]');
   await assert(await batchBtn.count() === 1, 'worker 域有「批量晋升本域」按钮');
   await batchBtn.click();
@@ -1230,7 +1238,7 @@ async function run() {
 
   // 展开飞书配置：字段渲染（secret 用 password、text 用 text）
   await page.locator('[data-action="conn-cfg"][data-id="feishu"]').first().click();
-  await page.waitForTimeout(500);
+  await waitForVisible('#connf-feishu-appId');
   const appIdInput = page.locator('#connf-feishu-appId');
   const secretInput = page.locator('#connf-feishu-appSecret');
   await assert(await appIdInput.count() === 1 && await secretInput.count() === 1, '展开后字段输入框渲染');
@@ -1306,7 +1314,7 @@ async function run() {
   await page.locator('[data-action="nav"][data-id="session"]').first().click();
   await page.waitForTimeout(300);
   await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
-  await page.waitForTimeout(700);
+  await waitForVisible('[data-action="conn-discover"][data-id="github"]');
   const discBtn = page.locator('[data-action="conn-discover"][data-id="github"]').first();
   await assert(await discBtn.count() === 1, 'github 连接器有「自动发现」按钮');
   // 只对 github 显示自动发现（其它无本地 CLI 登录态，不展示假按钮）
@@ -1331,7 +1339,7 @@ async function run() {
   // ① 安装按钮状态：mock 已安装 guanji + aihot（种子），guanji 行应显「已安装 + 重装」
   //    （不能拿 /已安装/ 匹配全文 —— 会撞到下方「已安装（N）」清单标题，假阳性）
   await page.evaluate(() => document.querySelector('#psec-skills')?.scrollIntoView());
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(400);
   const reinstallBtn = page.locator('tr[data-skill-search*="guanji"] button:has-text("重装")');
   await assert(await reinstallBtn.count() === 1, '已安装技能（guanji）行显示「重装」按钮（状态已反映）');
   const rowBadge = await page.locator('tr[data-skill-search*="guanji"] .badge.ok:has-text("已安装")').count();
@@ -1399,7 +1407,7 @@ async function run() {
   // 技能市场搜索 + 已安装清单（插件页底部）
   // 滚动到含 #skillSearch 的技能市场卡
   await page.evaluate(() => document.querySelector('#skillSearch')?.scrollIntoView());
-  await page.waitForTimeout(300);
+  await waitForVisible('#skillSearch');
   const skillSearch = page.locator('#skillSearch');
   await assert(await skillSearch.count() === 1, '技能市场有搜索框 #skillSearch');
   // 搜索 guanji：只命中 slug 含 guanji 的行
