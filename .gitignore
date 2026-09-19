@@ -29,3 +29,5 @@ build-log.txt
 apps/desktop/build/trace-token.local.txt
 apps/desktop/build/trace-key.local
 apps/desktop/build/trace-token.enc.json
+_tmp_*
+.git-broken-*
