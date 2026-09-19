@@ -276,6 +276,82 @@ check('提示词给出 <tool:> 兜底格式示例', () => {
 });
 
 // ---------------------------------------------------------------------------
+console.log('== 7. 安全修复断言（B-1 / B-2 / M-5）==');
+
+// B-1：渲染层（{r,t,x}）与主进程（{role,text}）消息双轨 → 读侧归一化
+check('normalizeHistory：渲染层 r/x schema 与主进程 role/text schema 都归一为 ApiMessage', () => {
+  const out = rt.normalizeHistory([
+    { r: 'user', t: '10:00', x: '第一条（渲染层 schema）' },
+    { role: 'assistant', text: '回复（主进程 schema）', tools: [] },
+    { r: 'agent', x: 'agent 别名也应映射为 assistant' },
+    { role: 'tool', text: '工具步骤消息不回灌模型' },
+    { r: 'user', t: '10:01' }, // 无正文
+  ]);
+  assert.strictEqual(out.length, 3, '应归一 3 条（tool/空正文被过滤），实际 ' + out.length);
+  assert.deepStrictEqual(out[0], { role: 'user', content: '第一条（渲染层 schema）' });
+  assert.deepStrictEqual(out[1], { role: 'assistant', content: '回复（主进程 schema）' });
+  assert.deepStrictEqual(out[2], { role: 'assistant', content: 'agent 别名也应映射为 assistant' });
+});
+check('normalizeHistory：limit 只保留最近 N 条', () => {
+  const out = rt.normalizeHistory([
+    { role: 'user', text: '第1条' },
+    { role: 'assistant', text: '第2条' },
+    { role: 'user', text: '第3条' },
+  ], 2);
+  assert.strictEqual(out.length, 2, '应只保留 2 条');
+  assert.strictEqual(out[0].content, '第2条');
+  assert.strictEqual(out[1].content, '第3条');
+});
+check('normalizeHistory：undefined / 空数组安全', () => {
+  assert.deepStrictEqual(rt.normalizeHistory(undefined), []);
+  assert.deepStrictEqual(rt.normalizeHistory([]), []);
+});
+
+// B-2：shell 元字符检测（命令白名单唯一结构绕过入口）
+check('hasShellMetachars：拼接类元字符全部命中', () => {
+  for (const cmd of [
+    'git log && cmd /c calc',
+    'echo hi | findstr x',
+    'ls; rm -rf /',
+    'echo $(whoami)',
+    'echo `whoami`',
+    'echo a > out.txt',
+    'echo a < in.txt',
+    'echo a\nrm -rf /',
+  ]) {
+    assert.strictEqual(rt.hasShellMetachars(cmd), true, '应判定含元字符: ' + JSON.stringify(cmd));
+  }
+});
+check('hasShellMetachars：正常命令（含引号/参数/路径）不误伤', () => {
+  for (const cmd of [
+    'git status',
+    'git log --format=%H',
+    'npm run build',
+    'dir "D:\\Code\\OrchDesk"',
+    'find . -name "*.ts"',
+    'node --version',
+    '',
+  ]) {
+    assert.strictEqual(rt.hasShellMetachars(cmd), false, '不应误伤: ' + JSON.stringify(cmd));
+  }
+});
+check('ALLOWED_COMMANDS 不含万能 shell/解释器（B-2 白名单收口）', () => {
+  for (const bad of ['cmd', 'powershell', 'pwsh', 'node', 'python', 'python3', 'pip', 'npx']) {
+    assert.ok(!rt.ALLOWED_COMMANDS.includes(bad), `白名单不应含 ${bad}（可执行任意代码）`);
+  }
+  for (const keep of ['git', 'npm', 'pnpm', 'ls', 'dir', 'cat', 'curl']) {
+    assert.ok(rt.ALLOWED_COMMANDS.includes(keep), `白名单应保留 ${keep}`);
+  }
+});
+
+// M-5：迭代上限常量单源
+check('MAX_TOOL_ITERATIONS_CAP/DEFAULT 为单源常量且取值合理', () => {
+  assert.strictEqual(rt.MAX_TOOL_ITERATIONS_CAP, 500);
+  assert.strictEqual(rt.MAX_TOOL_ITERATIONS_DEFAULT, 200);
+  assert.ok(rt.MAX_TOOL_ITERATIONS_DEFAULT <= rt.MAX_TOOL_ITERATIONS_CAP, '默认值不得超上限');
+});
+
+// ---------------------------------------------------------------------------
 console.log('\n' + log.join('\n'));
 console.log(`\n结果: ${passed} 通过, ${failed} 失败, 共 ${passed + failed} 项\n`);
 

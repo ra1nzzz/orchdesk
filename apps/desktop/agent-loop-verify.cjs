@@ -358,7 +358,120 @@ const { check, summary } = createChecker();
       assert.strictEqual(out.intent, 'CONFIRM');
     });
     global.fetch = savedFetch;
+
+    // B-1 / M-8：中止回合也必须把 user 消息与「（已停止）」落盘 + 入事件流——
+    // 修复前 abort 在循环内提前 return，磁盘上无迹可查。
+    await check('中止回合仍落盘（user + （已停止）不丢失）', () => {
+      const data = JSON.parse(fs.readFileSync(path.join(HOME, 'orchdesk-sessions.json'), 'utf-8'));
+      const s = data['s-abort'];
+      assert.ok(s && Array.isArray(s.msgs), '会话应已落盘');
+      const texts = s.msgs.map((m) => String(m.text || ''));
+      assert.ok(texts.includes('请停'), 'user 原文应落盘，实际: ' + JSON.stringify(texts));
+      assert.ok(texts.some((t) => t.includes('已停止')), '应有「（已停止）」assistant 记录，实际: ' + JSON.stringify(texts));
+    });
   }
+
+  console.log('== G. B-1 消息结构双轨归一化（渲染层 r/x schema）==');
+
+  // 渲染层 doSend 写 {r:'user',t,x}，persist-sessions 整表替换主进程 store。
+  // 修复前 agent-turn 只认 role/text → 第二轮起历史全丢（探针实证：下发仅 [system,user]）。
+  requests = [];
+  scenario = [chatReply('知道了', undefined)];
+  await ipcHandlers.get('orchdesk:persist-sessions')(null, [
+    { id: 's-rt', pid: 'p1', title: '渲染层 schema', msgs: [
+      { r: 'user', t: '09:00', x: '第一轮问题（r/x schema）' },
+      { r: 'agent', t: '09:01', x: '第一轮回答' },
+      { role: 'user', t: '09:02', text: '第二轮问题（role/text schema）' },
+    ] },
+  ]);
+  out = await runAgentTurn(null, 's-rt', '第三轮问题', {});
+  await check('渲染层 r/x 历史进入第二轮模型请求（B-1）', () => {
+    const msgs = requests[0].body.messages.map((m) => m.content);
+    assert.ok(msgs.includes('第一轮问题（r/x schema）'), 'r/x user 历史应下发，实际: ' + JSON.stringify(msgs));
+    assert.ok(msgs.includes('第一轮回答'), 'r/x agent 历史应映射 assistant 下发');
+    assert.ok(msgs.includes('第二轮问题（role/text schema）'), 'role/text 历史仍应下发');
+    assert.ok(msgs.includes('第三轮问题'), '本轮新消息应下发');
+  });
+
+  console.log('== H. M-1 空回复不毒化原生工具能力 ==');
+
+  // 网关对每个 attempt 都返回 200 空 content（finish=length/内容过滤类，与工具协议无关）。
+  // 修复前这会把 provider+model 标记为「不吃工具」，整个进程生命周期文本兜底化。
+  requests = [];
+  scenario = [chatReply(''), chatReply(''), chatReply('空回复后拿到内容')];
+  out = await runAgentTurn(null, 's-empty', '空回复场景', {});
+  assert.ok(out.text.includes('空回复后拿到内容'), '应拿到总结，实际: ' + out.text);
+
+  requests = [];
+  scenario = [chatReply('下一轮', undefined)];
+  out = await runAgentTurn(null, 's-empty', '下一轮提问', {});
+  await check('空 content 不置 toolsRejected（下一轮回合仍下发原生工具定义）', () => {
+    assert.ok(Array.isArray(requests[0].body.tools) && requests[0].body.tools.length > 0,
+      '下一轮回合应仍下发 tools，实际: ' + JSON.stringify(requests[0].body.tools || null));
+  });
+
+  // 信道对照：工具协议被逐级拒绝（att1/att2 均 400 且 body 提及 tool）→ att3 无 tools 成功 →
+  // 该 provider+model  memo 生效，后续回合转文本兜底（M-1 memo 收敛）。
+  requests = [];
+  const savedFetch2 = global.fetch;
+  let no = 0;
+  global.fetch = async (url, opts) => {
+    no++;
+    if (no === 1) return { ok: false, status: 400, text: async () => 'unsupported parameter: tool_choice', json: async () => ({}) };
+    if (no === 2) return { ok: false, status: 400, text: async () => 'tools not supported by this gateway', json: async () => ({}) };
+    return savedFetch2(url, opts);
+  };
+  scenario = [chatReply('明确拒绝工具后的文本回复', undefined)];
+  out = await runAgentTurn(null, 's-reject', '工具协议被拒', {});
+  await check('协议级 400 仍启用文本兜底（M-1 只收窄空回复，不放松真拒绝）', () => {
+    assert.ok(out.text.includes('明确拒绝工具后的文本回复'), '实际: ' + out.text);
+  });
+  requests = [];
+  scenario = [chatReply('再下一轮', undefined)];
+  await runAgentTurn(null, 's-reject', '再问', {});
+  await check('协议级拒绝后下一轮不下发 tools（memo 生效）', () => {
+    assert.ok(!requests[0].body.tools, '已被协议拒绝的 provider 不应再下发 tools');
+  });
+  // M-1 memo 有 TTL + models-save 失效：保存模型配置后 memo 清空，下一轮恢复原生协议（防永久毒化）。
+  requests = [];
+  scenario = [chatReply('恢复后', undefined)];
+  await ipcHandlers.get('orchdesk:models-save')(null, {
+    providers: [{ id: 'p1', name: '测试网关', type: 'openai-compatible', baseUrl: 'http://127.0.0.1:9/v1', models: ['test-model'] }],
+    defaultProvider: 'p1', defaultModel: 'test-model',
+  });
+  out = await runAgentTurn(null, 's-reject', '再问一次', {});
+  await check('models-save 后 memo 失效，下一轮恢复下发原生 tools', () => {
+    assert.ok(Array.isArray(requests[0].body.tools) && requests[0].body.tools.length > 0,
+      '保存配置后应重新尝试原生工具协议');
+  });
+  global.fetch = savedFetch2;
+
+  console.log('== I. M-8 signal 下穿 executeTool ==');
+
+  // abort 时 shell 子进程要被 kill、审批要取消：executeTool 收得到 signal 是前置条件。
+  // 用 tool-execute 后门无法传 ctx，这里经真实回合链路：工具执行中 abort → 回合返回已停止。
+  requests = [];
+  scenario = [chatReply('', [
+    { id: 'call_x', type: 'function', function: { name: 'shell_command', arguments: JSON.stringify({ command: 'ping -n 5 127.0.0.1' }) } },
+  ])];
+  global.fetch = async (url, opts) => {
+    await new Promise((_, reject) => {
+      const onAbort = () => { const e = new Error('aborted'); e.name = 'AbortError'; reject(e); };
+      if (opts && opts.signal) {
+        if (opts.signal.aborted) { onAbort(); return; }
+        opts.signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  };
+  const pending2 = runAgentTurn(null, 's-signal', '跑个长命令', {});
+  await new Promise((r) => setTimeout(r, 60));
+  await abortTurn(null, 's-signal');
+  out = await pending2;
+  await check('工具执行期间 abort：回合返回已停止（signal 已下穿工具链）', () => {
+    assert.strictEqual(out.aborted, true);
+    assert.ok(String(out.text).includes('已停止'), '实际: ' + out.text);
+  });
+  global.fetch = savedFetch2;
 
   // -------------------------------------------------------------------------
   const ok = summary();

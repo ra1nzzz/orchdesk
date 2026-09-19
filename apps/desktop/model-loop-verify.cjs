@@ -544,26 +544,40 @@ function lastAssistant(sessionId) {
     return chat('软拒绝兜底完成', undefined);
   };
   out = await runAgentTurn(null, 's-m', '列目录', {});
+  // M2 要引用本回合最后一个请求——M1b 会追加 calls，先固定边界。
+  const sMCallsEnd = calls.length;
 
-  await check('M1 带 tools 时 200 空内容 → 逐级降级到不带 tools', () => {
-    assert.strictEqual(calls.length, 4, '应恰好 4 次请求（3 次降级 + 1 次免重试续轮），实际: ' + calls.length);
+  await check('M1 带 tools 时 200 空内容 → 调用内降级 + 轮内软兜底（不写跨会话毒化）', () => {
+    // 3 次降级（tools+choice → tools → 无 tools）+ 第 4 次为工具执行后的续轮：
+    // 轮内软降级标志使其不再带 tools（省无效重试），但**不写 memo**（M-1）。
+    assert.strictEqual(calls.length, 4, '应恰好 4 次请求（3 次降级 + 1 次轮内软兜底续轮），实际: ' + calls.length);
     assert.strictEqual(calls[0].body.tool_choice, 'auto', '第 1 次应带 tool_choice:auto');
     assert.ok(Array.isArray(calls[0].body.tools), '第 1 次应带 tools');
     assert.ok(Array.isArray(calls[1].body.tools), '第 2 次仍带 tools');
     assert.ok(!('tool_choice' in calls[1].body), '第 2 次应去掉 tool_choice');
     assert.ok(!('tools' in calls[2].body), '第 3 次应完全去掉 tools');
-    assert.ok(!('tools' in calls[3].body), '第 4 次因 toolsRejected 也不再带 tools');
+    assert.ok(!('tools' in calls[3].body), '第 4 次因轮内软兜底不再带 tools');
+  });
+  // M-1（2026-09 修复）：空内容不再置 toolsRejected——200 空内容可能是 finish=length /
+  // 内容过滤 / 网关抖动，与工具协议无关。只生效于本回合（软兜底），不进跨会话 memo。
+  await check('M1b 空内容不毒化：下一回合首次请求仍尝试原生 tools', async () => {
+    const before = calls.length;
+    responder = ({ body }) => (body.tools
+      ? json(200, { choices: [{ message: { content: '' }, finish_reason: 'stop' }] })
+      : chat('二次降级内容', undefined));
+    await runAgentTurn(null, 's-m1b', '再列一次', {});
+    assert.ok(Array.isArray(calls[before].body.tools), '修复后新回合首次请求仍应带 tools');
   });
   await check('M2 降级后走文本兜底仍能完成任务', () => {
     assert.strictEqual(out.text, '软拒绝兜底完成', '实际: ' + out.text);
     const a = lastAssistant('s-m');
     assert.ok((a.tools || []).some((t) => t.n === 'file_list'), '应通过文本兜底执行 file_list，实际: ' + JSON.stringify(a.tools));
-    const msgs = calls[calls.length - 1].body.messages;
+    const msgs = calls[sMCallsEnd - 1].body.messages;
     assert.ok(msgs.some((m) => m.role === 'user' && String(m.content).includes('[工具 file_list 执行结果]')),
       '文本兜底模式下工具结果应以 user 角色回传');
   });
 
-  await check('M3 软拒绝记忆跨会话生效：同 provider+model 第二轮直接不发 tools', async () => {
+  await check('M3 空内容软拒绝不跨会话毒化（同 provider+model 下一轮仍尝试 tools）', async () => {
     reset();
     softNoToolsRound = 0;
     responder = ({ body }) => {
@@ -572,13 +586,12 @@ function lastAssistant(sessionId) {
       if (softNoToolsRound === 1) {
         return chat(`<tool:file_list>${JSON.stringify({ path: HOME })}</tool>`, undefined);
       }
-      return chat('跨轮记忆完成', undefined);
+      return chat('跨轮不毒化完成', undefined);
     };
     out = await runAgentTurn(null, 's-m2', '再列目录', {});
-    // 第一轮已记忆 toolsRejected，本轮只应 2 次请求（工具轮 + 总结轮），且首次即无 tools。
-    assert.strictEqual(calls.length, 2, '记忆命中后应只发 2 次请求，实际: ' + calls.length);
-    assert.ok(!('tools' in calls[0].body), '首轮请求应直接不带 tools，实际 keys: ' + Object.keys(calls[0].body).join(','));
-    assert.strictEqual(out.text, '跨轮记忆完成', '实际: ' + out.text);
+    // M-1 修复后：空内容软拒绝不进 memo，本轮首请求仍带 tools（调用内降级后完成）。
+    assert.ok(Array.isArray(calls[0].body.tools), '首轮请求应仍尝试 tools（不再被上一会话毒化），实际 keys: ' + Object.keys(calls[0].body).join(','));
+    assert.strictEqual(out.text, '跨轮不毒化完成', '实际: ' + out.text);
   });
 
   // =========================================================================

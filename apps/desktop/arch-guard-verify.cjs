@@ -307,6 +307,57 @@ function scanRule(rule, code, fileName) {
     assert(dead.length === 0, '渲染层调用了 preload 不存在的方法：' + dead.join(', '));
   });
 
+  /* ---------------- M-10：preload invoke 的 channel 串必须有真实 handler ---------------- */
+
+  await check('R9 preload invoke 的 channel 在主进程必须有 handler（防拼写错误整桥失灵）', () => {
+    const preloadPath = path.join(APP_DIR, 'preload.ts');
+    assert(fs.existsSync(preloadPath), '找不到 preload.ts');
+    const preloadSrc = stripComments(read(preloadPath));
+    const invoked = new Set();
+    const invokeRe = /invoke\(\s*['"](orchdesk:[a-z0-9-]+)['"]/g;
+    let m;
+    while ((m = invokeRe.exec(preloadSrc))) invoked.add(m[1]);
+    assert(invoked.size > 20, `preload invoke channel 仅 ${invoked.size} 个（规则空转）`);
+
+    const handled = new Set();
+    const desktopTs = fs.readdirSync(APP_DIR).filter((f) => f.endsWith('.ts')).map((f) => path.join(APP_DIR, f));
+    assert(desktopTs.length > 10, `apps/desktop 顶层 .ts 仅 ${desktopTs.length} 个（规则空转）`);
+    for (const abs of desktopTs) {
+      const src = stripComments(read(abs));
+      // ipc-* 模块经注入的 ipc 参数注册（ipc.handle(...)），main.ts 直连 ipcMain.handle(...)。
+      const hRe = /\b(?:ipcMain|ipc)\.(?:handle|on)\(\s*['"](orchdesk:[a-z0-9-]+)['"]/g;
+      let h;
+      while ((h = hRe.exec(src))) handled.add(h[1]);
+    }
+    assert(handled.size > 50, `主进程 handler 仅 ${handled.size} 个（规则空转）`);
+
+    const dangling = [...invoked].filter((c) => !handled.has(c)).sort();
+    assert(dangling.length === 0, 'preload invoke 了不存在的 channel（拼写错误会让生产整桥失灵）：' + dangling.join(', '));
+  });
+
+  /* ---------------- M-5：maxToolIterations 上限常量单源，防三处漂移 ---------------- */
+
+  await check('R10 maxToolIterations 上限单源（agent-runtime 常量 ↔ 渲染层滑块 ↔ 钳制点）', () => {
+    const arSrc = stripComments(read(path.join(APP_DIR, 'agent-runtime.ts')));
+    const capMatch = arSrc.match(/MAX_TOOL_ITERATIONS_CAP\s*=\s*(\d+)/);
+    assert(capMatch, 'agent-runtime.ts 未定义 MAX_TOOL_ITERATIONS_CAP');
+    const cap = Number(capMatch[1]);
+    assert(cap >= 100 && cap <= 1000, `MAX_TOOL_ITERATIONS_CAP=${cap} 超出合理范围`);
+
+    // 渲染层滑块 max 必须等于 cap（所见即所得）。
+    const appSrc = stripComments(read(path.join(APP_DIR, 'renderer', 'app.js')));
+    const sliderMatch = appSrc.match(/id=["']max-iter-pick["'][^>]*\bmax=["'](\d+)["']/);
+    assert(sliderMatch, 'renderer app.js 未找到 max-iter-pick 滑块');
+    assert(Number(sliderMatch[1]) === cap, `渲染层滑块 max=${sliderMatch[1]} 与 MAX_TOOL_ITERATIONS_CAP=${cap} 不一致`);
+
+    // 钳制点必须引用常量而非裸数字。
+    for (const f of ['main.ts', 'agent-turn.ts']) {
+      const src = stripComments(read(path.join(APP_DIR, f)));
+      const stray = src.match(/Math\.min\(\s*\d{3}\s*,\s*incoming\.maxToolIterations|Math\.min\(\s*\d{3}\s*,\s*modelCfg\.maxToolIterations/g);
+      assert(!stray, `${f} 存在裸数字钳制（应引用 MAX_TOOL_ITERATIONS_CAP）：${stray && stray.join(', ')}`);
+    }
+  });
+
   /* -------------------- 元规则：防规则静默失效 -------------------- */
 
   console.log('== 架构守护：元规则自检（防规则失效）==');

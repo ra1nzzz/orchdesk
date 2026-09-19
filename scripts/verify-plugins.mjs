@@ -237,6 +237,10 @@ function tick(n = 3) {
       [{ tool: 'file_write', pattern: '', scope: 'permanent' }, '缺少 pattern'],
       [{ tool: 'file_write', pattern: '*', scope: 'forever' }, '非法 scope'],
       [{ tool: 'file_write', pattern: '*', scope: 'session' }, '会话级缺 sessionId'],
+      // B-4（安全审查）：永久粒度不允许通配全部工具/全部目标——一次点击不该等于永久免审一切
+      [{ tool: '*', pattern: '*', scope: 'permanent' }, '永久全放行规则'],
+      [{ tool: 'file_write', pattern: '*', scope: 'permanent' }, '永久 + 全目标'],
+      [{ tool: '*', pattern: 'D:/work/*', scope: 'permanent' }, '永久 + 全工具'],
     ];
     for (const [input, why] of cases) {
       const r = authz.grant(input);
@@ -268,16 +272,19 @@ function tick(n = 3) {
   await check('白名单：会话级规则只在本会话生效；永久级跨会话', () => {
     authz.revokeAll();
     authz.grant({ tool: 'shell_command', pattern: '*', scope: 'session', sessionId: 'sess-A' });
-    authz.grant({ tool: 'web_fetch', pattern: '*', scope: 'permanent' });
+    authz.grant({ tool: 'web_fetch', pattern: 'https://*', scope: 'permanent' });
     assert(authz.matchGrant({ toolName: 'shell_command', target: 'ls', sessionId: 'sess-A' }) !== null, '本会话应命中');
     assert(authz.matchGrant({ toolName: 'shell_command', target: 'ls', sessionId: 'sess-B' }) === null, '别的会话不应命中');
     assert(authz.matchGrant({ toolName: 'web_fetch', target: 'https://x.dev', sessionId: 'sess-B' }) !== null, '永久级应跨会话命中');
+    // B-4：shell_command 目标含 shell 元字符时不命中任何规则（防命令拼接搭车免审）
+    assert(authz.matchGrant({ toolName: 'shell_command', target: 'git log && cmd /c calc', sessionId: 'sess-A' }) === null,
+      '含元字符的拼接命令不应被白名单放行');
   });
 
   await check('白名单：撤销单条 / 全部撤销，且入审计', () => {
     authz.revokeAll();
-    const a = authz.grant({ tool: 'file_write', pattern: '*', scope: 'permanent' });
-    const b = authz.grant({ tool: 'shell_command', pattern: '*', scope: 'permanent' });
+    const a = authz.grant({ tool: 'file_write', pattern: 'D:/work/*', scope: 'permanent' });
+    const b = authz.grant({ tool: 'shell_command', pattern: 'git *', scope: 'permanent' });
     assert(authz.listGrants().length === 2, '应有 2 条');
     assert(authz.revoke(a.rule.id) === true, '撤销应命中');
     assert(authz.revoke(a.rule.id) === false, '重复撤销应返回 false');

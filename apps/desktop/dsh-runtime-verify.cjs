@@ -200,14 +200,16 @@ const { check, summary } = createChecker();
       '未知模式应降级为 read-only');
   });
 
-  await check('网络域名白名单（PRD FR-8）：默认不限、配置后精确/后缀命中、非法入参 fail-safe', () => {
+  await check('网络域名白名单（PRD FR-8）：默认全拒（fail-closed）、显式 * 放开、精确/后缀命中、非法入参 fail-safe', () => {
     const hs = require('./dist/host-services.js');
-    assert.deepStrictEqual(hs.normalizeNetworkAllow(null), ['*'], '非法值应回落 ["*"]');
+    assert.deepStrictEqual(hs.normalizeNetworkAllow(null), [], '非法值应回落 []（全拒，不再悄悄放开全网）');
     assert.deepStrictEqual(hs.normalizeNetworkAllow(['  ', 'GITHUB.com ', 'bad/x']), ['github.com'],
       '应去空白/小写/丢弃非法项');
     const sp = require('./dist/dsh-runtime.js').getService('sandboxPolicy');
+    sp.setNetworkAllow([]);
+    assert.strictEqual(sp.isDomainAllowed('https://example.com/x'), false, '空白名单应全拒');
     sp.setNetworkAllow(['*']);
-    assert.strictEqual(sp.isDomainAllowed('https://example.com/x'), true, '默认 * 应放行');
+    assert.strictEqual(sp.isDomainAllowed('https://example.com/x'), true, '显式 * 应放行');
     sp.setNetworkAllow(['github.com', '*.deepseek.com']);
     assert.strictEqual(sp.isDomainAllowed('https://github.com/a/b'), true, '精确域名应放行');
     assert.strictEqual(sp.isDomainAllowed('https://api.github.com/a'), true, '子域应放行');
@@ -215,6 +217,20 @@ const { check, summary } = createChecker();
     assert.strictEqual(sp.isDomainAllowed('https://evil.com'), false, '未列域名应拒绝');
     assert.strictEqual(sp.isDomainAllowed('not-a-url'), false, '无法解析应拒绝（fail-closed）');
     assert.deepStrictEqual(sp.getNetworkAllow(), ['github.com', '*.deepseek.com'], '配置应可读回');
+
+    // B-2：SSRF 防护与白名单独立生效——显式 '*' 放开域名也不放过内网/元数据端点
+    sp.setNetworkAllow(['*']);
+    assert.strictEqual(hs.isBlockedHost('http://169.254.169.254/latest/meta-data/'), true, '云元数据端点应拒');
+    assert.strictEqual(hs.isBlockedHost('http://127.0.0.1:8080/'), true, '回环应拒');
+    assert.strictEqual(hs.isBlockedHost('http://[::1]/'), true, 'IPv6 回环应拒');
+    assert.strictEqual(hs.isBlockedHost('http://10.0.0.5/'), true, '私网 10/8 应拒');
+    assert.strictEqual(hs.isBlockedHost('http://192.168.1.1/'), true, '私网 192.168/16 应拒');
+    assert.strictEqual(hs.isBlockedHost('http://172.16.0.9/'), true, '私网 172.16/12 应拒');
+    assert.strictEqual(hs.isBlockedHost('http://100.64.0.1/'), true, 'CGNAT 应拒');
+    assert.strictEqual(hs.isBlockedHost('http://metadata.google.internal/'), true, '元数据主机名应拒');
+    assert.strictEqual(hs.isBlockedHost('http://localhost/'), true, 'localhost 应拒');
+    assert.strictEqual(hs.isBlockedHost('https://github.com/'), false, '公网域名应放行');
+    assert.strictEqual(hs.isBlockedHost('not-a-url'), true, '无法解析应拒（fail-closed）');
     sp.setNetworkAllow(['*']); // 复位，避免影响后续用例
   });
 
