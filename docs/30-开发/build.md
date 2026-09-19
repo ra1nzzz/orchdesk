@@ -2,7 +2,7 @@
 id: orch-build-001
 title: 构建链路（build）
 status: canonical
-updated: 2026-08-18
+updated: 2026-09-20
 ---
 
 # OrchDesk 构建链路
@@ -70,6 +70,23 @@ pnpm --filter @orchdesk/desktop run start   # electron .
 ```
 
 `dsh-desktop` bundle 以 `dsh-base` 为第一层，通过 `cordis.patch.yml` 的 `insert` 叠加桌面壳 rows；profile 的 `dsh.profile.bundles` 顺序：`dsh-base → dsh-desktop → 用户/profile patch`。
+
+## 4b. 打包链路已知坑（2026-09-20 实跑记录）
+
+- **electron-builder 的包管理器检测怪癖**：app 目录（`apps/desktop/`）一旦存在
+  `package-lock.json`，文件检测在同一目录同时命中 npm 与（根的）pnpm 生态，收集器
+  回退到「process environment」→ 多数本机 shell 的 `npm_config_user_agent` 指向 npm →
+  用 `npm list` 收集依赖树；而 `vendor-dsh` 物化进 `node_modules/@deepseek-ai/*` 的
+  目录对 npm 是 extraneous（`ELSPROBLEMS`，stderr 污染输出）→ `No JSON content found in
+  output`，打包中断。**对策：项目由 pnpm 统一管理，`apps/desktop/package-lock.json` 已
+  gitignore（曾误入库又被 a96a1e4 移除、c7f0659 再次误入，2026-09-20 第三次清理并加
+  规则防护）；打包统一走 `pnpm --filter @orchdesk/desktop run dist:portable`（pnpm 的
+  UA 让收集器走 pnpm 路径，读取根 `node_modules/.pnpm`，无 extraneous 问题）。**
+- 必须走 `scripts/vendor-dsh.cjs`（`dist:*` 脚本已内嵌）：asar 内插件 ESM 与
+  `@deepseek-ai/*` 依赖都靠它物化成真实目录；漏跑 = arch-guard R6 红。
+- `release/win-unpacked(.tmp)` 被旧进程/索引器锁定时 `rm` 报 `Device or resource busy`，
+  连改名都 Permission denied——换个 `--config.directories.output` 输出目录即可绕过，
+  不要与文件锁搏斗。
 
 ## 5. Windows native 坑（记录进 60-BUG）
 

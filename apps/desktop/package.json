@@ -4,6 +4,7 @@
   "private": true,
   "description": "OrchDesk 桌面壳（Electron 主进程 + 渲染层桥接）",
   "author": "OrchDesk Team",
+  "packageManager": "pnpm@11.8.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/ra1nzzz/orchdesk.git"

@@ -12,6 +12,10 @@ apps/desktop/vendor/
 # dsh vendor（引用仓库，单独 git 管理，不纳入 OrchDesk 提交）
 references/
 
+# electron-builder PM 检测器怪癖：app 目录出现 package-lock.json 会让收集器
+# 误判 npm 并在 pnpm workspace 下解析失败（ELSPROBLEMS）——项目由 pnpm 统一管理。
+apps/desktop/package-lock.json
+
 # 构建产物
 *.tsbuildinfo
 -out/
