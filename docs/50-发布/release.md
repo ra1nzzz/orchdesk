@@ -45,75 +45,17 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
   - **别误判成沙箱拦截**：在同一目录里新建文件再删除，若成功说明目录无保护、是**特定文件**被锁；与文件后缀、大小、目录位置均无关（已逐一对照验证）。
   - **下载阶段另需重试循环**：直连 GitHub 取 nsis / winCodeSign 资源约五成概率 `Client network socket disconnected ... before secure TLS`，用「最多 5 次 + 间隔 6s」循环兜住。
 
-## 发布记录（2026-08-24）
+## 发布记录（按版本倒序）
+
+> 说明：v0.1.0 首发 + v0.3.1 起分版记录在下方同节；v0.14.0 条目为 2026-09-20 补登（原记录缺该版本）。
 
 - **v0.1.0 已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.1.0
 - 资产：`OrchDesk-Setup-0.1.0.exe`（nsis）+ `OrchDesk-0.1.0.exe`（portable）+ `latest.yml`（自动更新信息）。
 - 仓库 `ra1nzzz/orchdesk`（PUBLIC）仅用于产物分发（README-only，源码未推送）。
 - 上传经验：本环境代理（127.0.0.1:7897）对 84MB 大文件不稳（ECONNRESET/TLS timeout），**清空代理环境变量直连**（`env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY gh release upload ...`）稳定成功；electron-builder 自身 `--publish always` 上传易断，推荐 gh/curl 补传；上传 URL 用 **REST 数字 release id**（GraphQL Node ID 会 404）。
 
-## v0.3.1（2026-08-29）
 
-- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.3.1
-- 资产：`OrchDesk-Setup-0.3.1.exe`（nsis，84.7MB）+ `OrchDesk-0.3.1.exe`（portable，84.4MB）+ `latest.yml`
-- 内容：BUG-014 工具调用稳定化 / BUG-013 数据目录统一 / BUG-015 空模型选择 / BUG-016 构建 EBUSY，详见 [KNOWN-ISSUES](../KNOWN-ISSUES.md)
-- 验证：`npm run verify`（`agent-runtime-verify` 35 + `agent-loop-verify` 14 + `e2e-fix-verify` 29 = 78 项全绿）+ `tsc -p tsconfig.json` EXIT=0
-- 打包：`cd apps/desktop && npm run dist:win`（自动先 `node kill-running.cjs` 结束 OrchDesk.exe，再 `electron-builder --win --publish never`）
-- 本轮再次复现「代理对 84MB 大文件不稳」，**清空代理环境变量后直连**上传成功
-
-## v0.13.0（2026-09-03）
-
-- **已打包**：release commit `3186b21`，tag `v0.13.0`；GitHub Release 待推（产物 88MB，直连上传需重试循环）。
-- 资产：`OrchDesk Setup 0.13.0.exe`（nsis，88,081,451 B）+ `OrchDesk 0.13.0.exe`（portable，87,736,328 B）+ `OrchDesk Setup 0.13.0.exe.blockmap` + `latest.yml`。
-- Setup sha512：`OHBIBXMkMLufCVOjfrmocL7RM5Qg6ehoDziyPK/0PLjS+hauXxap9SlETqpFn26HwVGYl9VNKkKsOn1pZsk9bw==`（与 `latest.yml` 一致，已核对）。
-- 内容：终端 PTY Tab（ADR-0012）/ 文件 Tab 浏览·编辑·diff（ADR-0013）/ 浏览器工具 8 个（ADR-0011）/ TS 直测 loader + 架构守护（ADR-0010）/ 三方审阅交叉修复 14 项。
-- 验证：`npm run verify` **24 套件 814 项全绿**；`tsc -p tsconfig.json` EXIT=0；asar 内容校验 **195 文件**，`dist/main.js`、`dist/preload.js`、`renderer/app.js`、`renderer/file-edit.js`、`renderer/vendor/shiki-bundle.js`、`renderer/vendor/xterm/*` 均在包内。
-- **PTY 关键校验**：`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node`（291,328 B）已解包就位。node-pty **1.2.0 走 prebuilds 机制**（不是 `build/Release`），`asarUnpack` 覆盖 `vendor/node-pty/**` 即可，无需逐文件配置 —— 校验时别按旧路径 `build/Release/*.node` 去找（会误判缺失）。
-- 打包踩坑：见上文「BUG-016 变体 · asar 句柄泄漏」。
-- **尚未实机冒烟**：GUI / PTY / CDP 类验收按 [实机冒烟清单](../40-质量/smoke-checklist.md) 在桌面会话执行后回勾。
-
-## v0.13.2（2026-09-03）
-
-- **已打包**：release commit `eb57ce2`，tag `v0.13.2`；GitHub Release 待推。
-- 修复：**BUG-023** —— 项目绑定目录贯通会话工作区（新 IPC `set-session-cwd` + 沙箱白名单纳入工作区 + 渲染层五驱动点重放 + 文件面板/终端缺省落项目目录；详见 [60-BUG](../60-BUG/index.md)）。
-- 验证：model-loop +5 / e2e +7，verify **24 套件 832 项全绿**。
-- 资产：`OrchDesk Setup 0.13.2.exe` + `OrchDesk 0.13.2.exe` + blockmap + `latest.yml`；Setup sha512 `jfG1ccbTOJiYtlCQJwho…`（与 `latest.yml` 一致）。成功输出目录 `release-v0132-r1`。
-
-## v0.13.1（2026-09-03）
-
-- **已打包**：release commit `09784ba`，tag `v0.13.1`（打包之后打，遵守 `check-version.cjs` 顺序铁律）；GitHub Release 待推。
-- 修复：**BUG-022** —— 项目菜单「打开项目目录」恒开 C 盘数据目录（项目对象 `path` 有写入方、无读取方的死挂点变体；详见 [60-BUG](../60-BUG/index.md)）。e2e 6 条新断言（152→158），verify **24 套件 820 项全绿**。
-- 资产：`OrchDesk Setup 0.13.1.exe`（nsis，88,082,407 B）+ `OrchDesk 0.13.1.exe`（portable，87,737,276 B）+ blockmap + `latest.yml`；Setup sha512 `ItSWEaKXFiIAOjXzc0o8pz13YacF1/K6ZqosdXKJA6KetafYHOIS33pJ2Q2uAOSRDYUtWvzV58PN/vAm34pvVg==`（与 `latest.yml` 一致，已核对）。成功输出目录 `release-v0131-r1`（沿用「全新目录」规避 asar 句柄泄漏）。
-- 发版流程照旧：`changelog.mjs --version 0.13.1 --write` → bump → release commit → `tsc` + `vendor-dsh` → 打包 → tag。
-
-## v0.15.0（2026-09-06）
-
-- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.0
-- release commit `74458ee`，tag `v0.15.0`（打包**之后**打，遵守 `check-version.cjs` 顺序铁律）。
-- 资产：`OrchDesk Setup 0.15.0.exe`（nsis，88,120,279 B）+ `OrchDesk 0.15.0.exe`（portable，87,775,094 B）+ `latest.yml`；成功输出目录 `release-v0150-r2`。
-- Setup sha512 `+OOdHdI8DlPV7IzMnhA1kzDm…`（与 `latest.yml` 一致，已核对）。
-- 内容（CHANGELOG 0.15.0）：**MCP 真接入**（零依赖 stdio 客户端，替换「能力」TAB 假 MCP 分组）+ **UI/UX 前端收敛**（对比度/键盘可达/硬编码色/插件&SKILL 搜索/设置页导航/响应式）+ **连接器 CLI 登录态自动发现** + 右栏「技能与MCP」→「能力」（三组均改真数据源）+ 待办语义化与侧栏重构。
-- 验证：`tsc` EXIT=0；全量 verify **921 项全绿**（27 套件）；asar **203 文件**校验通过（含本版新增 `dist/mcp-client.js`、`dist/connector-discover.js`）；`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node` 已解包就位。
-- **打包踩坑（本轮新增）**：① 首次 `electron-builder` 在「searching for node modules」阶段报 `No JSON content found in output`（npm 依赖树收集被环境污染）→ 换全新输出目录后不再复现；② 随即遇到下载 nsis/winCodeSign 的 **TLS 断连**（已知约五成概率）→ **重试循环（最多 6 次 + 间隔 8s）第 2 次即通过**。延续结论：**同目录重试无效就换目录，下载失败就重试**。
-- **GitHub Release 踩坑（本轮新增，重要）**：用 API 创建 release 时若 `tag_name` 未正确关联，GitHub 会建成 **`untagged-<sha>` release**（产物传完才发现、指向错误 commit）。修正：对 release 做 `PATCH {"tag_name":"v0.15.0"}` 即可改回正确关联（**不必删 release 重传 176MB 产物**），再 `PATCH {"draft":false}` 转正。教训：**创建 release 后先核对返回的 `tag_name` 字段**，别等传完产物才发现。
-- **CHANGELOG 人工裁决**：本版「Skill 发布到本地」是加进来又在同一版内移除（从未发布给用户），已从 Added/Removed 两处剔除，避免对外发版说明出现"加了又撤"的噪音；存活的「连接器 CLI 登录态自动发现」保留。
-- **尚未实机冒烟**：GUI / MCP 真实 server 连接 / 连接器自动发现 建议在桌面会话按 [实机冒烟清单](../40-质量/smoke-checklist.md) 执行后回勾。
-
-## v0.15.1（2026-09-07）
-
-- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.1
-- release commit `e5a94e6`，tag `v0.15.1`（打包**之后**打）。bump 走 **patch**（本版只有 fix，非 minor）。
-- 资产：`OrchDesk Setup 0.15.1.exe`（nsis，88,121,546 B）+ `OrchDesk 0.15.1.exe`（portable，87,776,426 B）+ `latest.yml`；输出目录 `release-v0151-r1`（**打包一次通过**，1m52s）。
-- 内容：插件页面整体梳理（安装态 / 侧栏导航 / padding / 去内部标识 / 清死按钮），见 CHANGELOG 0.15.1。
-- 验证：`tsc` EXIT=0；全量 verify **930 项全绿**（27 套件）；sha512 与 `latest.yml` 一致；asar 203 文件；`conpty.node` 已解包。
-- **Release 操作三个新踩坑（高危，必看）**：
-  1. **POST 创建绝不能放进「失败就重来」的重试循环** —— 本轮因 `break` 条件判断的是子 shell 格式化后的文本（原始 `$out` 中并不含该串），条件永不成立，**一口气创建了 5 个同名 release**（删掉 4 个才收场）。**break 只能基于命令真实输出（HTTP code）**；创建类操作应先查重、或只执行一次。
-  2. **curl 上传返 HTTP 000 ≠ 失败**：服务端可能已收下**被截断的损坏文件**。本轮 Setup 被传成 85,553,915 B（正确应为 88,121,546 B），portable 同理。**发布前必须逐资产核对 `size` 与本地一致**；发现不符就删净全部资产重传（本轮用 python urllib 重传后正确）。
-  3. **api.github.com 约 50% 概率返回 000 / SSL EOF**：`PATCH` 转正要重试 10+ 次才命中。上传走 `uploads.github.com`（python urllib 稳定），别用 curl（易 000）。
-  4. 附：Git Bash 下 curl 的 `--data-binary @/tmp/x.json` 读不到文件，必须用 Windows 路径 `C:/Users/.../AppData/Local/Temp/x.json`。
-- **伴随发现（未处理，待裁决）**：GitHub 上**每个历史版本都有 2 个重复 release**（v0.15.0 / v0.14.0 / v0.13.2 / v0.13.1 / v0.13.0，各一个 1 资产 + 一个 3 资产，多为 draft），系历史发布流程重复创建所致。删除属破坏性操作，需人工确认后再清理。
-
-## v0.16.0（2026-09-06）
+## v0.16.0（2026-09-08）
 
 - **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.16.0
 - release commit `a96a1e4`（同时删除误提交的 `apps/desktop/package-lock.json`，见下），tag `v0.16.0` 本地 + 远端均已就位（遵守「打包之后打 tag」顺序铁律；`git ls-remote` 已确认 `refs/tags/v0.16.0` 在远端）。
@@ -138,6 +80,74 @@ npm_config_safe_delete=false ./node_modules/.bin/electron-builder   # 绕过 Wor
 **待办（建议，未做）**：
 - 把 electron-builder collector 的 `shell:true` patch 固化为 `scripts/patch-electron-builder.cjs`，在 `dist:win` / 打包命令前自动应用，避免新环境重新踩坑。
 - v0.16.0 尚未在 99-归档 登记（版本/commit/制品哈希/冒烟），且实机冒烟（GUI/PTY/CDP）仍待桌面会话回勾。
+
+## v0.15.1（2026-09-07）
+
+- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.1
+- release commit `e5a94e6`，tag `v0.15.1`（打包**之后**打）。bump 走 **patch**（本版只有 fix，非 minor）。
+- 资产：`OrchDesk Setup 0.15.1.exe`（nsis，88,121,546 B）+ `OrchDesk 0.15.1.exe`（portable，87,776,426 B）+ `latest.yml`；输出目录 `release-v0151-r1`（**打包一次通过**，1m52s）。
+- 内容：插件页面整体梳理（安装态 / 侧栏导航 / padding / 去内部标识 / 清死按钮），见 CHANGELOG 0.15.1。
+- 验证：`tsc` EXIT=0；全量 verify **930 项全绿**（27 套件）；sha512 与 `latest.yml` 一致；asar 203 文件；`conpty.node` 已解包。
+- **Release 操作三个新踩坑（高危，必看）**：
+  1. **POST 创建绝不能放进「失败就重来」的重试循环** —— 本轮因 `break` 条件判断的是子 shell 格式化后的文本（原始 `$out` 中并不含该串），条件永不成立，**一口气创建了 5 个同名 release**（删掉 4 个才收场）。**break 只能基于命令真实输出（HTTP code）**；创建类操作应先查重、或只执行一次。
+  2. **curl 上传返 HTTP 000 ≠ 失败**：服务端可能已收下**被截断的损坏文件**。本轮 Setup 被传成 85,553,915 B（正确应为 88,121,546 B），portable 同理。**发布前必须逐资产核对 `size` 与本地一致**；发现不符就删净全部资产重传（本轮用 python urllib 重传后正确）。
+  3. **api.github.com 约 50% 概率返回 000 / SSL EOF**：`PATCH` 转正要重试 10+ 次才命中。上传走 `uploads.github.com`（python urllib 稳定），别用 curl（易 000）。
+  4. 附：Git Bash 下 curl 的 `--data-binary @/tmp/x.json` 读不到文件，必须用 Windows 路径 `C:/Users/.../AppData/Local/Temp/x.json`。
+- **伴随发现（未处理，待裁决）**：GitHub 上**每个历史版本都有 2 个重复 release**（v0.15.0 / v0.14.0 / v0.13.2 / v0.13.1 / v0.13.0，各一个 1 资产 + 一个 3 资产，多为 draft），系历史发布流程重复创建所致。删除属破坏性操作，需人工确认后再清理。
+
+## v0.15.0（2026-09-06）
+
+- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.15.0
+- release commit `74458ee`，tag `v0.15.0`（打包**之后**打，遵守 `check-version.cjs` 顺序铁律）。
+- 资产：`OrchDesk Setup 0.15.0.exe`（nsis，88,120,279 B）+ `OrchDesk 0.15.0.exe`（portable，87,775,094 B）+ `latest.yml`；成功输出目录 `release-v0150-r2`。
+- Setup sha512 `+OOdHdI8DlPV7IzMnhA1kzDm…`（与 `latest.yml` 一致，已核对）。
+- 内容（CHANGELOG 0.15.0）：**MCP 真接入**（零依赖 stdio 客户端，替换「能力」TAB 假 MCP 分组）+ **UI/UX 前端收敛**（对比度/键盘可达/硬编码色/插件&SKILL 搜索/设置页导航/响应式）+ **连接器 CLI 登录态自动发现** + 右栏「技能与MCP」→「能力」（三组均改真数据源）+ 待办语义化与侧栏重构。
+- 验证：`tsc` EXIT=0；全量 verify **921 项全绿**（27 套件）；asar **203 文件**校验通过（含本版新增 `dist/mcp-client.js`、`dist/connector-discover.js`）；`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node` 已解包就位。
+- **打包踩坑（本轮新增）**：① 首次 `electron-builder` 在「searching for node modules」阶段报 `No JSON content found in output`（npm 依赖树收集被环境污染）→ 换全新输出目录后不再复现；② 随即遇到下载 nsis/winCodeSign 的 **TLS 断连**（已知约五成概率）→ **重试循环（最多 6 次 + 间隔 8s）第 2 次即通过**。延续结论：**同目录重试无效就换目录，下载失败就重试**。
+- **GitHub Release 踩坑（本轮新增，重要）**：用 API 创建 release 时若 `tag_name` 未正确关联，GitHub 会建成 **`untagged-<sha>` release**（产物传完才发现、指向错误 commit）。修正：对 release 做 `PATCH {"tag_name":"v0.15.0"}` 即可改回正确关联（**不必删 release 重传 176MB 产物**），再 `PATCH {"draft":false}` 转正。教训：**创建 release 后先核对返回的 `tag_name` 字段**，别等传完产物才发现。
+- **CHANGELOG 人工裁决**：本版「Skill 发布到本地」是加进来又在同一版内移除（从未发布给用户），已从 Added/Removed 两处剔除，避免对外发版说明出现"加了又撤"的噪音；存活的「连接器 CLI 登录态自动发现」保留。
+- **尚未实机冒烟**：GUI / MCP 真实 server 连接 / 连接器自动发现 建议在桌面会话按 [实机冒烟清单](../40-质量/smoke-checklist.md) 执行后回勾。
+
+## v0.14.0（2026-09-04）
+
+- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.14.0（tag 日期以 git `creatordate` 为准，2026-09-04）。
+- release commit `26f96ea`（版本 bump + CHANGELOG）+ 收口 `cdcc9e2`，tag `v0.14.0`。
+- 内容（CHANGELOG 0.14.0）：委派树展示 composeTeam 执行结果（task/产出/状态）真执行闭环；dsh-runtime 插件装载三样板收敛 + startRuntime 竞态修复；IPC sender 校验（纵深防御）；composeTeam 喂 task + Director 放行门（半接线接成真执行）；trace/memory/multi 三插件无界内存队列加固。
+- 验证：`tsc` EXIT=0；verify 全绿（当版 27 套件体系）。
+- **本节为 2026-09-20 补登**：原 release.md 发布记录缺 v0.14.0 条目且顺序非倒序，本版一并重排为严格版本倒序（新→旧）。
+## v0.13.2（2026-09-03）
+
+- **已打包**：release commit `eb57ce2`，tag `v0.13.2`；GitHub Release 待推。
+- 修复：**BUG-023** —— 项目绑定目录贯通会话工作区（新 IPC `set-session-cwd` + 沙箱白名单纳入工作区 + 渲染层五驱动点重放 + 文件面板/终端缺省落项目目录；详见 [60-BUG](../60-BUG/index.md)）。
+- 验证：model-loop +5 / e2e +7，verify **24 套件 832 项全绿**。
+- 资产：`OrchDesk Setup 0.13.2.exe` + `OrchDesk 0.13.2.exe` + blockmap + `latest.yml`；Setup sha512 `jfG1ccbTOJiYtlCQJwho…`（与 `latest.yml` 一致）。成功输出目录 `release-v0132-r1`。
+
+## v0.13.1（2026-09-03）
+
+- **已打包**：release commit `09784ba`，tag `v0.13.1`（打包之后打，遵守 `check-version.cjs` 顺序铁律）；GitHub Release 待推。
+- 修复：**BUG-022** —— 项目菜单「打开项目目录」恒开 C 盘数据目录（项目对象 `path` 有写入方、无读取方的死挂点变体；详见 [60-BUG](../60-BUG/index.md)）。e2e 6 条新断言（152→158），verify **24 套件 820 项全绿**。
+- 资产：`OrchDesk Setup 0.13.1.exe`（nsis，88,082,407 B）+ `OrchDesk 0.13.1.exe`（portable，87,737,276 B）+ blockmap + `latest.yml`；Setup sha512 `ItSWEaKXFiIAOjXzc0o8pz13YacF1/K6ZqosdXKJA6KetafYHOIS33pJ2Q2uAOSRDYUtWvzV58PN/vAm34pvVg==`（与 `latest.yml` 一致，已核对）。成功输出目录 `release-v0131-r1`（沿用「全新目录」规避 asar 句柄泄漏）。
+- 发版流程照旧：`changelog.mjs --version 0.13.1 --write` → bump → release commit → `tsc` + `vendor-dsh` → 打包 → tag。
+
+## v0.13.0（2026-09-03）
+
+- **已打包**：release commit `3186b21`，tag `v0.13.0`；GitHub Release 待推（产物 88MB，直连上传需重试循环）。
+- 资产：`OrchDesk Setup 0.13.0.exe`（nsis，88,081,451 B）+ `OrchDesk 0.13.0.exe`（portable，87,736,328 B）+ `OrchDesk Setup 0.13.0.exe.blockmap` + `latest.yml`。
+- Setup sha512：`OHBIBXMkMLufCVOjfrmocL7RM5Qg6ehoDziyPK/0PLjS+hauXxap9SlETqpFn26HwVGYl9VNKkKsOn1pZsk9bw==`（与 `latest.yml` 一致，已核对）。
+- 内容：终端 PTY Tab（ADR-0012）/ 文件 Tab 浏览·编辑·diff（ADR-0013）/ 浏览器工具 8 个（ADR-0011）/ TS 直测 loader + 架构守护（ADR-0010）/ 三方审阅交叉修复 14 项。
+- 验证：`npm run verify` **24 套件 814 项全绿**；`tsc -p tsconfig.json` EXIT=0；asar 内容校验 **195 文件**，`dist/main.js`、`dist/preload.js`、`renderer/app.js`、`renderer/file-edit.js`、`renderer/vendor/shiki-bundle.js`、`renderer/vendor/xterm/*` 均在包内。
+- **PTY 关键校验**：`app.asar.unpacked/vendor/node-pty/prebuilds/win32-x64/conpty.node`（291,328 B）已解包就位。node-pty **1.2.0 走 prebuilds 机制**（不是 `build/Release`），`asarUnpack` 覆盖 `vendor/node-pty/**` 即可，无需逐文件配置 —— 校验时别按旧路径 `build/Release/*.node` 去找（会误判缺失）。
+- 打包踩坑：见上文「BUG-016 变体 · asar 句柄泄漏」。
+- **尚未实机冒烟**：GUI / PTY / CDP 类验收按 [实机冒烟清单](../40-质量/smoke-checklist.md) 在桌面会话执行后回勾。
+
+## v0.3.1（2026-08-29）
+
+- **已发布**：https://github.com/ra1nzzz/orchdesk/releases/tag/v0.3.1
+- 资产：`OrchDesk-Setup-0.3.1.exe`（nsis，84.7MB）+ `OrchDesk-0.3.1.exe`（portable，84.4MB）+ `latest.yml`
+- 内容：BUG-014 工具调用稳定化 / BUG-013 数据目录统一 / BUG-015 空模型选择 / BUG-016 构建 EBUSY，详见 [KNOWN-ISSUES](../KNOWN-ISSUES.md)
+- 验证：`npm run verify`（`agent-runtime-verify` 35 + `agent-loop-verify` 14 + `e2e-fix-verify` 29 = 78 项全绿）+ `tsc -p tsconfig.json` EXIT=0
+- 打包：`cd apps/desktop && npm run dist:win`（自动先 `node kill-running.cjs` 结束 OrchDesk.exe，再 `electron-builder --win --publish never`）
+- 本轮再次复现「代理对 84MB 大文件不稳」，**清空代理环境变量后直连**上传成功
 
 ## 版本策略
 

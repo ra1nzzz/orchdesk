@@ -16,6 +16,9 @@ references/
 # 误判 npm 并在 pnpm workspace 下解析失败（ELSPROBLEMS）——项目由 pnpm 统一管理。
 apps/desktop/package-lock.json
 
+# 评审代理暂存副本（负样本隔离目录，误入库会成为第二份副本）
+.review-tmp/
+
 # 构建产物
 *.tsbuildinfo
 -out/

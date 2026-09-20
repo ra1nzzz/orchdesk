@@ -44,6 +44,8 @@ OrchStar 是 OrchDesk 的前身（本地多 Agent 工作台，Node.js+Hono+SQLit
 | [PRD 差距盘点-2026-08-29](PRD差距盘点-2026-08-29.md) | v0.3.1 时点 | 完成度 ≈ 30%，单点根因 = 运行时缺席 |
 | [PRD 差距补齐复盘-2026-08-29](PRD差距补齐-2026-08-29.md) | v0.4.0（pending） | 运行时接入、9/9 插件激活、完成度 ≈ 75%、158 项验证 |
 
+> v0.13.0–v0.16.0 的发布记录在 [50-发布/release.md](../50-发布/release.md)「发布记录」节（按版本倒序）。前 PAGE 级登记录入口见 release.md 内各版本条目的 commit/tag 指针。
+
 ## D. 已关闭的决策/缺口
 
 （随项目推进，将已解决的 ADR 替代项、已修复的 BUG 从活跃页移入此处，保留裁决理由与日期。）
@@ -56,3 +58,5 @@ OrchStar 是 OrchDesk 的前身（本地多 Agent 工作台，Node.js+Hono+SQLit
 |---|---|
 | [CHECKPOINT 版本日记 v0.4–v0.15](CHECKPOINT-version-diary-0.4-0.15.md) | 从 CHECKPOINT 迁出的 v0.4.1 起超长版本日记 |
 | [current-state P0–P6 日记](current-state-P0-P6.md) | 从 current-state 迁出的 P0–P6 阶段日记与同页原载后续历史 |
+| [KNOWN-ISSUES（v0.3.1 时点，superseded）](../KNOWN-ISSUES.md) | BUG-013/014/015/016 原始分析；已修复，仅留档 |
+| [HANDOFF-2026-08-29（superseded）](../HANDOFF-2026-08-29.md) | v0.3.1 时点接力任务书；T1/T2/T3 均完成，仅留档 |

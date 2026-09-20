@@ -33,6 +33,8 @@ pnpm --filter @orchdesk/desktop run verify
 
 项目接续入口：[docs/00-项目/CHECKPOINT.md](docs/00-项目/CHECKPOINT.md)
 
+变更记录：[apps/desktop/CHANGELOG.md](apps/desktop/CHANGELOG.md)
+
 ## 安装
 
 Windows 安装包与 portable 见 [GitHub Releases](https://github.com/ra1nzzz/orchdesk/releases)。
