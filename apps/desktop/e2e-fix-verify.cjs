@@ -30,6 +30,9 @@ async function run() {
   const { page, assert, waitForCount, waitForVisible, summary } = h;
 
   // 拦截 fetch/XHR 以模拟 bridge
+  // 审查项④：先注入共享 bridge stub（renderer/bridge-stub.js），下一段 init script
+  // 以它为基底叠加种子覆盖——app.js 与 e2e 共用同一份空壳语义。
+  await page.addInitScript({ path: require('path').join(__dirname, 'renderer', 'bridge-stub.js') });
   await page.addInitScript(() => {
     // Fixture 修正：此前 loadSessions/loadProjects 返回空数组 —— 侧栏/消息流断言
     // （.proj-seg / .sess / 用户消息）在空数据下永远不可能通过，套件实际是空转的。
@@ -149,7 +152,11 @@ async function run() {
     window.__composeCalls = [];
     window.__uninstallCalls = [];
     window.__mcpSaveCalls = [];
+    // 审查项④：以共享 bridge-stub.js（renderer/bridge-stub.js，经 addInitScript path
+    // 先行注入）为基底，以下覆盖仅陈述本套件的种子/差异语义——消除 app.js stub 与
+    // e2e mock 双源（原先两份各自演化，stub 漏接的方法在 e2e 永远测不到）。
     window.orchdesk = {
+      ...window.orchdeskBridgeStub,
       // 启动路径要求 loadSessions 返回数组（remote.length 判断）。默认返回对象
       // （走 wizard「首次运行」路径，前 13 组依赖该行为）；组 14 reload 前设置
       // localStorage.__seedArr = '1' → 返回数组，种子会话真实进 state。

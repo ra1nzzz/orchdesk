@@ -445,6 +445,17 @@ function scanRule(rule, code, fileName) {
     // 孤儿语句守卫：`(ipcMain);` 这类调用名被误删后剩下的合法表达式（真实事故形态）。
     assert(!/^\s*\(\s*ipcMain\s*\)\s*;/m.test(mainSrc), 'main.ts 存在孤儿 `(ipcMain);` 语句（调用名被误删的特征）');
   });
+
+  /* ---------------- R14：bridge stub 单源（审查项④） ---------------- */
+
+  await check('R14 bridge stub 单源：bridge-stub.js 存在且被 index.html 与 app.js 双向引用', () => {
+    const stubPath = path.join(APP_DIR, 'renderer', 'bridge-stub.js');
+    assert(fs.existsSync(stubPath), 'renderer/bridge-stub.js 缺失');
+    const html = read(path.join(APP_DIR, 'renderer', 'index.html'));
+    assert(html.includes('<script src="bridge-stub.js"></script>'), 'index.html 未加载 bridge-stub.js');
+    const app = read(path.join(APP_DIR, 'renderer', 'app.js'));
+    assert(app.includes('window.orchdeskBridgeStub'), 'app.js 未引用共享 stub（双源复辟）');
+  });
   /* -------------------- 元规则：防规则静默失效 -------------------- */
 
   console.log('== 架构守护：元规则自检（防规则失效）==');
