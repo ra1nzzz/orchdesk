@@ -15,41 +15,19 @@
  *   node e2e-fix-verify.cjs --url http://127.0.0.1:8080
  */
 
-const { chromium } = require('playwright');
+const { makeE2EHarness } = require('./scripts/e2e-kit.cjs');
 
 const HTML_PATH = 'file://' + require('path').resolve(__dirname, 'renderer/index.html');
 const url = process.argv.includes('--url') ? process.argv[process.argv.indexOf('--url') + 1] : HTML_PATH;
 
-let passed = 0;
-let failed = 0;
-const results = [];
 
-function assert(condition, name) {
-  if (condition) {
-    passed++;
-    results.push(`  ✅ PASS: ${name}`);
-  } else {
-    failed++;
-    results.push(`  ❌ FAIL: ${name}`);
-  }
-}
 
 async function run() {
   console.log(`\n🧪 OrchDesk E2E 修复验证`);
   console.log(`   Target: ${url}\n`);
 
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
-  // 渲染层未捕获异常立即 fail-fast：固定 sleep 模式让 JS 报错只在对应断言失败时间接
-  // 可见，CI 上表现为「慢机器 flaky」而非真实错误。
-  page.on('pageerror', (err) => { console.error('  ❌ [pageerror]', err.message); process.exitCode = 1; });
-  // 条件等待替代固定 sleep：等 DOM 到达目标态，慢机器不靠拉长 sleep 碰运气。
-  async function waitForCount(sel, n, timeout = 6000) {
-    await page.waitForFunction(([a, b]) => document.querySelectorAll(a).length >= b, [sel, n], { timeout });
-  }
-  async function waitForVisible(sel, timeout = 6000) {
-    await page.waitForFunction((a) => !!document.querySelector(a), sel, { timeout });
-  }
+  const h = await makeE2EHarness();
+  const { page, assert, waitForCount, waitForVisible, summary } = h;
 
   // 拦截 fetch/XHR 以模拟 bridge
   await page.addInitScript(() => {
@@ -1938,20 +1916,10 @@ async function run() {
   // ================================================================
   // 总结
   // ================================================================
-  console.log('\n' + results.join('\n'));
-  console.log(`\n📊 结果: ${passed} 通过, ${failed} 失败, 共 ${passed + failed} 项\n`);
+  const ok = summary('OrchDesk E2E ');
+  if (!ok) process.exitCode = 1;
 
-  // 汇总口径与 fail-fast 一致：断言失败或 pageerror 都算失败
-  // （此前 exitCode=1 与「全部验证通过」文案并存，误导读日志的人）。
-  const failFast = process.exitCode === 1; // pageerror 监听只写 1；未设置时是 undefined
-  if (failed > 0 || failFast) {
-    console.log('❌ 有验证失败，请检查上述 FAIL 项。');
-    process.exitCode = 1;
-  } else {
-    console.log('✅ 全部验证通过！');
-  }
-
-  await browser.close();
+  await h.browser.close();
 }
 
 run().catch((err) => {
