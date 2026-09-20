@@ -292,6 +292,19 @@ const cred = require('./dist/credentials.js');
     assert.ok(Array.isArray(out.logFileEntries), '落盘内容应为数组');
   });
 
+  await check('治理项⑥：dirty 合并 flush——flush 到期前文件仍是旧的但内存 count 已增长', async () => {
+    // 连续两次探测：第一次排定 flush（100ms），第二次立即在同一窗口内 ——
+    // 磁盘文件不应被逐条重写（写放大治理前每次都写）。
+    const first = await runToolProbe('file_read', { path: '__DATA__/p1.txt' }, { logQuery: {} });
+    const firstTotal = first.log.total;
+    const second = await runToolProbe('file_read', { path: '__DATA__/p2.txt' }, { logQuery: {} });
+    assert.ok(second.log.total >= firstTotal, '内存计数应随判定增长');
+    // flush 到期后文件应反映最新状态（等待治理窗口过去）
+    await new Promise((r) => setTimeout(r, 400));
+    const after = await runToolProbe('file_read', { path: '__DATA__/p3.txt' }, { logQuery: {} });
+    assert.ok(after.logFileExists, 'flush 到期后文件应存在');
+  });
+
   await check('清空：sandbox-log-clear 后 total 归零', async () => {
     const out = await runToolProbe('file_read', { path: '__DATA__/probe-written.txt' }, { logQuery: {}, clearLog: true });
     assert.ok(out.cleared >= 0, '应返回被清条数');
@@ -438,6 +451,8 @@ const cred = require('./dist/credentials.js');
           const logH = ipc.get('orchdesk:sandbox-log');
           payload = { result: r.result, error: r.error, log: await logH(null, ${JSON.stringify(opts.logQuery || {})}) };
           const logFile = path.join(HOME, 'sandbox-log.json');
+          // 治理项⑥：落盘是 dirty 合并 flush（100ms 窗口）——读盘前等窗口过去
+          await new Promise((r) => setTimeout(r, 300));
           payload.logFileExists = fs.existsSync(logFile);
           try { payload.logFileEntries = JSON.parse(fs.readFileSync(logFile, 'utf-8')); }
           catch (e) { payload.logPreview = 'read-fail:' + e.message; }

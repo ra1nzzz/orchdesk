@@ -538,6 +538,22 @@ function persistSandboxLog(): boolean {
   }
 }
 
+/* 写放大治理（复审项⑥）：recordSandbox 原先每条判定都全量重写 sandbox-log.json，
+ * 工具循环上限 200 步 → 最坏 200 次同步全文件写。改为 dirty 合并 flush：
+ *   1. 标记后延迟 100ms（微任务合帧窗口）合并为一次写；
+ *   2. before-quit / 关键路径可显式 flush（见 app 生命周期钩子）；
+ *   3. flush 失败只 WARN——日志是观测设施，不是安全门（原语义保持）。 */
+let sandboxLogDirty = false;
+let sandboxLogFlushTimer: NodeJS.Timeout | null = null;
+const SANDBOX_LOG_FLUSH_MS = 100;
+
+function flushSandboxLog(): void {
+  if (sandboxLogFlushTimer) { clearTimeout(sandboxLogFlushTimer); sandboxLogFlushTimer = null; }
+  if (!sandboxLogDirty) return;
+  sandboxLogDirty = false;
+  persistSandboxLog();
+}
+
 /**
  * 记一条沙箱判定。
  * 入参缺 tool / target / decision 会被 normalizeSandboxEntry 丢弃 —— 那种条目
@@ -557,7 +573,13 @@ function recordSandbox(input: {
     mode: lastAuthMode,
     ts: Date.now(),
   });
-  if (sandboxLog.length !== before) persistSandboxLog();
+  if (sandboxLog.length === before) return; // 被归一化丢弃，无需落盘
+  sandboxLogDirty = true;
+  if (sandboxLogFlushTimer) return; // 已有排定的 flush
+  sandboxLogFlushTimer = setTimeout(() => {
+    sandboxLogFlushTimer = null;
+    flushSandboxLog();
+  }, SANDBOX_LOG_FLUSH_MS);
 }
 
 /** 最近一次读到的授权模式（getMode 是异步的，日志只能留快照）。 */
@@ -1381,6 +1403,8 @@ app.on('before-quit', () => {
   // 注销全局快捷键：不注销会在进程退出后残留加速器（Windows 上表现为快捷键失灵）
   try { globalShortcut.unregisterAll(); } catch { /* 忽略 */ }
   bootDesktop.destroyFloatingWindow();
+  // 沙箱日志 dirty flush（治理项⑥）：合并写未到期时退出不能丢尾部判定
+  try { flushSandboxLog(); } catch { /* 忽略 */ }
   // 触发全部插件的逆效应（卸载无残留）
   void stopRuntime();
 });
