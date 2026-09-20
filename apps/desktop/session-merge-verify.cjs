@@ -35,7 +35,7 @@ check('msgs 合并：incoming 有新消息时追加', () => {
 
 check('mergeStores：删除语义 + 进行中回合保护 + 采纳新建', () => {
   const store = {
-    keep: { id: 'keep', msgs: [{ role: 'assistant', t: '1', text: 'x' }] },
+    keep: { id: 'keep', title: 't', msgs: [{ role: 'assistant', t: '1', text: 'x' }] },
     del: { id: 'del', msgs: [{ role: 'user', t: '1', text: 'y' }] },
     busy: { id: 'busy', msgs: [{ role: 'user', t: '1', text: 'z' }] },
   };
@@ -46,6 +46,34 @@ check('mergeStores：删除语义 + 进行中回合保护 + 采纳新建', () =>
   assert.strictEqual(r.merged.keep.msgs.length, 1, '合并保留 stored 消息');
   const r2 = sm.mergeStores({}, [ { id: 'new', msgs: [{ r: 'user', t: '1', x: 'n' }] } ]);
   assert.deepStrictEqual(r2.adopted, ['new'], 'renderer 新建会话应被采纳');
+});
+
+/* 复审轮 1 P0 复测：两个写入方 schema 不同（主进程 role:'assistant' vs 渲染层 r:'agent'），
+ * 去重键不归一会让同一 assistant 回复每回合在 store 重复一条、且被
+ * normalizeHistory 全量送进模型（上下文污染）。 */
+check('mergeSession：agent/assistant 双 schema 同回复不得重复', () => {
+  const stored = { id: 's1', msgs: [
+    { role: 'user', t: '10:00:00', text: 'hi' },
+    { role: 'assistant', t: '10:00:01', text: '回复' },
+  ] };
+  // 渲染层对同一 assistant 消息的形态（r:'agent'）+ 情境化标题字段缺失
+  const incoming = { id: 's1', msgs: [
+    { r: 'user', t: '10:00:00', x: 'hi' },
+    { r: 'agent', t: '10:00:01', x: '回复' },
+  ] };
+  const out = sm.mergeSession(stored, incoming);
+  assert.strictEqual(out.msgs.length, 2, '不得重复追加，实际 ' + out.msgs.length);
+  assert.strictEqual(out.msgs.filter((m) => (m.text || m.x) === '回复').length, 1, '回复气泡必须恰一条');
+});
+
+check('mergeSession：元数据字段级合并（incoming 缺字段不得抹掉 stored）', () => {
+  const stored = { id: 's1', title: '重要会话', pid: 'p1', created: '2026-09-01', msgs: [{ role: 'user', t: '1', text: 'a' }] };
+  const incoming = { id: 's1', msgs: [{ r: 'user', t: '1', x: 'a' }, { r: 'user', t: '2', x: 'b' }] };
+  const out = sm.mergeSession(stored, incoming);
+  assert.strictEqual(out.title, '重要会话', 'title 不得被抹成 undefined');
+  assert.strictEqual(out.pid, 'p1', 'pid 不得丢失');
+  assert.strictEqual(out.created, '2026-09-01', 'created 不得丢失');
+  assert.strictEqual(out.msgs.length, 2, 'msgs 仍应合并');
 });
 
 check('mergeSession：空数组边界', () => {

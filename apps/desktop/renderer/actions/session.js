@@ -602,7 +602,7 @@ function installSessionActions(ACTIONS, ctx) {
         ctx.state.modelProviders = (ctx.state.modelProviders || []).filter(x => x.id !== el.dataset.id);
         const r = await ctx.bridge.saveModelConfig({ providers: ctx.state.modelProviders, defaultProvider: ctx.state.defaultProvider });
         if (r && r.ok) {
-          try { const mc = await ctx.bridge.getModelConfig(); if (mc && mc.providers) ctx.dynamicModels = mc.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' · ' + p.type, k: '(本地)', state: '已配' }))); } catch { ctx.dynamicModels = []; }
+          try { const mc = await ctx.bridge.getModelConfig(); if (mc && mc.providers) ctx.dynamicModels.list = mc.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' · ' + p.type, k: '(本地)', state: '已配' }))); } catch { ctx.dynamicModels.list = []; }
           ctx.toast('提供商已删除', 'warn'); ctx.renderModelProviders();
         } else { ctx.toast('删除失败', 'danger'); }}
   
@@ -643,7 +643,7 @@ function installSessionActions(ACTIONS, ctx) {
         const r2 = await ctx.bridge.saveModelConfig({ providers, defaultProvider: type === 'ollama' ? providers[providers.length - 1]?.id : (ctx.state.defaultProvider || providers[0]?.id) });
         if (r2 && r2.ok) {
           ctx.state.modelProviders = providers;
-          try { const mc2 = await ctx.bridge.getModelConfig(); if (mc2 && mc2.providers) ctx.dynamicModels = mc2.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' · ' + p.type, k: key ? 'sk-••••••••' : '(本地)', state: '已配' }))); } catch { ctx.dynamicModels = []; }
+          try { const mc2 = await ctx.bridge.getModelConfig(); if (mc2 && mc2.providers) ctx.dynamicModels.list = mc2.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' · ' + p.type, k: key ? 'sk-••••••••' : '(本地)', state: '已配' }))); } catch { ctx.dynamicModels.list = []; }
           ctx.toast(isEdit ? `提供商「${name}」已更新` : `提供商「${name}」已添加`, 'ok');
           if (!isEdit) { ctx.$('#mp-name').value = ''; ctx.$('#mp-url').value = ''; ctx.$('#mp-key').value = ''; ctx.$('#mp-models').value = ''; }
           ctx.renderModelProviders();

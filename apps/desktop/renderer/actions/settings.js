@@ -251,7 +251,7 @@ function installSettingsActions(ACTIONS, ctx) {
 
   async function act_import_data(el, id, e) {
  {
-        ctx.importSuspend = true;
+        ctx.importSuspend.on = true;
         try {
           const r = await ctx.bridge.importData();
           if (r && r.ok) {
@@ -280,7 +280,7 @@ function installSettingsActions(ACTIONS, ctx) {
             ctx.toast(r && r.reason === 'cancelled' ? '已取消导入' : `导入失败：${(r && r.reason) || ''}`, r && r.reason === 'cancelled' ? 'ok' : 'danger');
           }
         } finally {
-          ctx.importSuspend = false; // 任何异常路径都必须恢复落盘，否则后续变更永不持久化
+          ctx.importSuspend.on = false; // 任何异常路径都必须恢复落盘，否则后续变更永不持久化
         }}
   
   }

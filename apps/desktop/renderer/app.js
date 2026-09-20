@@ -171,7 +171,7 @@
    * 4. 多个 API → 设置页指定的默认模型 + 本地（若有）
    */
   function autoSelectModels(providers, defaultProviderId, defaultModelName) {
-    const pool = dynamicModels;
+    const pool = dynamicModels.list;
     if (!pool.length) { state.selectedModels = []; return; }
     const has = (n) => pool.some(m => m.n === n);
 
@@ -204,9 +204,11 @@
     saveModelSelection(state.selectedModels);
   }
 
-  function getModelPool() { return dynamicModels.length ? dynamicModels : MODELS; }
+  function getModelPool() { return dynamicModels.list.length ? dynamicModels.list : MODELS; }
 
-  let dynamicModels = [];
+  // holder 模式：actions 模块经 ctx 写入的是同一对象引用——直接 `let` 会让
+  // ctx 拷贝到当时的快照，ctx.dynamicModels = … 写进副本、app.js 侧不更新（复审 P1）。
+  const dynamicModels = { list: [] };
 
   /* ---------- FR-6 分叉与回放（纯逻辑，与验证套件共用同一份实现） ----------
    * session-fork.js 由 index.html 在 app.js 之前加载；缺失时 FORK 为 null，
@@ -364,11 +366,13 @@
 
   // 导入期间挂起 persist：persist-sessions 是「渲染层状态整体重写」，若在
   // 主进程导入落盘与渲染层重拉之间触发，会把导入数据整体冲掉（审阅阻断项）。
-  let importSuspend = false;
+  // holder 模式：actions 模块经 ctx 写的是同一引用（复审 P1：let 会被拷成快照，
+  // settings.js 的 ctx.importSuspend = true 永远传不回本 IIFE，挂起形同虚设）。
+  const importSuspend = { on: false };
   /** 沙箱日志检索防抖句柄（PRD FR-8）。 */
   let sblogTimer = 0;
 
-  function persist() { if (importSuspend) return; persistSessions(); persistProjects(); }
+  function persist() { if (importSuspend.on) return; persistSessions(); persistProjects(); }
 
   function persistSessions() { bridge.persistSessions(Object.values(state.sessions)).catch(() => {}); }
 
@@ -4055,7 +4059,7 @@ let outboundTimer = null;
       bridge.getModelConfig().then(async (mc) => {
         if (mc && mc.providers && mc.providers.length) {
           state.modelProviders = mc.providers;
-          dynamicModels = mc.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' \u00b7 ' + p.type, k: '(本地)', state: '\u5df2\u914d' })));
+          dynamicModels.list = mc.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' \u00b7 ' + p.type, k: '(本地)', state: '\u5df2\u914d' })));
           if (mc.defaultProvider) state.defaultProvider = mc.defaultProvider;
           state.defaultModel = mc.defaultModel;
           state.maxToolIterations = mc.maxToolIterations || 200;
@@ -4063,10 +4067,10 @@ let outboundTimer = null;
         } else {
           // BUG-015：桥接可用但无提供商时不要清空选择（可能是瞬时失败），
           // 交给 autoSelectModels 决定，避免「发送被拦死且无出路」。
-          dynamicModels = [];
+          dynamicModels.list = [];
           autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
         }
-      }).catch(() => { dynamicModels = []; autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel); }),
+      }).catch(() => { dynamicModels.list = []; autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel); }),
       // 观雅集
       bridge.guanjiTokenStatus().then(r => { state.guanjiTokenSet = !!(r && r.configured); }).catch(() => {}),
       bridge.guanjiList().then(r => { if (Array.isArray(r) && r.length) state.guanjiSkills = r; }).catch(() => {}),
