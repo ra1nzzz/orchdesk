@@ -37,7 +37,15 @@ function stripComments(code) {
 
 function rendererFiles() {
   const dir = path.join(APP_DIR, 'renderer');
-  return fs.readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => ({ name: `renderer/${f}`, abs: path.join(dir, f) }));
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => ({ name: `renderer/${f}`, abs: path.join(dir, f) }));
+  // 审查项③：动作按页模块化至 renderer/actions/*.js——bridge 调用面随之扩展
+  const actionsDir = path.join(dir, 'actions');
+  if (fs.existsSync(actionsDir)) {
+    for (const f of fs.readdirSync(actionsDir).filter((f) => f.endsWith('.js'))) {
+      files.push({ name: `renderer/actions/${f}`, abs: path.join(actionsDir, f) });
+    }
+  }
+  return files;
 }
 
 /** apps/desktop 顶层 .ts 全量（R9/R12 共用扫描面）。 */
