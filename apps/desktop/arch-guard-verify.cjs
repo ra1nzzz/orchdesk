@@ -456,6 +456,71 @@ function scanRule(rule, code, fileName) {
     const app = read(path.join(APP_DIR, 'renderer', 'app.js'));
     assert(app.includes('window.orchdeskBridgeStub'), 'app.js 未引用共享 stub（双源复辟）');
   });
+
+  /* ---------------- R15：registerXxxIpc 调用必须存在（复审轮 2：R13 只管 import 未用） ---------------- */
+
+  await check('R15 ipc 模块的 register 导出必须在 main.ts 被调用一次且仅一次', () => {
+    // R13 盲区实测：import 与调用同时删除时 R13/R9 双双静默（整组 IPC 掉线无守卫）。
+    // 本规则反向扫：盘上每个 ipc-*.ts 的 register*Ipc 导出，main.ts 必须恰好调用一次。
+    const ipcModules = fs.readdirSync(APP_DIR).filter((f) => /^ipc-[a-z-]+\.ts$/.test(f));
+    assert(ipcModules.length >= 8, `ipc-* 模块仅 ${ipcModules.length} 个（规则空转）`);
+    const mainSrc = read(path.join(APP_DIR, 'main.ts'));
+    const problems = [];
+    for (const mod of ipcModules) {
+      const src = stripComments(read(path.join(APP_DIR, mod)));
+      const exportRe = /export\s+function\s+(register[A-Z]\w*Ipc)\s*\(/g;
+      let m;
+      while ((m = exportRe.exec(src))) {
+        const fn = m[1];
+        const callRe = new RegExp('\\b' + fn + '\\s*\\(', 'g');
+        const calls = mainSrc.match(callRe) || [];
+        if (calls.length === 0) problems.push(`${fn}（${mod} 导出但 main.ts 从未调用——整组 IPC 掉线）`);
+        else if (calls.length > 1) problems.push(`${fn} 在 main.ts 被调用 ${calls.length} 次（重复注册）`);
+      }
+    }
+    assert(problems.length === 0, problems.join('; '));
+  });
+
+  /* ---------------- R16：stub 真单源（复审轮 2：app.js/e2e 重新长出内联副本的负向断言） ---------------- */
+
+  await check('R16 stub 真单源：app.js 与 e2e 不得存在不 spread 共享 stub 的 window.orchdesk 定义', () => {
+    // R14 只查三处 must-have；本规则堵「stub 定义重新长回来」的双源复辟形态。
+    // app.js：不得再内联定义 runAgentTurn 空壳（唯一合法所在 = renderer/bridge-stub.js）
+    const app = stripComments(read(path.join(APP_DIR, 'renderer', 'app.js')));
+    assert(!app.includes('runAgentTurn:'), 'app.js 出现内联 stub 定义特征（双源复辟）');
+    const stubFile = stripComments(read(path.join(APP_DIR, 'renderer', 'bridge-stub.js')));
+    assert(stubFile.includes('runAgentTurn:') && stubFile.includes("intent: 'CONFIRM'"), 'bridge-stub.js 丢失 stub 定义（被误清空？）');
+    // e2e：window.orchdesk = { 之后必须 spread 共享 stub（负向断言）
+    const e2e = stripComments(read(path.join(APP_DIR, 'e2e-fix-verify.cjs')));
+    assert(e2e.includes('window.orchdeskBridgeStub'), 'e2e-fix-verify.cjs 未 spread 共享 stub（恢复双源）');
+  });
+
+  /* ---------------- R17：actions 模块加载顺序 + 语法有效性（复审轮 2） ---------------- */
+
+  await check('R17 actions/*.js 必须在 index.html 中先于 app.js 加载且语法可解析', () => {
+    const html = read(path.join(APP_DIR, 'renderer', 'index.html'));
+    const appIdx = html.indexOf('<script src="app.js"></script>');
+    const actionsDir = path.join(APP_DIR, 'renderer', 'actions');
+    const actionFiles = fs.existsSync(actionsDir) ? fs.readdirSync(actionsDir).filter((f) => f.endsWith('.js')) : [];
+    assert(actionFiles.length >= 3, `actions/*.js 少于 3 个（规则空转）：${actionFiles.length}`);
+    for (const f of actionFiles) {
+      const tag = `<script src="actions/${f}"></script>`;
+      const idx = html.indexOf(tag);
+      assert(idx > 0, `index.html 缺 ${tag}（删掉它 arch-guard 全绿、运行时整页动作死掉）`);
+      assert(idx < appIdx, `${tag} 必须在 app.js 之前加载`);
+    }
+    // 语法有效性：结构损伤（悬挂 } / 截断）不可能过 new Function——把 e2e 兜底前移到静态检查
+    const syntaxTargets = [
+      ...actionFiles.map((f) => ({ name: `actions/${f}`, abs: path.join(actionsDir, f) })),
+      { name: 'bridge-stub.js', abs: path.join(APP_DIR, 'renderer', 'bridge-stub.js') },
+      { name: 'app.js', abs: path.join(APP_DIR, 'renderer', 'app.js') },
+    ];
+    const broken = [];
+    for (const t of syntaxTargets) {
+      try { new Function(read(t.abs)); } catch (err) { broken.push(`${t.name}: ${err && err.message}`); }
+    }
+    assert(broken.length === 0, '以下 renderer JS 语法损坏：\n        ' + broken.join('\n        '));
+  });
   /* -------------------- 元规则：防规则静默失效 -------------------- */
 
   console.log('== 架构守护：元规则自检（防规则失效）==');

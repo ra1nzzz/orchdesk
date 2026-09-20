@@ -292,9 +292,10 @@ const cred = require('./dist/credentials.js');
     assert.ok(Array.isArray(out.logFileEntries), '落盘内容应为数组');
   });
 
-  await check('治理项⑥：dirty 合并 flush——窗口内 3 次判定后文件 mtime 变化次数 ≤ 2（判别性：改回逐条写盘则为 3+）', async () => {
-    // 子进程内驱动：recordSandbox 的 flush 是主进程 timer——窗口内多次判定合并为
-    // 一次写。用文件 mtime 计数近似写盘次数（纳秒级分辨率足够区分「1 次 vs 3 次」）。
+  await check('治理项⑥：dirty 合并 flush——窗口内 3 次判定只触发 ≤2 次写盘（真判别性：patch 子进程 fs）', async () => {
+    // 判别性断言（复审轮 2 补强）：在探针子进程内 patch fs.writeFileSync 计数
+    // sandbox-log.json 写盘次数——治理前每条判定都全量重写（3+ 次），治理后
+    // 100ms 窗口内合帧（≤2 次）。改回逐条写本断言 FAIL。
     const probe = `
       const Module = require('module');
       const path = require('path'), fs = require('fs'), os = require('os');
@@ -305,6 +306,9 @@ const cred = require('./dist/credentials.js');
       const ipc = stub.ipcHandlers;
       const orig = Module._load;
       Module._load = function (req) { if (req === 'electron') return stub; return orig.apply(this, arguments); };
+      const realWrite = fs.writeFileSync;
+      let writes = 0;
+      fs.writeFileSync = function (p, ...rest) { if (String(p).includes('sandbox-log.json')) writes++; return realWrite.call(fs, p, ...rest); };
       require('${path.join(__dirname, 'dist', 'main.js').replace(/\\/g, '\\\\')}');
       (async () => {
         for (let i = 0; i < 100; i++) {
@@ -312,14 +316,12 @@ const cred = require('./dist/credentials.js');
           if (h) { const st = await h(null); if (st && st.ready && st.plugins && st.plugins.length >= 9) break; }
           await new Promise((r) => setTimeout(r, 50));
         }
-        const logFile = path.join(HOME, 'sandbox-log.json');
         const tool = (p) => ipc.get('orchdesk:tool-execute')(null, { name: 'file_read', arguments: { path: p } });
         await tool(path.join(HOME, 'f1.txt'));
         await tool(path.join(HOME, 'f2.txt'));
         await tool(path.join(HOME, 'f3.txt'));
-        await new Promise((r) => setTimeout(r, 300));
-        const st = fs.existsSync(logFile) ? fs.statSync(logFile) : null;
-        console.log('TOOL_JSON:' + JSON.stringify({ fileExists: !!st }));
+        await new Promise((r) => setTimeout(r, 300)); // 等 flush 窗口
+        console.log('TOOL_JSON:' + JSON.stringify({ writes }));
         process.exit(0);
       })().catch((e) => { console.log('ERR:' + ((e && e.stack) || e)); process.exit(1); });
     `;
@@ -333,9 +335,8 @@ const cred = require('./dist/credentials.js');
     const m = stdout.match(/TOOL_JSON:(.*)/);
     if (!m) throw new Error('probe 未输出结果:\n' + stdout);
     const out = JSON.parse(m[1]);
-    // 治理后：3 次窗口内判定 → 至多 1 次写盘（文件存在即 flush 成功）；
-    // 若改回逐条重写，本断言不会失败（mtime 单值），判别性给到 assert.ok 至少一次。
-    assert.ok(out.fileExists, 'flush 后 sandbox-log.json 应存在');
+    assert.ok(out.writes >= 1, 'flush 后应至少写一次，实际 ' + out.writes);
+    assert.ok(out.writes <= 2, '窗口内 3 次判定最多 2 次写（治理前逐条写为 3+），实际 ' + out.writes);
   });
 
   await check('清空：sandbox-log-clear 后 total 归零', async () => {
