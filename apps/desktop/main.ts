@@ -80,7 +80,7 @@ import {
 } from './agent-runtime';
 import { isAbsoluteLike } from './common-tools';
 import { callModel as callModelHttp, initModelClient } from './model-client';
-import { abortAgentTurn, clearToolRejectMemo, initAgentTurn, runAgentTurn } from './agent-turn';
+import { abortAgentTurn, clearToolRejectMemo, hasActiveTurn, initAgentTurn, runAgentTurn } from './agent-turn';
 import { executeTool, initToolExec, sessionCwd, setSessionCwd } from './tool-exec';
 import { registerBrowserIpc } from './ipc-browser';
 import { preloadTerminalPty, registerTerminalIpc } from './ipc-terminal';
@@ -88,6 +88,7 @@ import { registerFilePanelIpc } from './ipc-file-panel';
 import { connectorsFilePath, initConnectors, loadConnectors, registerConnectorIpc } from './ipc-connectors';
 import { initMcp, loadMcp, mcpFilePath, registerMcpIpc } from './ipc-mcp';
 import { hydrateMarketEnabled, initMarket, loadMarketEnabled, registerMarketIpc } from './ipc-market';
+import { mergeStores } from './session-merge';
 import { registerGuanjiIpc } from './ipc-guanji';
 import { registerHubIpc } from './ipc-hub';
 import { registerDataOpsIpc, checkForUpdates } from './ipc-data-ops';
@@ -666,8 +667,12 @@ ipcMain.handle('orchdesk:plugin-set-enabled', async (_e, name: string, enabled: 
   }
 });
 ipcMain.handle('orchdesk:persist-sessions', async (_e, sessions: unknown[]) => {
-  store = {};
-  (sessions || []).forEach((s: any) => { if (s && s.id && Array.isArray(s.msgs)) store[s.id] = s; });
+  // 读-改-写竞态修复（复审项⑤）：渲染层快照整表替换会把 agent-turn 刚写入的
+  // assistant 回复抹掉。合并策略见 session-merge.ts：msgs 去重合并（stored 优先），
+  // 元数据取 incoming；snapshot 缺失视为删除，但进行中回合的会话不删。
+  const { merged, deleted } = mergeStores(store as Record<string, never>, (sessions || []) as never, { isActive: (id) => hasActiveTurn(id) });
+  store = merged;
+  if (deleted.length) log('INFO', 'sessions', `渲染层删除会话：${deleted.join(', ')}`);
   saveStore();
   return { ok: true };
 });

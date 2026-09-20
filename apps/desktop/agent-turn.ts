@@ -100,6 +100,10 @@ export function abortAgentTurn(sessionId: string): { ok: boolean; reason?: strin
   cur.abort();
   return { ok: true };
 }
+/** 会话是否有进行中的回合（persist-sessions 合并策略用：进行中回合不被旧快照删掉）。 */
+export function hasActiveTurn(sessionId: string): boolean {
+  return turnAborts.has(String(sessionId || ''));
+}
 
 function nowTime(): string {
   return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
