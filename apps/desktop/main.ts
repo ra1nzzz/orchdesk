@@ -3,15 +3,10 @@ import { app, BrowserWindow, ipcMain, safeStorage, shell, globalShortcut } from 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import {
-  DESKTOP_LABELS,
   SHORTCUT_LABEL,
   loadDesktopConfig,
-  saveDesktopConfig,
-  setDesktopKey,
 } from './desktop-integration';
 import * as bootDesktop from './boot-desktop';
-import { guanjiClient } from './guanji';
-import { hubClient } from './hub';
 import {
   aggregateUsage,
   defaultUsageFile,
@@ -93,6 +88,10 @@ import { registerFilePanelIpc } from './ipc-file-panel';
 import { connectorsFilePath, initConnectors, loadConnectors, registerConnectorIpc } from './ipc-connectors';
 import { initMcp, loadMcp, mcpFilePath, registerMcpIpc } from './ipc-mcp';
 import { hydrateMarketEnabled, initMarket, loadMarketEnabled, registerMarketIpc } from './ipc-market';
+import { registerGuanjiIpc } from './ipc-guanji';
+import { registerHubIpc } from './ipc-hub';
+import { registerDataOpsIpc, checkForUpdates } from './ipc-data-ops';
+import { registerDesktopIpc } from './ipc-desktop';
 // ============================================================================
 // OrchDesk 桌面壳主进程（P1）
 // ----------------------------------------------------------------------------
@@ -110,7 +109,8 @@ import { hydrateMarketEnabled, initMarket, loadMarketEnabled, registerMarketIpc 
 const isDev = !app.isPackaged;
 bootDesktop.initBootDesktop({
   log: (level, scope, msg) => log(level === 'ERROR' || level === 'WARN' ? level : 'INFO', scope, msg),
-  checkForUpdates,
+  // 更新检查实现已移至 ipc-data-ops（deps 注入式）；这里包一层补足依赖。
+  checkForUpdates: () => checkForUpdates({ dataDir, logFilePath }),
 });
 initModelClient({ decryptKey });
 
@@ -1066,182 +1066,13 @@ registerFilePanelIpc(ipcMain);
 registerConnectorIpc(ipcMain);
 registerMcpIpc(ipcMain);
 registerMarketIpc(ipcMain);
+// M2 第二轮：观雅集 / Hub / 数据运维 / 桌面集成 IPC 抽至独立模块——
+// 组合根只保留编排与注册（R13 守卫「导入即接线」）。
+registerGuanjiIpc(ipcMain);
+registerHubIpc(ipcMain);
+registerDataOpsIpc(ipcMain, { dataDir, logFilePath });
+registerDesktopIpc(ipcMain, { dataDir });
 
-
-
-
-// ---------------------------------------------------------------------------
-// T-P6-1 观雅集技能市场桥（复用 guanji SKILL API 约定；TOKEN 由用户配置）
-// ---------------------------------------------------------------------------
-ipcMain.handle('orchdesk:guanji-token-status', async () => guanjiClient.tokenStatus());
-ipcMain.handle('orchdesk:guanji-set-token', async (_e, token: string) => guanjiClient.setToken(token));
-ipcMain.handle('orchdesk:guanji-list', async () => {
-  try { return await guanjiClient.listSkills(); } catch { return []; }
-});
-ipcMain.handle('orchdesk:guanji-install', async (_e, skill: { slug: string; name: string; description: string; caps: string[]; auth: 0 | 1 }, authorized = false) => {
-  return guanjiClient.installSkill(skill, authorized === true);
-});
-ipcMain.handle('orchdesk:guanji-publish', async (_e, input: { slug: string; alias?: string; filePath: string }) => {
-  return guanjiClient.publishSkill(input);
-});
-// 本地已安装技能：真实扫描数据目录/skills（此前只存渲染层内存，重启即显示 0 个）。
-// ok=false = 扫描失败，与「已扫描但没装」区分，UI 分别标注「未接入」与「暂无」。
-ipcMain.handle('orchdesk:skills-installed', () => guanjiClient.listInstalledSkills());
-ipcMain.handle('orchdesk:skill-uninstall', async (_e, slug: string) => guanjiClient.uninstallSkill(String(slug || '')));
-
-// ---------------------------------------------------------------------------
-// T-P6-2 OrchClaw Hub 联调桥（配对凭据经 safeStorage 加密存储）
-// ---------------------------------------------------------------------------
-ipcMain.handle('orchdesk:hub-status', async () => hubClient.status());
-ipcMain.handle('orchdesk:hub-pair', async (_e, url: string, token: string) => hubClient.pair(url, token));
-ipcMain.handle('orchdesk:hub-send', async (_e, text: string) => hubClient.sendTask(text));
-ipcMain.handle('orchdesk:hub-result', async (_e, taskId: string) => hubClient.getResult(taskId));
-
-// ---------------------------------------------------------------------------
-// T-P6-3 数据快照 + 更新检查（发布前自动快照数据目录）
-// ---------------------------------------------------------------------------
-function snapshotData(): { ok: boolean; dir?: string; reason?: string } {
-  try {
-    const root = dataDir();
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const snapshotsDir = path.join(root, 'snapshots');
-    const snapDir = path.join(snapshotsDir, stamp);
-    fs.mkdirSync(snapDir, { recursive: true });
-    fs.cpSync(root, snapDir, { recursive: true, filter: (src) => src === root || !src.startsWith(snapshotsDir) });
-    return { ok: true, dir: snapDir };
-  } catch (err) {
-    return { ok: false, reason: (err as Error).message };
-  }
-}
-
-/** 更新前必须完成数据快照（PLAN 红线：不要更新后补）。 */
-async function checkForUpdates(): Promise<{ snapshot: { ok: boolean; dir?: string }; update?: { available: boolean; version?: string; note?: string }; reason?: string }> {
-  const snapshot = snapshotData();
-  try {
-    const { autoUpdater } = await import('electron-updater');
-    // 仅在生产包（asar）中启用自动更新，开发模式跳过
-    if (!app.isPackaged) {
-      return { snapshot, update: { available: false, note: '开发模式，跳过自动更新检查' } };
-    }
-    autoUpdater.setFeedURL({
-      provider: 'github',
-      owner: 'ra1nzzz',
-      repo: 'orchdesk',
-    });
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
-    const res = await autoUpdater.checkForUpdates();
-    return {
-      snapshot,
-      update: {
-        available: !!res?.updateInfo?.version,
-        version: res?.updateInfo?.version,
-        note: res?.updateInfo?.version
-          ? `发现新版本 ${res.updateInfo.version}，正在后台下载…`
-          : '已是最新',
-      },
-    };
-  } catch (err) {
-    return { snapshot, reason: `更新检查异常：${(err as Error).message}` };
-  }
-}
-
-ipcMain.handle('orchdesk:snapshot-data', async () => snapshotData());
-ipcMain.handle('orchdesk:check-updates', async () => checkForUpdates());
-
-// ---------------------------------------------------------------------------
-// 桌面集成（PRD FR-4.2）：设置页 6 个开关此前是 data-action="todo" 空壳
-// ---------------------------------------------------------------------------
-ipcMain.handle('orchdesk:desktop-get', async () => {
-  bootDesktop.setDesktopConfig(loadDesktopConfig(dataDir()));
-  return {
-    config: { ...bootDesktop.desktopConfig },
-    shortcutLabel: SHORTCUT_LABEL,
-    labels: { ...DESKTOP_LABELS },
-    /** 自启动真实生效状态（系统可能拒绝写入，UI 需如实展示）。 */
-    autostartEffective: bootDesktop.readLoginItemSettings().openAtLogin === true,
-  };
-});
-
-ipcMain.handle('orchdesk:desktop-set', async (_e, key: unknown, value: unknown) => {
-  const res = setDesktopKey(bootDesktop.desktopConfig, key, value);
-  if (!res.ok || !res.key) return { ok: false, config: { ...bootDesktop.desktopConfig }, reason: res.reason };
-  bootDesktop.setDesktopConfig(saveDesktopConfig(res.config, dataDir()));
-  // 只重放受影响的那一项：切换「自动更新」不该去动系统登录项。
-  switch (res.key) {
-    case 'tray': bootDesktop.applyTray(bootDesktop.desktopConfig.tray); break;
-    case 'shortcut': bootDesktop.applyShortcut(bootDesktop.desktopConfig.shortcut); break;
-    case 'autostart': {
-      const r = bootDesktop.applyAutostart(bootDesktop.desktopConfig.autostart);
-      if (!r.ok) return { ok: true, config: { ...bootDesktop.desktopConfig }, warning: `系统未接受自启动设置：${r.reason}` };
-      break;
-    }
-    case 'autoupdate': if (bootDesktop.desktopConfig.autoupdate) bootDesktop.applyAutoUpdate(true); break;
-    case 'floating': bootDesktop.applyFloating(bootDesktop.desktopConfig.floating); break;
-    case 'notify': if (bootDesktop.desktopConfig.notify) bootDesktop.notifyDesktop('OrchDesk', '系统通知已开启'); break;
-  }
-  log('INFO', 'desktop', `桌面集成开关变更：${DESKTOP_LABELS[res.key]} → ${bootDesktop.desktopConfig[res.key] ? '开' : '关'}`);
-  return {
-    ok: true,
-    config: { ...bootDesktop.desktopConfig },
-    changed: res.changed,
-    autostartEffective: bootDesktop.readLoginItemSettings().openAtLogin === true,
-  };
-});
-
-/** 悬浮窗上下文：渲染层切换会话时推送（主进程不猜「当前会话」）。 */
-ipcMain.handle('orchdesk:desktop-floating-context', async (_e, ctx: { title?: string; sessions?: number }) => {
-  const safeTitle = String(ctx?.title || '').trim().slice(0, 80);
-  const safeSessions = Number.isFinite(ctx?.sessions) ? Math.max(0, Math.trunc(Number(ctx.sessions))) : 0;
-  bootDesktop.setFloatingContext({ title: safeTitle, sessions: safeSessions });
-  if (bootDesktop.floatingWindow && !bootDesktop.floatingWindow.isDestroyed()) bootDesktop.renderFloatingWindow();
-  return { ok: true, context: { ...bootDesktop.floatingContext } };
-});
-
-/**
- * 打开项目绑定的本地文件夹（项目 `··` 菜单）或数据目录（设置页）。
- * 传 `boundPath` → 打开该项目绑定的目录；不传 → 打开数据目录（语义由调用方决定）。
- *
- * BUG-022：此前恒打开 `dataDir()`，**绑定的项目目录形同虚设**——而创建项目弹窗还写着
- * 「绑定后可通过『打开项目目录』快速访问」，等于用假承诺糊住一个死挂点。
- *
- * 关键口径：绑定路径不存在 / 不是目录时**明确报错**，绝不静默回退数据目录。
- * 静默回退会让用户以为打开的是项目目录，与「降级必须可见」冲突，且掩盖数据错配。
- */
-ipcMain.handle('orchdesk:open-project-dir', async (_e, boundPath?: string) => {
-  const raw = typeof boundPath === 'string' ? boundPath.trim() : '';
-  const source: 'bound' | 'data' = raw ? 'bound' : 'data';
-  try {
-    const target = raw ? path.resolve(raw) : dataDir();
-    if (source === 'bound') {
-      // 目录可能已被删/移动过：渲染层只知道「当初绑的是什么」，真实性由主进程兜底
-      const st = fs.statSync(target);
-      if (!st.isDirectory()) return { ok: false, source, reason: `绑定的路径不是文件夹：${target}` };
-    }
-    const openErr = await shell.openPath(target); // 成功返回 ''，失败返回错误描述（旧代码忽略了它 → 失败也报 ok）
-    if (openErr) return { ok: false, source, reason: openErr };
-    return { ok: true, source, path: target };
-  } catch (err) {
-    return {
-      ok: false,
-      source,
-      reason: source === 'bound' ? `绑定的目录不可访问：${(err as Error).message}` : (err as Error).message,
-    };
-  }
-});
-
-/** 打开日志目录（诊断模型调用 / 插件加载问题）。 */
-ipcMain.handle('orchdesk:open-log-dir', async () => {
-  try {
-    const dir = path.join(dataDir(), 'logs');
-    fs.mkdirSync(dir, { recursive: true });
-    const openErr = await shell.openPath(dir); // 与 BUG-022 同款：成功返回 ''，忽略返回值会让失败也报 ok
-    if (openErr) return { ok: false, reason: openErr };
-    return { ok: true, file: logFilePath() ?? undefined };
-  } catch (err) {
-    return { ok: false, reason: (err as Error).message };
-  }
-});
 
 /**
  * 设置会话工作区（BUG-023）：项目绑定目录 → 会话默认 cwd 的唯一贯通点。
