@@ -27,7 +27,7 @@
 ## 下一步
 
 - GUI / PTY / CDP 实机冒烟仍待正常 Windows 桌面按 [smoke-checklist](../40-质量/smoke-checklist.md) 回勾。
-- 工程债（已开工、未收口）：`runAgentTurn` 已抽到 `agent-turn.ts`；`executeTool` 已抽到 `tool-exec.ts`；浏览器 / 终端 / 文件面板 / 连接器 / MCP / 本地插件市场 IPC 已抽到 `ipc-browser.ts` / `ipc-terminal.ts` / `ipc-file-panel.ts` / `ipc-connectors.ts` / `ipc-mcp.ts` / `ipc-market.ts`（须在 `ipcMain.handle` sender 门 patch 之后注册）。`main.ts` 仍含会话 / 模型 / 授权 / 沙箱 / 记忆等其余 IPC。O2 双 runtime 与 SessionStore **不要**在本轮做。回合 abort 已接线。chat/ollama **请求 `stream:true`**：SSE/NDJSON 增量 `onDelta`；JSON 网关整包兜底；网关 400/415/422 拒流时同轮改 `stream:false`（含 tool 的 400 仍走工具降级）。`responses`/`completions` 仍非流式。
+- 工程债（已开工、未收口）：`runAgentTurn` 已抽到 `agent-turn.ts`；`executeTool` 已抽到 `tool-exec.ts`。IPC 已抽到 `ipc-browser.ts` / `ipc-terminal.ts` / `ipc-file-panel.ts` / `ipc-connectors.ts` / `ipc-mcp.ts` / `ipc-market.ts` / `ipc-sandbox.ts` / `ipc-authz.ts` / `ipc-memory.ts` / `ipc-prompt.ts` / `ipc-plugins.ts` / `ipc-guanji.ts` / `ipc-hub.ts` / `ipc-data-ops.ts` / `ipc-desktop.ts`（须在 `ipcMain.handle` sender 门 patch 之后注册）。`main.ts` 仍含会话 / 模型 / TRACE / 用量 / 项目 / `set-session-cwd` 等其余 IPC。O2 双 runtime 与 SessionStore **不要**在本轮做。回合 abort 已接线。chat/ollama **请求 `stream:true`**：SSE/NDJSON 增量 `onDelta`；JSON 网关整包兜底；网关 400/415/422 拒流时同轮改 `stream:false`（含 tool 的 400 仍走工具降级）。`responses`/`completions` 仍非流式。
 - 版本治理细节见 [VERSION-GOVERNANCE](./VERSION-GOVERNANCE.md)；打包与 Release 踩坑见 [release.md](../50-发布/release.md)。
 - 当前产品状态 canonical 页：[current-state.md](./current-state.md)。
 
