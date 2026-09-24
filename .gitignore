@@ -38,3 +38,11 @@ apps/desktop/build/trace-key.local
 apps/desktop/build/trace-token.enc.json
 _tmp_*
 .git-broken-*
+
+# impeccable skill 的安装产物（项目级安装只在 .agents/skills/impeccable/；
+# 下面是它往各工具目录落的副本与本地运行状态，不入库）
+.impeccable/
+.codex/
+.github/agents/
+.github/hooks/
+.github/skills/
