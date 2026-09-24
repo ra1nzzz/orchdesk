@@ -228,7 +228,12 @@ const { check, summary } = createChecker();
 
   await check('file-write：外部修改过 → 拒绝 code=modified-externally（磁盘内容不被覆盖）', async () => {
     const rd = await fileRead(editPath);
-    // 模拟外部修改（编辑器 / git / Agent 工具）：内容与 mtime 都变了
+    // 模拟外部修改（编辑器 / git / Agent 工具）：内容与 mtime 都变了。
+    // 先等 10ms：真实的外部写入不可能发生在读取后 1ms 内，而快速 NVMe 上
+    // 立即 append 的 mtime 漂移仅 ~1ms，会落入生产代码刻意的 2ms 容差区间
+    // （容差吸收的是同 tick 浮点抖动，不是 1ms 内的真实改写）——不等就会
+    // 把「容差设计」误测成「防覆盖失效」。
+    await new Promise((r) => setTimeout(r, 10));
     fs.appendFileSync(editPath, 'external-edit\r\n');
     const res = await fileWrite({ path: editPath, content: '覆盖!', expectedMtimeMs: rd.mtimeMs });
     assert.strictEqual(res.ok, false);

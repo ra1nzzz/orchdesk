@@ -242,6 +242,24 @@ const { check, summary } = createChecker();
     sp.setNetworkAllow(['*']); // 复位，避免影响后续用例
   });
 
+  await check('C1 风控档位：authMode 可分辨 + trusted 种子合并（default 不合并）', () => {
+    const sp = require('./dist/dsh-runtime.js').getService('sandboxPolicy');
+    sp.setAuthMode('default');
+    assert.strictEqual(sp.getAuthMode(), 'default', '默认档可读');
+    sp.setAuthMode('trusted');
+    assert.strictEqual(sp.getAuthMode(), 'trusted', 'trusted 必须可分辨（历史同参 bug：反推法分不出）');
+    // trusted：有效名单 = 用户自填 ∪ 预置种子（存储态仍只有自填）
+    sp.setNetworkAllow([]);
+    assert.strictEqual(sp.isDomainAllowed('https://github.com/x'), true, 'trusted 种子域名应放行');
+    assert.strictEqual(sp.isDomainAllowed('https://models.dev/api.json'), true, '种子含 models.dev');
+    assert.strictEqual(sp.isDomainAllowed('https://not-a-seed.example.com'), false, '非种子域名仍拒');
+    assert.ok(sp.getNetworkAllow().includes('github.com'), 'UI 口径（getNetworkAllow）也应含种子');
+    // default：仅自填，种子不生效
+    sp.setAuthMode('default');
+    assert.strictEqual(sp.isDomainAllowed('https://github.com/x'), false, '回 default 后种子不再生效');
+    sp.setNetworkAllow(['*']); // 复位
+  });
+
   // -------------------------------------------------------------------------
   console.log('== TRACE 配置注入（TOKEN 加密内置 + 用户开关）==');
   const rtMod = require('./dist/dsh-runtime.js'); // 同缓存单例；buildTraceConfig 为纯函数

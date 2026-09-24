@@ -238,7 +238,11 @@ async function run() {
       }),
       abortAgentTurn: () => Promise.resolve({ ok: false, reason: 'no-active-turn' }),
       getAuthMode: () => Promise.resolve({ mode: 'default' }),
-      setAuthMode: () => Promise.resolve({ ok: true }),
+      // P4-S6-2：__p4AuthFail=1 → 持久化失败（验证乐观更新被回滚，P0）
+      setAuthMode: () => Promise.resolve((() => {
+        try { return localStorage.getItem('__p4AuthFail') === '1' ? { ok: false, reason: 'E2E mock 持久化失败' } : { ok: true }; }
+        catch (e) { return { ok: true }; }
+      })()),
       getAuthLevels: () => Promise.resolve([]),
       getAuthAudit: () => Promise.resolve([]),
       onAuthRequest: () => () => {},
@@ -525,9 +529,45 @@ async function run() {
       // BUG-023：文件面板缺省根依赖 fileTree 返回真实形状的条目（此前 mock 无此方法，
       // 点开文件面板会直接 TypeError —— 渲染层只对「返回 bridgeMissing」有防御）。
       fileTree: () => Promise.resolve({ ok: true, entries: [{ name: 'src', kind: 'dir' }, { name: 'README.md', kind: 'file', sizeLabel: '1 KB' }], truncated: false }),
-      getModelConfig: () => Promise.resolve({ providers: [{ n: '本地', type: 'ollama', models: [{ n: 'qwen3:14b' }] }], selectedModels: ['qwen3:14b'], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' }),
-      saveModelConfig: () => Promise.resolve({ ok: true }),
+      // P2：__p2NoProviders=1 → 空提供商（演示模式 / 未配置 chip 用例）；否则本地 Ollama 一个模型。
+      // 修正 models 形状为字符串数组——与主进程 loadModelConfig 一致（旧桩给的是对象数组，
+      // 渲染层 flatMap 后 chip 会渲染成 [object Object]）。
+      getModelConfig: () => Promise.resolve((() => {
+        try { if (localStorage.getItem('__p2NoProviders') === '1') return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' }; } catch (e) { /* ignore */ }
+        return { providers: [{ id: 'ollama-local', name: '本地', type: 'ollama', models: ['qwen3:14b'] }], selectedModels: ['qwen3:14b'], defaultProvider: 'ollama', defaultModel: 'qwen3:14b' };
+      })()),
+      // P2：本机 Ollama 自发现。__p2Ollama=1 → 探到两个模型（一键接入用例）。
+      probeOllama: () => Promise.resolve((() => {
+        try { if (localStorage.getItem('__p2Ollama') === '1') return { ok: true, models: ['qwen3:14b', 'llama3:8b'] }; } catch (e) { /* ignore */ }
+        return { ok: false, models: [], reason: '未探测到本机 Ollama' };
+      })()),
+      // P4-S5-3：__term=1 → 终端已接入（验证冷启图标不再把「已接入」显示成「未接入」）。
+      // 默认 null（= 预览态无主进程），此时图标显示未接入是如实的。
+      terminalStatus: () => Promise.resolve((() => {
+        try { return localStorage.getItem('__term') === '1'; } catch (e) { return false; }
+      })() ? { ok: true, ptyAvailable: true, via: 'pty', sessions: [] } : null),
+      saveModelConfig: (config) => { try { window.__modelConfig = config; } catch (e) { /* ignore */ } return Promise.resolve({ ok: true }); },
       testModel: () => Promise.resolve({ ok: false }),
+      // models.dev 目录预设 + 可用模型拉取（方案 A）：目录桩 + live 桩。
+      // listModels 对 deepseek 回 mixed（2/3 带目录元数据），其余回 live。
+      getModelCatalog: () => Promise.resolve({
+        ok: true,
+        providers: [
+          { id: 'deepseek', name: 'DeepSeek', api: 'https://api.deepseek.com/v1', modelCount: 2 },
+          { id: 'openai', name: 'OpenAI', api: 'https://api.openai.com/v1', modelCount: 3 },
+          { id: 'ollama', name: 'Ollama', api: 'http://localhost:11434/v1', modelCount: 1 },
+        ],
+      }),
+      listModels: (input) => Promise.resolve({
+        ok: true,
+        source: String(input && input.baseUrl || '').includes('deepseek') ? 'mixed' : 'live',
+        models: [
+          { id: 'deepseek-chat', name: 'DeepSeek Chat', ctx: 128000, priceIn: 0.27, priceOut: 1.1, caps: ['tool_call'], enriched: true },
+          { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', ctx: 128000, enriched: true },
+          { id: 'other-model' },
+        ],
+        matched: { id: 'deepseek', name: 'DeepSeek', api: 'https://api.deepseek.com/v1' },
+      }),
       // PRD FR-4.2：数据目录内容清单。此前设置页写死「~ 24 MB」，与真实磁盘无关。
       // 置 window.__dirInv = null 可模拟「主进程桥不可用」，验证 UI 显示「未接入」而非假数字。
       getDataDirInventory: () => Promise.resolve(window.__dirInv === null
@@ -548,6 +588,36 @@ async function run() {
           }),
     };
   });
+
+  // P1.1 轻模式：右栏默认收起。元素始终在 DOM（CSS 隐藏），须按可见性判断——
+  // 数 count 会把隐藏元素当已展开（曾致守卫失效、点击隐藏元素超时）。
+  // P1.2 轻模式导航：rail 已隐藏，导航走标题栏 ☰ / Ctrl+K 抽屉。
+  // 显式点抽屉内项（#navDrawer 作用域），不依赖 DOM 顺序。
+  // P3 前置：project 态 ☰ 隐藏、无抽屉，导航走 rail。两种模式都要能导航，
+  // 否则项目模式一开、全组导航用例集体超时（评审 C-F5）。
+  const navTo = async (id) => {
+    const railLink = page.locator('#rail [data-action="nav"][data-id="' + id + '"]');
+    if (await railLink.count() > 0 && await railLink.first().isVisible()) {
+      await railLink.first().click();
+      await page.waitForTimeout(400);
+      return;
+    }
+    const drawerBtn = page.locator('[data-action="nav-drawer"]');
+    if (await drawerBtn.count() > 0 && await drawerBtn.first().isVisible()) {
+      await drawerBtn.first().click();
+      await page.waitForTimeout(200);
+    }
+    await page.locator('#navDrawer [data-action="nav"][data-id="' + id + '"]').first().click();
+    await page.waitForTimeout(400);
+  };
+
+  const ensureCtxOpen = async () => {
+    const tab = page.locator('[data-action="ctx-tab"]').first();
+    if (await tab.count() === 0) return;
+    if (await tab.isVisible()) return;
+    const tg = page.locator('[data-action="toggle-ctx"]').first();
+    if (await tg.count() > 0) { await tg.click(); await page.waitForTimeout(300); }
+  };
 
   await page.goto(url, { waitUntil: 'networkidle' });
   await page.waitForTimeout(800);
@@ -581,6 +651,29 @@ async function run() {
   const themeInNav = page.locator('[data-action="toggle-theme"]');
   await assert(await themeInNav.count() > 0, '主题切换仍有入口（左下角导航底部）');
 
+  // P1.2 轻模式导航收拢：☰ 入口可见、rail 隐藏、抽屉可唤出且能导航
+  const navDrawerBtn = page.locator('#navDrawerBtn');
+  await assert(await navDrawerBtn.count() > 0 && await navDrawerBtn.isVisible(), '轻模式标题栏 ☰ 导航入口可见');
+  await assert(!(await page.locator('#rail').first().isVisible().catch(() => false)), '轻模式 rail 已隐藏');
+  await navDrawerBtn.click();
+  await page.waitForTimeout(250);
+  await assert(await page.locator('#navDrawer').count() > 0, '☰ 点击后导航抽屉展开');
+  await assert(await page.locator('#navDrawer [data-action="nav"]').count() === 3, '抽屉含 会话/插件/设置 三项');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(150);
+  // A-P2-1 回归：抽屉内点「切换主题」（不关抽屉）后，外点仍必须能关掉抽屉。
+  // 旧实现用 {once:true} 挂外点监听，该次点击把监听消耗掉 → 永久失去外点关闭。
+  await navDrawerBtn.click();
+  await page.waitForTimeout(200);
+  await page.locator('#navDrawer [data-action="toggle-theme"]').first().click();
+  await page.waitForTimeout(150);
+  await assert(await page.locator('#navDrawer').count() > 0, '抽屉内切换主题后抽屉保持展开');
+  await page.locator('#navDrawer [data-action="toggle-theme"]').first().click();
+  await page.waitForTimeout(150);
+  await page.evaluate(() => document.body.click());
+  await page.waitForTimeout(200);
+  await assert(await page.locator('#navDrawer').count() === 0, '抽屉内操作后外点仍可关闭抽屉');
+
   // 需求3：浏览器 / 终端 的文字按钮已从标题栏下移为状态栏右下角图标。
   await waitForVisible('#sbActions .sb-icon'); // 等 init 的 Promise.allSettled 建完图标区
   const sbIcons = page.locator('#sbActions .sb-icon');
@@ -597,6 +690,9 @@ async function run() {
 
   const homeComposer = page.locator('#homeComposer');
   await assert(await homeComposer.count() > 0, '#homeComposer 输入框存在');
+
+  // P1.4：隐式工作目录 chip（轻会话默认 cwd 入口，项目选择降级为可选）
+  await assert(await page.locator('.ws-chip').count() > 0, '欢迎页有工作目录 chip（隐式 cwd 入口）');
 
   const homeSendBtn = page.locator('[data-action="home-send"]');
   await assert(await homeSendBtn.count() > 0, 'home-send 按钮存在');
@@ -645,6 +741,46 @@ async function run() {
   await waitForCount('.msg.agent', 1);
   const agentCount = await page.locator('.msg.agent').count();
   await assert(agentCount >= 1, 'Agent 回复已出现（count=' + agentCount + ')');
+
+  // ================================================================
+  // 测试组 3B：任务监控自动浮出（P1.3 轻模式）
+  // 回合开始自动开面板；回合中手动调过 = 用户接管，结束后不再自动动。
+  // ================================================================
+  console.log('📋 测试组 3B：任务监控自动浮出（P1.3）');
+
+  // 接管 runAgentTurn 为「手动放行」，让回合停留足够久做断言
+  await page.evaluate(() => {
+    window.orchdesk.runAgentTurn = (sid, text, opts) => new Promise((resolve) => {
+      window.__turnResolve = (r) => resolve(r);
+    });
+  });
+  // 确保处于收起态（若已被前序用例展开，先手动收起）
+  {
+    const grid = page.locator('#appGrid');
+    if ((await grid.getAttribute('class') || '').includes('has-ctx')) {
+      await page.locator('[data-action="toggle-ctx"]').first().click();
+      await page.waitForTimeout(250);
+    }
+  }
+  const p13Box = (await page.locator('#composer').count()) ? page.locator('#composer') : page.locator('#homeComposer');
+  await p13Box.first().fill('P1.3 自动浮出测试');
+  await page.locator('[data-action="send"], [data-action="home-send"]').first().click();
+  await page.waitForTimeout(300);
+  await assert(await page.locator('#appGrid').evaluate((el) => el.classList.contains('has-ctx')),
+    '回合开始后任务监控自动浮出（轻模式）');
+
+  // 回合中手动关闭 = 用户接管
+  await page.locator('[data-action="toggle-ctx"]').first().click();
+  await page.waitForTimeout(200);
+  await assert(!(await page.locator('#appGrid').evaluate((el) => el.classList.contains('has-ctx'))),
+    '回合中手动关闭面板生效');
+  // 放行回合结束 → 等过自动收起窗口（5s）→ 面板应保持手动状态
+  await page.evaluate(() => window.__turnResolve({ text: 'P1.3 done', intent: 'ACT', tools: [], steps: 0 }));
+  await page.waitForTimeout(6000);
+  await assert(!(await page.locator('#appGrid').evaluate((el) => el.classList.contains('has-ctx'))),
+    '手动接管后回合结束不自动开/关面板');
+  // 还原默认桥（后续用例走即时回复桩）
+  await page.evaluate(() => { delete window.__turnResolve; });
 
   // ================================================================
   // 测试组 4：侧栏 — 项目/会话结构 + 操作菜单
@@ -777,6 +913,10 @@ async function run() {
     await allSessItems.first().click();
     await page.waitForTimeout(400);
 
+    // P1.1 轻模式：右栏默认收起——进入会话后展开一次，恢复后续 ctx-tab 等
+    // 用例的面板可见前置条件（已展开则跳过，避免再点成收起）。
+    await ensureCtxOpen();
+
     // Verify right panel exists and has tabs
     const ctxPanel = page.locator('.context');
     await assert(await ctxPanel.count() > 0, '右侧面板 .context 存在 (count=' + await ctxPanel.count() + ')');
@@ -835,7 +975,7 @@ async function run() {
   // ================================================================
   console.log('📋 测试组 6：设置页桌面集成开关');
 
-  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await navTo('settings');
   await page.waitForTimeout(500);
 
   await assert(await page.locator('#settings-section-desktop').count() > 0, '设置页「桌面集成」分组存在');
@@ -866,12 +1006,73 @@ async function run() {
   await assert(!(await autostartSw.getAttribute('class') || '').includes('on'), '再点回关');
 
   // ================================================================
+  // 测试组 6B：models.dev 预设 + KEY 触发拉取（方案 A）
+  // 预设可搜索下拉 → 选中自动填名称/URL → KEY 防抖拉取 → 复选框面板默认全选
+  // → 取消勾选 → 保存落盘为所选 id。桥桩见 getModelCatalog / listModels。
+  // ================================================================
+  console.log('📋 测试组 6B：模型提供商预设与可用模型拉取');
+
+  await assert(await page.locator('#settings-section-model').count() > 0, '模型管理分区存在');
+
+  // 预设下拉：展开 → 搜索过滤 → 选中
+  await page.locator('#mp-preset-btn').click();
+  await page.waitForTimeout(250);
+  await assert(await page.locator('#mp-preset-pop').count() > 0, '点击后预设面板展开');
+  await assert((await page.locator('#mp-preset-btn').getAttribute('aria-expanded')) === 'true', '按钮 aria-expanded=true');
+  await page.locator('#mp-preset-search').fill('deepseek');
+  await page.waitForTimeout(150);
+  const visPresets = await page.locator('#mp-preset-list .mp-preset-item:visible').count();
+  await assert(visPresets === 1, `搜索 deepseek 过滤后只剩 1 项可见（count=${visPresets}）`);
+  await assert(!(await page.locator('#mp-preset-list .mp-preset-item[data-id="openai"]').isVisible()), '不命中的 openai 项真实隐藏（可见性断言，非仅类名）');
+  await assert(await page.locator('#mp-preset-list .mp-preset-item[data-id="deepseek"]').isVisible(), '命中的 deepseek 项保持可见');
+  await page.locator('#mp-preset-search').fill('不存在的提供商xyz');
+  await page.waitForTimeout(150);
+  await assert(await page.locator('#mp-preset-empty').count() > 0, '无匹配时显示空态提示');
+  await page.locator('#mp-preset-search').fill('');
+  await page.waitForTimeout(150);
+  await page.locator('#mp-preset-list .mp-preset-item').first().click();
+  await page.waitForTimeout(250);
+  await assert(await page.locator('#mp-preset-pop').count() === 0, '选中后面板收起');
+  await assert((await page.locator('#mp-name').inputValue()) === 'DeepSeek', '预设选中自动填名称');
+  await assert((await page.locator('#mp-url').inputValue()).includes('deepseek'), '预设选中自动填 Base URL');
+
+  // 填 KEY → 防抖 800ms 后自动拉取（等 1.6s 覆盖防抖+IPC）
+  await page.locator('#mp-key').fill('sk-e2e-test-key');
+  await page.waitForTimeout(1600);
+  await assert(await page.locator('.mp-models-fs').count() === 1, '拉取成功后出现模型勾选面板');
+  const mpBoxes = page.locator('.mp-models-list input[type="checkbox"]');
+  await assert(await mpBoxes.count() === 3, `面板列出 3 个模型（count=${await mpBoxes.count()}）`);
+  await assert(await mpBoxes.nth(0).isChecked() && await mpBoxes.nth(1).isChecked() && await mpBoxes.nth(2).isChecked(), '默认全部勾选');
+  await assert(/已获取 3 个可用模型/.test(await page.locator('#mp-models-status').innerText()), '状态行报告来源与数量');
+  await assert((await page.locator('#mp-models-count').innerText()).includes('已选 3/3'), '计数 3/3');
+  // 目录增强 chip 与价格 chip 渲染
+  await assert(await page.locator('.mp-model .badge.ok').count() >= 2, '目录增强标记渲染（≥2）');
+  await assert((await page.locator('#mp-models-pool').innerText()).includes('$0.27'), '价格 chip 渲染');
+  // 取消一个勾选 → 计数局部更新
+  await mpBoxes.nth(2).uncheck();
+  await page.waitForTimeout(150);
+  await assert((await page.locator('#mp-models-count').innerText()).includes('已选 2/3'), '取消勾选后计数 2/3');
+  // 保存 → 落盘为勾选的 2 个 id
+  await page.locator('[data-action="model-add-provider"]').click();
+  await page.waitForTimeout(500);
+  const savedModels = await page.evaluate(() => {
+    const cfg = window.__modelConfig;
+    const p = cfg && cfg.providers && cfg.providers[cfg.providers.length - 1];
+    return p ? { name: p.name, models: p.models, presetId: p.presetId } : null;
+  });
+  await assert(savedModels && savedModels.name === 'DeepSeek', '提供商已保存且名称为预设名');
+  await assert(savedModels && JSON.stringify(savedModels.models) === JSON.stringify(['deepseek-chat', 'deepseek-reasoner']),
+    '保存的模型 = 勾选子集（' + JSON.stringify(savedModels && savedModels.models) + '）');
+  await assert(savedModels && savedModels.presetId === 'deepseek', 'presetId 随配置落盘');
+  await assert(await page.locator('#mp-models-pool .mp-models-fs').count() === 0, '保存后表单重置（勾选面板清空）');
+
+  // ================================================================
   // 测试组 7：授权白名单（PRD FR-9）
   // 此前授权粒度只有「单次」，设置页无白名单可看可撤销。
   // ================================================================
   console.log('📋 测试组 7：授权白名单');
 
-  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await navTo('settings');
   await page.waitForTimeout(400);
 
   await assert(await page.locator('#grant-tool').count() > 0, '白名单「添加」表单存在（操作类型 / 目标 / 粒度）');
@@ -907,7 +1108,7 @@ async function run() {
   // ================================================================
   console.log('📋 测试组 8：会话分叉与回放');
 
-  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await navTo('session');
   await page.waitForTimeout(500);
 
   // 分叉模块已随 index.html 加载（否则整组能力全是死的）
@@ -994,7 +1195,7 @@ async function run() {
   // ================================================================
   console.log('📋 测试组 9：沙箱日志检索');
 
-  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await navTo('settings');
   await page.waitForTimeout(500);
 
   // 选择器必须收敛到沙箱日志自己的容器：设置页里有两个 .sblog（沙箱日志 +
@@ -1027,10 +1228,11 @@ async function run() {
   await page.waitForTimeout(600);
   await assert(await sblog.count() === 1, `按「网络」过滤得 1 条（count=${await sblog.count()}）`);
 
-  // 清空
+  // 清空（P1 修复后为两段式：先开确认模态，再确认执行）
   await page.locator('#sblog-kind').selectOption('all');
   await page.waitForTimeout(500);
   await page.locator('[data-action="sblog-clear"]').click();
+  await page.locator('[data-action="sblog-clear-confirm"]').click();
   await page.waitForTimeout(600);
   await assert(await sblog.count() === 0, `清空后日志列表为空（count=${await sblog.count()}）`);
 
@@ -1149,7 +1351,11 @@ async function run() {
   // 清空审计
   await page.locator('#mp-ok').selectOption('all');
   await page.waitForTimeout(700);
+  // P4-S3-11：清空晋升审计改为先弹确认（与沙箱日志/卸载技能同一范式）
   await page.locator('[data-action="mp-clear"]').click();
+  await page.waitForTimeout(300);
+  await assert(await page.locator('#modalRoot .mh.danger').count() > 0, '清空晋升审计前弹破坏性操作确认');
+  await page.locator('#modalRoot [data-action="mp-clear-confirmed"]').click();
   await page.waitForTimeout(700);
   await assert(await mpLog.count() === 0, `清空后审计为空（count=${await mpLog.count()}）`);
 
@@ -1169,9 +1375,9 @@ async function run() {
 
   // 恢复记忆桥（上一组末尾把它打成 null 了）
   await page.evaluate(() => { window.__memOff = false; window.orchdesk.listMemoryDomain = () => Promise.resolve([]); });
-  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await navTo('session');
   await page.waitForTimeout(500);
-  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await navTo('settings');
   await page.waitForTimeout(800);
 
   const memCard = page.locator('#settings-section-memory').locator('..');
@@ -1184,18 +1390,18 @@ async function run() {
   await page.evaluate(() => {
     window.__summarize = { seam: true, provider: '本地 mock 网关', model: 'mock-model', mode: 'llm' };
   });
-  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await navTo('session');
   await page.waitForTimeout(500);
-  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await navTo('settings');
   await page.waitForTimeout(800);
   await assert(/模型摘要/.test(await memCard.innerText()), '配置模型后显示「模型摘要」');
   await assert(/mock-model/.test(await memCard.innerText()), '并显示具体模型名');
 
   // 桥不可用时不能伪装成「抽取式兜底」（那是另一种真实状态）
   await page.evaluate(() => { delete window.orchdesk.getMemorySummarizeStatus; });
-  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await navTo('session');
   await page.waitForTimeout(500);
-  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await navTo('settings');
   await page.waitForTimeout(800);
   await assert(/摘要状态未接入/.test(await memCard.innerText()), '桥不可用时显示「摘要状态未接入」');
 
@@ -1206,7 +1412,7 @@ async function run() {
   // ================================================================
   console.log('📋 测试组 12：连接器（FR-3）');
 
-  await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+  await navTo('plugins');
   await page.waitForTimeout(900);
 
   await assert(await page.locator('[data-action="conn-cfg"]').count() >= 3,
@@ -1277,19 +1483,24 @@ async function run() {
   const auditCount0 = await page.evaluate(() => window.__conn.audit.length);
   await assert(auditCount0 >= 5, `审计已有记录（count=${auditCount0}）`);
   await page.locator('[data-action="conn-audit-clear"]').click();
+  // P1 修复后审计清空为两段式确认，点掉确认模态再断言
+  await page.locator('[data-action="conn-audit-clear-confirm"]').click();
   await page.waitForTimeout(700);
   await assert((await page.evaluate(() => window.__conn.audit.length)) === 0, '审计已清空');
 
-  // 清除凭证 → 状态归零
+  // 清除凭证 → 状态归零（P4-S2-10：改为先弹确认，与清空审计/卸载技能同一范式）
   await page.locator('[data-action="conn-clear"][data-id="tencent-docs"]').click();
+  await page.waitForTimeout(300);
+  await assert(await page.locator('#modalRoot .mh.danger').count() > 0, '清除凭证前弹破坏性操作确认');
+  await page.locator('#modalRoot [data-action="conn-clear-confirmed"]').click();
   await page.waitForTimeout(700);
   await assert(/未配置/.test(await page.locator('.plug[data-cid="tencent-docs"]').innerText()), '清除后回到「未配置」');
 
   // 桥不可用 → 侧栏显「未接入」，不拿空数组冒充
   await page.evaluate(() => { window.__origGetConnectors = window.orchdesk.getConnectors; delete window.orchdesk.getConnectors; });
-  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await navTo('session');
   await page.waitForTimeout(400);
-  await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+  await navTo('plugins');
   await page.waitForTimeout(900);
   await assert(/连接器注册表未接入/.test(await page.locator('.main-inner').innerText()),
     '桥不可用时显「未接入」');
@@ -1297,9 +1508,9 @@ async function run() {
   // ---- 连接器自动发现（2026-09-06）：github 有「自动发现」按钮，点击回填发现的 token ----
   // 恢复连接器桥（上一段删了 getConnectors），回到插件页找 github 卡片。
   await page.evaluate(() => { window.orchdesk.getConnectors = (window.__origGetConnectors || (() => Promise.resolve({ items: [], stats: { total: 0, configured: 0, tested: 0, ok: 0 } }))); });
-  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await navTo('session');
   await page.waitForTimeout(300);
-  await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+  await navTo('plugins');
   await waitForVisible('[data-action="conn-discover"][data-id="github"]');
   const discBtn = page.locator('[data-action="conn-discover"][data-id="github"]').first();
   await assert(await discBtn.count() === 1, 'github 连接器有「自动发现」按钮');
@@ -1370,9 +1581,9 @@ async function run() {
   // ================================================================
   console.log('📋 测试组 12b：插件页搜索');
   // 先回会话页再进插件页，确保拿到干净的内置卡片列表（data-pid）
-  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await navTo('session');
   await page.waitForTimeout(300);
-  await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+  await navTo('plugins');
   await page.waitForTimeout(700);
   const builtinCount = await page.locator('.plug[data-pid]').count();
   await assert(builtinCount >= 4, `内置插件卡片已渲染（count=${builtinCount}）`);
@@ -1411,6 +1622,17 @@ async function run() {
   const installedRows = await page.locator('.is-row').count();
   await assert(installedRows === 2, `已安装技能清单渲染 2 条（count=${installedRows}）`);
   await assert(/已启用/.test(await page.locator('.is-row').first().innerText()), '已安装技能行显示状态');
+
+  // P1 评审修复回归：卸载确认流（确认按钮此前读 data-n，恒 undefined → 必然失败）
+  await page.evaluate(() => { window.__uninstallCalls = []; });
+  await page.locator('[data-action="skill-uninstall"]').first().click();
+  await page.waitForTimeout(250);
+  await assert(await page.locator('[data-action="skill-uninstall-confirm"]').count() > 0, '卸载技能弹出确认模态');
+  await page.locator('[data-action="skill-uninstall-confirm"]').first().click();
+  await page.waitForTimeout(400);
+  const uninstalled = await page.evaluate(() => window.__uninstallCalls || []);
+  await assert(uninstalled.length === 1 && uninstalled[0] === 'guanji',
+    '确认卸载以正确 slug 调用桥（data-id 读取修复，实际 ' + JSON.stringify(uninstalled) + '）');
 
   // ================================================================
   // 测试组 13：本地插件市场（PRD FR-3）
@@ -1510,6 +1732,7 @@ async function run() {
     // ③ 文件面板缺省根跟随当前会话的项目目录。注意：文件面板是全屏覆盖层，
     //    开着会挡住侧栏点击 —— 每次看完 .file-root 必须先关面板再切会话。
     //    需求3 之后入口从标题栏按钮改为：右栏「文件」TAB → 头部「全屏」按钮。
+    await ensureCtxOpen();
     const openFileFull = async () => {
       await page.locator('[data-action="ctx-tab"][data-id="files"]').first().click();
       await page.waitForTimeout(250);
@@ -1540,7 +1763,7 @@ async function run() {
   }
 
   // ---- 用量卡片（原标注「用量追踪（FR-5）」，内部标识已从 UI 移除，断言同步改对文案）----
-  await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+  await navTo('settings');
   await page.waitForTimeout(800);
   let settingsText = await page.locator('.main-inner').innerText();
   await assert(/用量追踪/.test(settingsText), '模型管理区有用量卡片');
@@ -1548,16 +1771,29 @@ async function run() {
   await assert(/128\.0k/.test(settingsText), '显示合计 tokens（128.0k）');
   await assert(/usage-model/.test(settingsText), '按模型聚合显示 usage-model');
 
+  // P4-S3-11：清空用量记账改为先弹确认（同为不可恢复的记账轨迹）
   await page.locator('[data-action="usage-clear"]').click();
+  await page.waitForTimeout(300);
+  await assert(await page.locator('#modalRoot .mh.danger').count() > 0, '清空用量记账前弹破坏性操作确认');
+  await page.locator('#modalRoot [data-action="usage-clear-confirmed"]').click();
   await page.waitForTimeout(600);
   await assert(/尚无用量记录/.test(await page.locator('.main-inner').innerText()), '清空后显示「尚无用量记录」（不是假 0 卡片）');
 
   // ---- FR-5 token 徽标：s3 的 assistant 消息 ----
-  await page.locator('[data-action="nav"][data-id="session"]').first().click();
+  await navTo('session');
   await page.waitForTimeout(500);
-  // 项目默认折叠 → 先展开 p1，再选会话 s3
-  const p1Toggle = page.locator('[data-action="proj-toggle"][data-id="p1"]');
-  if (await p1Toggle.count() > 0) { await p1Toggle.first().click(); await page.waitForTimeout(400); }
+  // 项目默认折叠 → 先展开 p1，再选会话 s3。
+  // 带校验的重试：侧栏整段 innerHTML 重渲染与点击窗口存在竞态，单次点击曾
+  // 落在相邻项目上（mousedown/mouseup 之间 DOM 移位）——点击后校验 chevron
+  // 展开态，未展开则重试（有界 3 次）。
+  for (let i = 0; i < 3; i++) {
+    const p1Toggle = page.locator('[data-action="proj-toggle"][data-id="p1"]');
+    if (await p1Toggle.count() === 0) break;
+    const chevClass = await p1Toggle.first().locator('.pf').getAttribute('class') || '';
+    if (chevClass.includes('open')) break;
+    await p1Toggle.first().click();
+    await page.waitForTimeout(300);
+  }
   await page.locator('[data-action="sel"][data-id="s3"]').first().click();
   await page.waitForTimeout(500);
   await assert(/↑1\.2k ↓45/.test(await page.locator('#msgScroll').innerText()), 'assistant 消息显示 token 徽标（↑1.2k ↓45）');
@@ -1622,7 +1858,7 @@ async function run() {
 
   // ---- ②+① 会话 s3：静态工具明细 + live 工具步骤 ----
   try {
-    await page.locator('[data-action="nav"][data-id="session"]').first().click();
+    await navTo('session');
     await page.waitForTimeout(500);
     // 项目默认折叠 → 按需展开 p1
     if (await page.locator('.sess[data-action="sel"][data-id="s3"]').count() === 0) {
@@ -1757,10 +1993,7 @@ async function run() {
 
   // ---- ④ 任务监控「能力」：插件状态按运行时真实装载标注 + 技能取磁盘真实扫描 ----
   try {
-    if (await page.locator('.ctx-tab').count() === 0) {
-      const tg = page.locator('[data-action="toggle-ctx"]').first();
-      if (await tg.count() > 0) { await tg.click(); await page.waitForTimeout(250); }
-    }
+    await ensureCtxOpen();
     const skillTab = page.locator('.ctx-tab[data-action="ctx-tab"][data-id="caps"]');
     await assert(await skillTab.count() > 0, '右侧面板有「能力」tab');
     await skillTab.first().click();
@@ -1789,7 +2022,7 @@ async function run() {
 
   // ---- ③ 设置页 statbar：真实数据目录 + 运行时就绪（去掉硬编码 %APPDATA%/dsh）----
   try {
-    await page.locator('[data-action="nav"][data-id="settings"]').first().click();
+    await navTo('settings');
     await page.waitForTimeout(900);
     const sb = await page.locator('.statbar').innerText();
     await assert(/…\/mock\/OrchDesk-Data/.test(sb), `数据目录 stat 显示真实目录末两段（实际=${sb.replace(/\n/g, ' | ').slice(0, 120)}）`);
@@ -1802,7 +2035,7 @@ async function run() {
 
   // ---- ⑤ 专家团派发：askInput 回调式 → 派发不再崩，composeTeam 真被调用 ----
   try {
-    await page.locator('[data-action="nav"][data-id="plugins"]').first().click();
+    await navTo('plugins');
     await page.waitForTimeout(600);
     // 专家·专家团在插件页左栏分组里，默认折叠 → 展开到能看见「派发任务」按钮
     if (await page.locator('[data-action="team-compose"]').count() === 0) {
@@ -1842,8 +2075,9 @@ async function run() {
   // 需求3 之后入口改为右栏「文件」TAB 头部的全屏按钮（不再有标题栏文字按钮）。
   try {
     // 前一用例停在插件页（右栏不是会话的任务监控，没有 ctx-tab）→ 先回会话页
-    await page.locator('[data-action="nav"][data-id="session"]').first().click();
+    await navTo('session');
     await page.waitForTimeout(500);
+    await ensureCtxOpen();
     await page.locator('[data-action="ctx-tab"][data-id="files"]').first().click();
     await page.waitForTimeout(250);
     await page.locator('[data-action="file-panel"]').first().click();
@@ -1882,16 +2116,12 @@ async function run() {
     await assert(await quickBtn.count() > 0, 'quick-weekly 模板按钮存在');
     if (await quickBtn.count() > 0) {
       await quickBtn.click({ force: true });
-      // quick-weekly 填模板后随即发送 → 会话视图出现用户消息；
+      // P4-S1-07：快捷操作只把模板填进输入框，不再代点发送。原实现无条件覆盖用户已在
+      // 欢迎页打好的文字并立即发送，toast 却说「已加载模板」——用户根本来不及编辑。
       // 修复前这里抛 ReferenceError（pageerror fail-fast 会以退出码 1 抓住）。
-      await waitForCount('.msg.user', 1);
-      const msgs = await page.locator('.msg.user').count();
-      await assert(msgs >= 1, 'quick-weekly 点击后模板被发送（用户消息出现，无 JS 异常）');
-      const firstText = await page.evaluate(() => {
-        const el = document.querySelector('.msg.user');
-        return el ? el.textContent || '' : '';
-      });
-      await assert(firstText.includes('周报'), 'quick-weekly 模板内容正确（含「周报」），实际: ' + firstText.slice(0, 60));
+      const filled = await page.locator('#homeComposer').inputValue();
+      await assert(filled.includes('周报'), 'quick-weekly 点击后模板填入输入框（实际 ' + JSON.stringify(filled.slice(0, 40)) + '）');
+      await assert(await page.locator('.msg.user').count() === 0, '快捷操作不代点发送（发不发由用户按发送决定）');
     }
   } catch (e) {
     await assert(false, `审查回归 quick-weekly (error: ${e.message.slice(0, 80)})`);
@@ -1918,6 +2148,346 @@ async function run() {
     }
   } catch (e) {
     await assert(false, `审查回归 confirm-yes (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ================================================================
+  // 测试组 16：P1 评审修复回归——隐式 cwd 建会话即生效（P1-2）
+  // 需要 reload 让 init 读取 localStorage 的 workspaceDir，故放末尾（重置不影响后续）。
+  // ================================================================
+  console.log('📋 测试组 16：隐式 cwd 建会话即生效（P1-2 回归）');
+  try {
+    await page.addInitScript(() => {
+      try { localStorage.setItem('orchdesk.workspaceDir', 'D:/Code/OrchDesk'); } catch (e) { /* ignore */ }
+    });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+    try {
+      const wzSkip = page.locator('[data-action="wz-skip"]');
+      if (await wzSkip.count() > 0) { await wzSkip.click({ force: true }); await page.waitForTimeout(300); }
+    } catch (e) { /* ignore */ }
+    // 重载后可能恢复上次的会话视图——先确保回到欢迎页（新建会话）
+    if (await page.locator('#homeComposer').count() === 0) {
+      const newConv = page.locator('[data-action="newconv"]');
+      if (await newConv.count() > 0) { await newConv.first().click(); await page.waitForTimeout(400); }
+    }
+    await page.evaluate(() => { window.__cwdCalls = []; });
+    await page.locator('#homeComposer').fill('P1.4 隐式 cwd 回归');
+    await page.locator('[data-action="home-send"]').first().click();
+    await page.waitForTimeout(600);
+    const cwdCalls = await page.evaluate(() => window.__cwdCalls || []);
+    await assert(cwdCalls.some((c) => c.dir === 'D:/Code/OrchDesk'),
+      '首个回合前隐式 cwd 即下发（home-send 分支修复，实际 ' + JSON.stringify(cwdCalls) + '）');
+  } catch (e) {
+    await assert(false, `隐式 cwd 回归 (error: ${e.message.slice(0, 80)})`);
+  }
+
+  // ================================================================
+  // 测试组 17：P2 模型内嵌——chip 三态 / Ollama 一键接入 / 内嵌面板 / 演示模式
+  // 每段 reload 前用 localStorage 开关切桩语义（同源，reload 后仍可读）。
+  // ================================================================
+  console.log('📋 测试组 17：P2 模型内嵌');
+  const p2Boot = async (ollama, noProviders) => {
+    // page.evaluate 只接受一个参数——多参数必须包成对象（否则直接抛 TypeError）。
+    await page.evaluate((flags) => {
+      try {
+        localStorage.setItem('__p2Ollama', flags.ollama ? '1' : '0');
+        localStorage.setItem('__p2NoProviders', flags.noProviders ? '1' : '0');
+      } catch (e) { /* ignore */ }
+    }, { ollama, noProviders });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+    try {
+      const wzSkip = page.locator('[data-action="wz-skip"]');
+      if (await wzSkip.count() > 0) { await wzSkip.click({ force: true }); await page.waitForTimeout(300); }
+    } catch (e) { /* ignore */ }
+    if (await page.locator('#homeComposer').count() === 0) {
+      const newConv = page.locator('[data-action="newconv"]');
+      if (await newConv.count() > 0) { await newConv.first().click(); await page.waitForTimeout(400); }
+    }
+  };
+
+  try {
+    const chip = page.locator('.composer .c-mp');
+
+    // 17.1 两者皆无 → chip「未配置模型」→ 点击就地开内嵌面板（不跳设置页）
+    await p2Boot(false, true);
+    await assert((await chip.innerText()).includes('未配置模型'),
+      '无模型时 chip 显示「未配置模型」（实际 ' + await chip.innerText() + '）');
+    await chip.click();
+    await page.waitForTimeout(300);
+    await assert((await page.locator('#modalRoot .mh').innerText()).includes('配置模型'), '点击 chip 就地打开内嵌配置面板');
+    await assert(await page.locator('#mp-key').count() === 1, '内嵌面板含 API Key 输入');
+    await assert(await page.locator('#mp-preset-btn').count() === 1, '内嵌面板含 models.dev 预设下拉');
+    await assert(await page.locator('#mp-models-pool').count() === 1, '内嵌面板含模型勾选区');
+    await assert(await page.locator('#homeComposer').count() === 1, '未跳转到设置页（仍停在欢迎页）');
+    await page.locator('[data-action="modal-cancel"]').first().click();
+    await page.waitForTimeout(200);
+
+    // 17.2 探到 Ollama → chip「发现 Ollama · 一键接入」→ 点击写真提供商配置
+    await p2Boot(true, true);
+    await assert((await chip.innerText()).includes('发现 Ollama'),
+      '探到 Ollama 时 chip 显示一键接入（实际 ' + await chip.innerText() + '）');
+    await chip.click();
+    await page.waitForTimeout(700);
+    const adopted = await page.evaluate(() => {
+      const cfg = window.__modelConfig;
+      const p = cfg && cfg.providers && cfg.providers[cfg.providers.length - 1];
+      return p ? { type: p.type, models: p.models, dp: cfg.defaultProvider } : null;
+    });
+    await assert(adopted && adopted.type === 'ollama', '一键接入写入 ollama 提供商（实际 ' + JSON.stringify(adopted) + '）');
+    await assert(adopted && JSON.stringify(adopted.models) === JSON.stringify(['qwen3:14b', 'llama3:8b']), '探到的模型全部纳入');
+    await assert((await chip.innerText()).includes('qwen3:14b'),
+      '接入后 chip 切到就绪态显示模型名（实际 ' + await chip.innerText() + '）');
+
+    // 17.3 无模型直接发送 → 演示模式：回显自证 + chip 标注 + 不伪装成真模型
+    await p2Boot(false, true);
+    await assert((await chip.innerText()).includes('未配置模型'), '演示前 chip 为未配置态');
+    await page.locator('#homeComposer').fill('演示模式回归：我想看看界面');
+    await page.locator('[data-action="home-send"]').first().click();
+    // 17.3a 回合进行中（演示 4 步 × 300ms ≈ 1.2s）：实时工具步骤就应出现在右栏。
+    // 此前 ctx 只从已落库的 m.tools 取，回合中右栏永远只有计划——P1.3 承诺没落地。
+    await page.waitForTimeout(700);
+    const ctxMid = await page.evaluate(() => {
+      const body = document.querySelector('#context .ctx-body');
+      return body ? body.innerText : '';
+    });
+    await assert(/执行明细/.test(ctxMid) && ctxMid.includes('orch-plan'),
+      '回合进行中实时工具步骤即进入右栏执行明细（实际 ' + JSON.stringify(ctxMid.slice(0, 100)) + '）');
+    await page.waitForTimeout(2100);
+    await assert((await chip.innerText()).includes('演示模式'),
+      '演示回合后 chip 标注「演示模式」（实际 ' + await chip.innerText() + '）');
+    const demoMsg = await page.locator('#msgList').innerText();
+    await assert(demoMsg.includes('演示模式') && demoMsg.includes('未调用任何模型'), '演示回复明确自证是本地回显');
+    await assert(demoMsg.includes('演示模式回归：我想看看界面'), '演示回复回显了用户输入');
+    const chipCls = await page.evaluate(() => {
+      const m = document.querySelector('.composer .c-mp');
+      return m ? m.className : '';
+    });
+    await assert(/mp-demo/.test(chipCls), 'chip 处于 demo 态而非 ready 态（不伪装真模型）');
+    // 17.3b 右栏任务监控随演示回合浮出，且演示工具步骤真进了右栏待办
+    // （断言点在 2.8s：演示回合约 1.2s 结束、5s 自动收梢，窗口内必然可见）
+    const ctxLive = await page.evaluate(() => {
+      const g = document.querySelector('#appGrid');
+      const body = document.querySelector('#context .ctx-body');
+      return { hasCtx: !!(g && g.classList.contains('has-ctx')), ctxText: body ? body.innerText : '' };
+    });
+    await assert(ctxLive.hasCtx, '演示回合触发右栏任务监控浮出（has-ctx）');
+    // 必须断言「执行明细」段 + 一个只可能来自工具步骤的名字：空态提示文案里也含
+    // 「orch-plan」（```orch-plan 围栏说明），只查它会假阳性（本轮就这么错过一次）。
+    await assert(/执行明细/.test(ctxLive.ctxText) && ctxLive.ctxText.includes('workspace-scan'),
+      '演示工具步骤落入右栏执行明细（实际 ' + JSON.stringify(ctxLive.ctxText.slice(0, 120)) + '）');
+  } catch (e) {
+    await assert(false, `P2 模型内嵌回归 (error: ${e.message.slice(0, 120)})`);
+  }
+
+  // ================================================================
+  // 测试组 18：P3 项目模式——模式记忆 / 切换入口 / 自动触发 / pinned 克制
+  // 每段 reload 前用 localStorage 开关设定初态（同源，reload 后仍可读）。
+  // ================================================================
+  console.log('📋 测试组 18：P3 项目模式');
+  const p3Boot = async (viewMode, pinned) => {
+    await page.evaluate((vm) => {
+      try {
+        localStorage.setItem('orchdesk.viewMode', vm.viewMode);
+        localStorage.setItem('orchdesk.viewModePinned', vm.pinned ? '1' : '0');
+      } catch (e) { /* ignore */ }
+    }, { viewMode, pinned });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+    try {
+      const wzSkip = page.locator('[data-action="wz-skip"]');
+      if (await wzSkip.count() > 0) { await wzSkip.click({ force: true }); await page.waitForTimeout(300); }
+    } catch (e) { /* ignore */ }
+    if (await page.locator('#homeComposer').count() === 0) {
+      const newConv = page.locator('[data-action="newconv"]');
+      if (await newConv.count() > 0) { await newConv.first().click(); await page.waitForTimeout(400); }
+    }
+  };
+  const railVisible = async () => (await page.locator('#rail').first().isVisible().catch(() => false));
+  const drawerBtnVisible = async () => (await page.locator('#navDrawerBtn').first().isVisible().catch(() => false));
+  const ctxVisible = async () => (await page.locator('[data-action="ctx-tab"]').first().isVisible().catch(() => false));
+  const p3CreateProj = async (name) => {
+    // 走 composer 的项目下拉 →「创建项目」，不用欢迎页的智能推荐快捷入口：
+    // 有会话历史时推荐位是主题相关项，「创建项目」不一定在其中（e2e 种子有会话）。
+    if (await page.locator('#homeComposer').count() === 0) {
+      const newConv = page.locator('[data-action="newconv"]');
+      if (await newConv.count() > 0) { await newConv.first().click(); await page.waitForTimeout(400); }
+    }
+    await page.locator('[data-action="proj-select-toggle"]').first().click();
+    await page.waitForTimeout(250);
+    await page.locator('#projDropdown [data-action="home-create-proj"]').first().click();
+    await page.waitForTimeout(300);
+    await page.locator('#newProjName').fill(name);
+    await page.locator('[data-action="do-create-proj-home"]').click();
+    await page.waitForTimeout(700);
+  };
+
+  try {
+    // 18.1 轻态默认：rail 隐藏、☰ 可见、右栏收起
+    await p3Boot('light', false);
+    await assert(!(await railVisible()), '轻态 rail 隐藏');
+    await assert(await drawerBtnVisible(), '轻态 ☰ 导航入口可见');
+    await assert(!(await ctxVisible()), '轻态右栏默认收起');
+
+    // 18.2 抽屉切换到项目模式：rail 恢复、右栏常驻、☰ 隐藏
+    await page.locator('#navDrawerBtn').first().click();
+    await page.waitForTimeout(250);
+    await page.locator('#navDrawer [data-action="view-mode-toggle"]').first().click();
+    await page.waitForTimeout(500);
+    await assert(await railVisible(), '切到项目态后 rail 恢复可见');
+    await assert(!(await drawerBtnVisible()), '项目态 ☰ 隐藏（导航走 rail）');
+    await assert(await ctxVisible(), '项目态右栏任务监控常驻');
+
+    // 18.3 模式记忆：reload 后仍在项目态
+    await p3Boot('project', false);
+    await assert(await railVisible(), 'reload 后仍在项目态（模式选择记忆）');
+    await assert(await ctxVisible(), 'reload 后右栏仍常驻');
+
+    // 18.4 project 态导航走 rail（C-F5 修的路径：此前 project 态 navTo 必超时）
+    await navTo('settings');
+    await page.waitForTimeout(400);
+    await assert(await page.locator('#settings-section-model').count() > 0, 'project 态下导航到设置页成功（走 rail）');
+    await navTo('session');
+    await page.waitForTimeout(400);
+
+    // 18.5 手动回落轻模式 → pinned；reload 后仍是轻态
+    await page.locator('#rail [data-action="view-mode-toggle"]').first().click();
+    await page.waitForTimeout(500);
+    await assert(!(await railVisible()), 'rail 上的模式切换可回落轻模式');
+    await p3Boot('light', true);
+    await assert(!(await railVisible()), '手动切回轻模式后 reload 仍是轻态（偏好被记住）');
+
+    // 18.6 pinned 后建项目不再自动升级（自动升级是「按需」，不是替用户决定）
+    await p3CreateProj('P3 pinned 项目');
+    await assert(!(await railVisible()), '用户手动切过模式后，建项目不再自动升级（viewModePinned）');
+
+    // 18.7 未 pinned 的轻态下建项目 → 自动升级项目模式（spec §6 触发①）
+    await p3Boot('light', false);
+    await p3CreateProj('P3 自动升级项目');
+    await assert(await railVisible(), '轻态下建项目自动升级到项目模式（spec §6 触发①）');
+    await assert(await ctxVisible(), '自动升级后右栏任务监控常驻');
+  } catch (e) {
+    await assert(false, `P3 项目模式回归 (error: ${e.message.slice(0, 120)})`);
+  }
+
+  // ================================================================
+  // 测试组 19：P4 UX 评审修复回归（spec §7）
+  // 覆盖：S1-02/S1-03 状态不写死 · S3-01 不产假模型 · S3-02 编辑保存后表单复位
+  //       S6-2 授权模式失败回滚(P0) · S5-2 文件 TAB 认隐式 cwd · S5-3 终端图标不谎报
+  // ================================================================
+  console.log('📋 测试组 19：P4 UX 修复回归');
+  try {
+    // 19.1 S1-03：意图识别行只在会话页 composer 的「更多」里，且必须读运行时
+    await page.evaluate(() => { try { localStorage.setItem('__rt', '0'); localStorage.setItem('__term', '1'); } catch (e) { /* ignore */ } });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+    if (await page.locator('#composer').count() === 0) {
+      const nc = page.locator('[data-action="newconv"]');
+      if (await nc.count() > 0) { await nc.first().click(); await page.waitForTimeout(300); }
+      await page.locator('.sess').first().click();
+      await page.waitForTimeout(400);
+    }
+    await page.locator('[data-action="composer-more-toggle"]').first().click();
+    await page.waitForTimeout(250);
+    const intentVal = await page.locator('.composer-more-item .cm-val').last().innerText();
+    await assert(/按拒绝处理/.test(intentVal),
+      '意图门未就绪时显示按拒绝处理而非写死「本地模型」（实际 ' + JSON.stringify(intentVal) + '）');
+    const composerPh = await page.locator('#composer').first().getAttribute('placeholder');
+    await assert(!/先经意图识别插件初筛/.test(composerPh || ''),
+      '意图门未就绪时 placeholder 不承诺「先经意图识别插件初筛」（实际 ' + JSON.stringify(composerPh) + '）');
+
+    // 19.1b S1-02：右栏副标题的无会话分支不再写死「DSH 插件 · 已启用」
+    const ncBtn = page.locator('[data-action="newconv"]');
+    if (await ncBtn.count() > 0) { await ncBtn.first().click(); await page.waitForTimeout(400); }
+    await ensureCtxOpen();
+    const ctxSub = await page.locator('#context .ctx-subtitle').first().innerText();
+    await assert(/未接入/.test(ctxSub),
+      '运行时未就绪时右栏副标题显示未接入而非写死「已启用」（实际 ' + JSON.stringify(ctxSub) + '）');
+
+    // 19.6 S5-3：terminalStatus 有返回时，终端图标不再置灰显示「未接入主进程」
+    const termBtn = page.locator('#terminalBtn');
+    await assert(await termBtn.count() > 0, '状态栏有终端图标');
+    const termCls = await termBtn.first().getAttribute('class');
+    await assert(!/unavailable/.test(termCls || ''),
+      'terminalStatus 可用时终端图标不显示 unavailable（实际 class=' + JSON.stringify(termCls) + '）');
+
+    // 19.4 S6-2（P0）：setAuthMode 持久化失败 → 乐观更新必须回滚
+    await page.evaluate(() => { try { localStorage.setItem('__p4AuthFail', '1'); } catch (e) { /* ignore */ } });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+    await page.locator('[data-action="composer-more-toggle"]').first().click();
+    await page.waitForTimeout(200);
+    await page.locator('[data-action="auth-open"]').first().click();
+    await page.waitForTimeout(300);
+    // 从默认(default)切到 trusted 是放宽 → 走二次确认；确认后 IPC 失败
+    await page.locator('#modalRoot [data-action="auth-mode-pick"][data-id="trusted"]').first().click();
+    await page.waitForTimeout(300);
+    const confirmBtn = page.locator('#modalRoot [data-action="auth-do-switch"]');
+    if (await confirmBtn.count() > 0) { await confirmBtn.first().click(); }
+    await page.waitForTimeout(700);
+    const afterFail = await page.evaluate(() => {
+      const card = document.querySelector('#modalRoot [data-action="auth-mode-pick"][data-id="trusted"]');
+      const stat = document.querySelector('.statbar');
+      return { trustedMarkedCurrent: !!(card && /当前/.test(card.textContent || '')), statText: stat ? stat.innerText : '' };
+    });
+    await assert(!afterFail.trustedMarkedCurrent,
+      '授权模式持久化失败后不把 trusted 标为「当前」（P0：UI 不得展示比现实更严/更松的姿态）');
+    await page.evaluate(() => { try { localStorage.setItem('__p4AuthFail', '0'); } catch (e) { /* ignore */ } });
+
+    // 19.2 S3-01：拉取面板出现过但取消全部勾选 → 阻止保存，不落 default 假模型
+    await navTo('settings');
+    await page.waitForTimeout(400);
+    await page.locator('#mp-preset-btn').first().click();
+    await page.waitForTimeout(250);
+    await page.locator('#mp-preset-list [data-action="mp-preset-pick"][data-id="deepseek"]').first().click();
+    await page.waitForTimeout(250);
+    await page.locator('#mp-key').fill('sk-e2e-test-key');
+    await page.waitForTimeout(1700);
+    await page.locator('[data-action="mp-models-none"]').first().click();
+    await page.waitForTimeout(200);
+    const beforeCfg = await page.evaluate(() => JSON.stringify((window.__modelConfig || {}).providers || []));
+    await page.locator('[data-action="model-add-provider"]').first().click();
+    await page.waitForTimeout(500);
+    const afterCfg = await page.evaluate(() => JSON.stringify((window.__modelConfig || {}).providers || []));
+    await assert(beforeCfg === afterCfg,
+      '取消全部勾选后保存被阻止，配置未变化（不静默产出 default 假模型）');
+
+    // 19.3 S3-02：勾选一个模型保存成功后，表单必须复位为「添加提供商」
+    await page.locator('[data-action="mp-models-all"]').first().click();
+    await page.waitForTimeout(200);
+    await page.locator('[data-action="model-add-provider"]').first().click();
+    await page.waitForTimeout(700);
+    // 用按钮文案判表单态（比抓 <b> 可靠：#model-mgmt-card 里提供商名也是 <b>）
+    const addBtnText = await page.locator('[data-action="model-add-provider"]').first().innerText();
+    await assert(/添加/.test(addBtnText) && !/保存/.test(addBtnText),
+      '添加成功后表单复位为「添加」态而非停留在「保存」（编辑态）（实际 ' + JSON.stringify(addBtnText) + '）');
+    const dupIds = await page.evaluate(() => {
+      const ps = (window.__modelConfig || {}).providers || [];
+      const ids = ps.map((p) => p.id);
+      return ids.filter((v, i) => ids.indexOf(v) !== i);
+    });
+    await assert(dupIds.length === 0, '保存后没有重复 id 的提供商（实际重复 ' + JSON.stringify(dupIds) + '）');
+
+    // 19.5 S5-2：设了隐式工作目录后，文件 TAB 的根就是该目录（不再说「项目未绑定」）
+    await page.evaluate(() => { try { localStorage.setItem('orchdesk.workspaceDir', 'D:/Code/OrchDesk'); } catch (e) { /* ignore */ } });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+    // 上一段停在设置页/可能留着模态——先回欢迎页
+    const modalCancel = page.locator('#modalRoot [data-action="modal-cancel"]');
+    if (await modalCancel.count() > 0) { await modalCancel.first().click(); await page.waitForTimeout(300); }
+    const nc2 = page.locator('[data-action="newconv"]');
+    if (await nc2.count() > 0) { await nc2.first().click(); await page.waitForTimeout(400); }
+    await page.locator('#homeComposer').fill('P4 文件 TAB 隐式 cwd 回归');
+    await page.locator('[data-action="home-send"]').first().click();
+    await page.waitForTimeout(900);
+    await ensureCtxOpen();
+    await page.locator('[data-action="ctx-tab"][data-id="files"]').first().click();
+    await page.waitForTimeout(900);
+    const ftabText = await page.locator('#context .ctx-body').first().innerText();
+    await assert(/OrchDesk/.test(ftabText) && !/尚未设置工作目录/.test(ftabText),
+      '文件 TAB 用隐式 cwd 作根目录（实际 ' + JSON.stringify(ftabText.slice(0, 80)) + '）');
+  } catch (e) {
+    await assert(false, `P4 修复回归 (error: ${e.message.slice(0, 140)})`);
   }
 
   // ================================================================

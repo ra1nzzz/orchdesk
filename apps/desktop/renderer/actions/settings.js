@@ -5,7 +5,11 @@
  */
 function installSettingsActions(ACTIONS, ctx) {
   async function act_settings_nav(el, id, e) {
- ctx.state.settingsSection = id; ctx.render();
+    // P4-S3-14：分区切换只重渲主区，不走整页 render。整页 render 会连侧栏/表单一起
+    // 重建——用户在「模型管理」填了一半的预设/KEY/勾选会被静默清空，且无未保存提示。
+    // （mpRefreshPool 的注释本就承认「不 render——保住表单其它已填字段」，导航却踩了这个坑。）
+    ctx.state.settingsSection = id;
+    ctx.renderSettingsMain();
   
   }
 
@@ -26,6 +30,8 @@ function installSettingsActions(ACTIONS, ctx) {
         if (ctx.state.sel && ctx.state.sessions[ctx.state.sel] && ctx.state.sessions[ctx.state.sel].pid === pid) {
           ctx.applySessionCwd(ctx.state.sel);
         }
+        // P3 触发②：主动选择项目 → 自动升级项目模式（编排入口就位）
+        ctx.escalateToProject('选择项目');
         ctx.render();}
   
   }
@@ -179,7 +185,7 @@ function installSettingsActions(ACTIONS, ctx) {
         else ctx.state.feedback.add(key);
         // 反馈落盘，重启后仍在（此前仅存于内存 Set）
         const s = ctx.state.sessions[sid];
-        if (s) { s.feedback = [...state.feedback].filter((k) => k.startsWith(sid + '|')); ctx.persist(); }
+        if (s) { s.feedback = [...ctx.state.feedback].filter((k) => k.startsWith(sid + '|')); ctx.persist(); }
         ctx.render();
         // 真实遥测落点（第八死挂点修复）：经 IPC → trace 插件 recordFeedback（source='user'）。
         // 此前按钮只改本地 Set，反馈从未进入遥测队列。
@@ -211,6 +217,17 @@ function installSettingsActions(ACTIONS, ctx) {
   }
 
   async function act_usage_clear(el, id, e) {
+    // P4-S3-11：用量记账同属不可恢复的记账轨迹，清空前确认（与沙箱日志/晋升审计对齐）
+    ctx.confirmDestructive({
+      title: '清空用量记账？',
+      body: '用量记账记录每个回合真实消耗的 token，清空后不可恢复。',
+      warnList: ['历史用量统计将归零', '不影响会话消息本身'],
+      action: 'usage-clear-confirmed', id: '', confirmLabel: '确认清空',
+    });
+  }
+
+  async function act_usage_clear_confirmed(el, id, e) {
+    ctx.closeModal();
         ctx.bridge.clearUsage().then((r) => {
           ctx.toast(r && r.ok ? '用量记账已清空' : String(r && r.reason || '清空失败'), r && r.ok ? 'ok' : 'err');
           ctx.refreshUsage();
@@ -301,7 +318,18 @@ function installSettingsActions(ACTIONS, ctx) {
   }
 
   async function act_prompt_delete(el, id, e) {
- ctx.doDeletePrompt(id); return;
+    // P1：提示词是用户资产，删除前确认
+    ctx.confirmDestructive({
+      title: '删除提示词？',
+      body: '删除后不可恢复，引用它的会话将失去对应指令段。',
+      warnList: ['提示词库的本地副本一并移除'],
+      action: 'prompt-delete-confirm', id: el.dataset.id, confirmLabel: '确认删除',
+    });
+  }
+
+  async function act_prompt_delete_confirm(el, id, e) {
+    ctx.closeModal();
+    ctx.doDeletePrompt(el.dataset.id); return;
 
       /* modal */
   
@@ -395,6 +423,7 @@ function installSettingsActions(ACTIONS, ctx) {
     'composer-more-toggle': act_composer_more_toggle,
     'usage-refresh': act_usage_refresh,
     'usage-clear': act_usage_clear,
+    'usage-clear-confirmed': act_usage_clear_confirmed,
     'open-project-dir': act_open_project_dir,
     'open-log-dir': act_open_log_dir,
     'snapshot-data': act_snapshot_data,
@@ -404,6 +433,7 @@ function installSettingsActions(ACTIONS, ctx) {
     'prompt-edit': act_prompt_edit,
     'prompt-save': act_prompt_save,
     'prompt-delete': act_prompt_delete,
+    'prompt-delete-confirm': act_prompt_delete_confirm,
     'wz-next': act_wz_next,
     'wz-skip': act_wz_skip,
     'wz-open': act_wz_open,

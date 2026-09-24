@@ -177,11 +177,13 @@ async function loadContext(): Promise<new () => Context> {
   return contextCtor;
 }
 
-/** 启动运行时。幂等：重复调用返回同一实例。⑤ 竞态修复：并发调用复用同一 in-flight Promise。 */
-export function startRuntime(): Promise<OrchDeskRuntime> {
+/** 启动运行时。幂等：重复调用返回同一实例。⑤ 竞态修复：并发调用复用同一 in-flight Promise。
+ *  deps.log：插件日志出口（Cordis logger 无 exporter 时消息只进缓冲、任何地方不可见——
+ *  意图门审计曾因此「设计了但查不到」。主进程传入文件 log；verify 桩可不传。 */
+export function startRuntime(deps?: { log?: (level: string, scope: string, msg: string) => void }): Promise<OrchDeskRuntime> {
   if (runtime) return Promise.resolve(runtime);
   if (runtimePromise) return runtimePromise;
-  runtimePromise = buildRuntime()
+  runtimePromise = buildRuntime(deps)
     .then((rt) => { runtime = rt; return rt; })
     .catch((err) => {
       // 失败清空 in-flight，允许后续重试（runtime 仍为 null）。
@@ -192,10 +194,28 @@ export function startRuntime(): Promise<OrchDeskRuntime> {
 }
 
 /** 实际装载（幂等守卫与竞态去重由 startRuntime 负责，本函数每次真实执行一次）。 */
-async function buildRuntime(): Promise<OrchDeskRuntime> {
+async function buildRuntime(deps?: { log?: (level: string, scope: string, msg: string) => void }): Promise<OrchDeskRuntime> {
   const Context = await loadContext();
   const ctx = new Context();
   const plugins: PluginLoadResult[] = [];
+
+  // 0) 插件日志出口：把 Cordis logger 消息转发到应用文件日志（deps.log）。
+  //    无 exporter 时 ctx.logger 的消息只进内存缓冲——审计「设计了但查不到」。
+  //    （ctx.logger 经转型访问：apps/desktop 解析到的 cordis 类型 shim 未声明它，
+  //    运行时真cordis 的 LoggerService 有 exporter()。）
+  if (deps?.log) {
+    const sink = deps.log;
+    try {
+      const loggerService = (ctx as unknown as { logger?: { exporter?(e: unknown): unknown } }).logger;
+      loggerService?.exporter?.({
+        export(message: { name?: string; type?: string; args?: unknown[] }) {
+          const text = (message.args || []).map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+          const level = message.type === 'warn' ? 'WARN' : message.type === 'error' ? 'ERROR' : 'INFO';
+          sink(level, message.name || 'plugin', text);
+        },
+      });
+    } catch { /* exporter 注册失败不阻断运行时启动（审计降级为仅缓冲） */ }
+  }
 
   // 1) 宿主服务必须最先装载：后续 5 个插件注入 sandboxPolicy / approval / agents
   ctx.plugin(hostServices);
@@ -614,6 +634,9 @@ export async function firePreStep(payload: {
   messages?: string[];
   turn?: number;
   step?: number;
+  /** 回合中止信号：下穿给 pre-step 监听器（意图门本地模型探测等长耗时 fetch 必须
+   *  可被 abort——否则端点挂起会楔死整个回合，abort 也救不回来）。 */
+  signal?: AbortSignal;
 }): Promise<PreStepDecisionLike | null> {
   if (!runtime) return null;
   const wf = (runtime.ctx as unknown as {
@@ -626,6 +649,7 @@ export async function firePreStep(payload: {
     messages: texts.map((t) => ({ source: { kind: 'user' }, content: [{ type: 'text', text: String(t) }] })),
     turn: payload.turn ?? 0,
     step: payload.step ?? 0,
+    signal: payload.signal,
   }, async () => ({ kind: 'enter', messages: [] }));
   return decision ?? null;
 }

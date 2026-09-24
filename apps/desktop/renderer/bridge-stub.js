@@ -95,4 +95,7 @@ window.orchdeskBridgeStub = {
       fileTree: () => Promise.resolve({ ok: false, reason: '主进程未接入', bridgeMissing: true }),
       fileRead: () => Promise.resolve({ ok: false, reason: '主进程未接入', bridgeMissing: true }),
       fileWrite: () => Promise.resolve({ ok: false, reason: '主进程未接入' }),
+      // P2 模型内嵌：本机 Ollama 自发现。无桥时 ok=false（chip 显示「未配置模型」），
+      // 不用空数组冒充「探过但没装」——两者对用户的下一步动作完全不同。
+      probeOllama: () => Promise.resolve({ ok: false, models: [], reason: '主进程未接入' }),
     };

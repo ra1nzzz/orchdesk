@@ -191,6 +191,7 @@ export async function runAgentTurn(
         gate = await firePreStep({
           sessionId, text,
           messages: apiMessages.map((m) => String(m.content || '')).filter(Boolean),
+          signal,
         });
       } catch (err) {
         log('WARN', 'intent', `pre-step waterfall 异常（放行）: ${(err as Error).message}`);

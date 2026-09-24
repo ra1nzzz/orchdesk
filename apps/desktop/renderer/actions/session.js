@@ -7,6 +7,9 @@ function installSessionActions(ACTIONS, ctx) {
   async function act_nav(el, id, e) {
  {
         ctx.state.page = id;
+        // P1.2：抽屉内点击导航后关抽屉（popover 不自动消失）。
+        // closeNavDrawer 由 ctx 注入面保证存在（app.js 闭包内函数声明），无需守卫。
+        ctx.closeNavDrawer();
         // 进入设置页时重拉记忆域与沙箱日志：SubAgent 执行完会随时往 worker 域落结论，
         // 只靠启动时拉一次，用户看到的就是「空的」，会误判成功能没生效。
         if (id === 'settings') { ctx.refreshMemoryDomain(); ctx.refreshMemorySummarize(); ctx.refreshSandboxLog(); ctx.refreshUsage(); }
@@ -21,7 +24,10 @@ function installSessionActions(ACTIONS, ctx) {
   }
 
   async function act_toggle_ctx(el, id, e) {
- ctx.state.ctxOpen = !ctx.state.ctxOpen; ctx.render();
+ ctx.state.ctxOpen = !ctx.state.ctxOpen;
+ // P1.3：回合中手动调面板 = 用户接管，本回合不再自动开/关
+ if (ctx.state.turnBusy) { ctx.state.ctxAutoToggled = true; ctx.state.ctxAutoOpened = false; }
+ ctx.render();
   
   }
 
@@ -136,15 +142,23 @@ function installSessionActions(ACTIONS, ctx) {
         const homeInp = ctx.$('#homeComposer');
         const text = homeInp?.value?.trim();
         if (!text) { ctx.toast('输入为空', 'warn'); return; }
+        // P4-S1-05：发送前同步判一次不可逆操作。欢迎页的预警原本走 300ms 防抖 input
+        // 监听，而本函数会把文本搬进 #composer 后立即 doSend——定时器只可能在发送之后
+        // 才 fire，欢迎页的 #outboundWarn 等于死的。needsConfirm 时这里拦下并提示
+        // 「再点一次发送」，第二次放行（一 shot 确认，不会卡死）。
+        if (!(await ctx.confirmOutboundIfNeeded(text))) return;
         homeInp.value = '';
         if (!ctx.state.selProjForComposer || ctx.state.selProjForComposer === '__task__') {
           const id = 's' + Date.now().toString(36);
-          const s = { id, pid: '__task__', title: text.slice(0, 20), expert: ctx.expertList()[ctx.state.wzExpert] || ctx.expertList()[0], model: ctx.state.selectedModels[0] || '—', updated: '刚刚', ts: ctx.nowTime(), msgs: [] };
+          const s = { id, pid: '__task__', cwd: ctx.state.workspaceDir || '', title: text.slice(0, 20), expert: ctx.expertList()[ctx.state.wzExpert] || ctx.expertList()[0], model: ctx.state.selectedModels[0] || '—', updated: '刚刚', ts: ctx.nowTime(), msgs: [] };
           ctx.state.sessions[id] = s;
           ctx.state.sel = id;
           ctx.state.selProjForComposer = '__task__';
           ctx.state.pExpanded.add('__task__');
           ctx.persist(); ctx.render();
+          // P1.4 评审修复：隐式 cwd 必须在建会话时即生效——此前只在 act_sel 重放，
+          // 第一个回合 Agent 跑在默认目录（承诺在最常见路径上未兑现）。
+          ctx.applySessionCwd(id);
         } else {
           const pid = ctx.state.selProjForComposer;
           const sid = 's' + Date.now().toString(36);
@@ -191,9 +205,11 @@ function installSessionActions(ACTIONS, ctx) {
         const text = prompts[key] || '';
         const inp = ctx.$('#homeComposer');
         if (inp) { inp.value = text; inp.dispatchEvent(new Event('input', { bubbles: true })); }
-        const sendBtn = document.querySelector('[data-action="home-send"]');
-        if (sendBtn) sendBtn.click();
-        ctx.toast(`已加载「${labels[key] || key}」模板`, 'ok');}
+        // P4-S1-07：只填模板，不代点发送。原实现无条件覆盖用户已在输入框里打好的文字并
+        // 立即发送，toast 还说「已加载模板」——用户根本来不及看到或编辑它。模板是起点，
+        // 发不发该由用户按「发送」。
+        inp?.focus();
+        ctx.toast(`已填入「${labels[key] || key}」模板 · 可直接编辑后发送`, 'ok');}
   
   }
 
@@ -287,7 +303,21 @@ function installSessionActions(ACTIONS, ctx) {
         pop.querySelector('[data-id="rename"]').onclick = () => { ctx.$('#menuRoot').innerHTML = ''; ctx.confirmRename(id); };
         pop.querySelector('[data-id="fork"]').onclick = () => { ctx.$('#menuRoot').innerHTML = ''; ctx.confirmNewBranch(id); };
         pop.querySelector('[data-id="archive"]').onclick = () => { ctx.$('#menuRoot').innerHTML = ''; ctx.doArchiveSession(id); };
-        pop.querySelector('[data-id="delete"]').onclick = async () => { ctx.$('#menuRoot').innerHTML = ''; await ctx.doDeleteSession(id); };
+        pop.querySelector('[data-id="delete"]').onclick = () => {
+          ctx.$('#menuRoot').innerHTML = '';
+          const s = ctx.state.sessions[id];
+          // P1：删会话是一等公民数据的不可逆丢失，先确认再执行（归档才是可逆路径）
+          ctx.confirmDestructive({
+            title: `删除会话 #${ctx.esc(id)}？`,
+            body: '删除后<b>不可恢复</b>：消息、执行记录与事件流索引都会从数据目录移除。',
+            warnList: [
+              `将丢失 <b>${s && s.msgs ? s.msgs.length : 0}</b> 条消息`,
+              '分叉血缘与事件流索引一并移除',
+              '如只是想暂时收起，请用「归档」——归档可随时还原',
+            ],
+            action: 'session-del-confirm', id, confirmLabel: '确认删除',
+          });
+        };
   
   }
 
@@ -341,6 +371,8 @@ function installSessionActions(ACTIONS, ctx) {
   }
 
   async function act_expert_attach(el, id, e) {
+ // P3 触发③：引用专家/专家团 → 自动升级项目模式
+ ctx.escalateToProject('引用专家团');
  ctx.toast(`已 @引用「${el.dataset.n}」参与本次回复（SubAgent）`, 'ok'); ctx.closeModal();
   
   }
@@ -385,8 +417,21 @@ function installSessionActions(ACTIONS, ctx) {
   }
 
   async function act_sblog_clear(el, id, e) {
- {
-        if (!ctx.state.sandboxLog.total) return;
+    if (!ctx.state.sandboxLog.total) return;
+    // P1：沙箱日志是授权/执行的审计记录，清空不可恢复——先确认
+    ctx.confirmDestructive({
+      title: '清空沙箱日志？',
+      body: '沙箱日志是授权与工具执行的<b>审计记录</b>，清空后不可恢复。',
+      warnList: [
+        `将清空 <b>${ctx.state.sandboxLog.total}</b> 条记录`,
+        '仅影响本地审计，不影响沙箱策略与授权模式',
+      ],
+      action: 'sblog-clear-confirm', id: '', confirmLabel: '确认清空',
+    });
+  }
+
+  async function act_sblog_clear_confirm(el, id, e) {
+    ctx.closeModal();
         ctx.bridge.clearSandboxLog().then((r) => {
           if (!r || !r.ok) { ctx.toast('清空失败（主进程未接入）', 'warn'); return; }
           ctx.state.sandboxLog.entries = [];
@@ -394,8 +439,7 @@ function installSessionActions(ACTIONS, ctx) {
           ctx.state.sandboxLog.stats = { total: 0, allowed: 0, denied: 0, error: 0, byTool: [] };
           ctx.render();
           ctx.toast(`已清空沙箱日志（${r.cleared} 条）`, 'ok');
-        }).catch(() => ctx.toast('清空失败', 'err'));}
-  
+        }).catch(() => ctx.toast('清空失败', 'err'));
   }
 
   async function act_model_pick(el, id, e) {
@@ -425,7 +469,7 @@ function installSessionActions(ACTIONS, ctx) {
 
   async function act_model_confirm(el, id, e) {
  {
-        const selectedNames = [...state.selectedModels];
+        const selectedNames = [...ctx.state.selectedModels];
         // 持久化到 localStorage（跨会话复用）
         if (selectedNames.length === 0) {
           try { localStorage.removeItem(ctx.MODEL_SELECTION_KEY); } catch { /* ignore */ }
@@ -513,7 +557,22 @@ function installSessionActions(ACTIONS, ctx) {
   }
 
   async function act_conn_clear(el, id, e) {
- {
+    // P4-S2-10：清除凭证先确认。同页的「清空审计」「卸载技能」「删除 MCP」都走了
+    // confirmDestructive，唯独清除凭证一键直达——清 GitHub 等连接器凭证意味着重新走
+    // 设备流/重新输密钥，确认模式应用不一致。
+    const cid = id;
+    const cname = (ctx.state.connectors.items || []).find((x) => x.id === cid);
+    ctx.confirmDestructive({
+      title: `清除「${cname ? cname.name : cid}」凭证？`,
+      body: '清除后该连接器恢复未配置状态，需要重新走设备流或重新输入密钥才能使用。',
+      warnList: ['本地保存的加密凭证一并移除', '已配置的字段值随之失效'],
+      action: 'conn-clear-confirmed', id: cid, confirmLabel: '确认清除',
+    });
+  }
+
+  async function act_conn_clear_confirmed(el, id, e) {
+    ctx.closeModal();
+    {
         ctx.bridge.connectorClear(id).then((r) => {
           ctx.toast(r && r.ok ? '凭证已清除' : String(r && r.reason || '清除失败'), r && r.ok ? 'ok' : 'err');
           ctx.refreshConnectors();
@@ -522,11 +581,21 @@ function installSessionActions(ACTIONS, ctx) {
   }
 
   async function act_conn_audit_clear(el, id, e) {
+    // P1：连接器审计同为不可恢复的审计记录，清空前确认
+    ctx.confirmDestructive({
+      title: '清空连接器审计日志？',
+      body: '连接器审计记录连接器的调用与授权历史，清空后不可恢复。',
+      warnList: ['仅影响本地审计，不影响连接器配置'],
+      action: 'conn-audit-clear-confirm', id: '', confirmLabel: '确认清空',
+    });
+  }
+
+  async function act_conn_audit_clear_confirm(el, id, e) {
+    ctx.closeModal();
         ctx.bridge.clearConnectorAudit().then((r) => {
           ctx.toast(r && r.ok ? `已清空 ${r.cleared} 条审计` : '清空失败', r && r.ok ? 'ok' : 'err');
           ctx.refreshConnectorAudit();
         }).catch(() => {});
-  
   }
 
   async function act_open_external(el, id, e) {
@@ -592,12 +661,38 @@ function installSessionActions(ACTIONS, ctx) {
         ctx.$('#mp-mode').value = p.apiMode || 'chat';
         ctx.$('#mp-key').value = '';
         ctx.$('#mp-models').value = (p.models || []).join(', ');
+        // 预设回填（有 presetId 才认，避免把自定义网关猜成目录提供商）
+        ctx.state.mpPreset = p.presetId ? { id: p.presetId, name: p.name, api: p.baseUrl } : null;
+        // 已保存模型子集回填为勾选面板（改 URL/KEY 可重新拉取覆盖）
+        ctx.state.mpModels = (p.models || []).map((m) => ({ id: m }));
+        ctx.state.mpModelsChecked = new Set(p.models || []);
+        ctx.state.mpModelsSource = '';
+        ctx.state.mpModelsNote = (p.models || []).length ? '已加载已保存的模型；修改 Base URL 或 KEY 可重新拉取' : '';
+        ctx.state.mpModelsExpanded = false;
         ctx.updateProtocolRow();
+        ctx.mpRefreshPreset();
+        ctx.mpRefreshPool();
         ctx.$('#mp-name').focus();}
   
   }
 
   async function act_model_del_provider(el, id, e) {
+    // P1：删除前确认（列明将失去的模型数），执行逻辑原样下沉到 -confirm
+    const pid = el.dataset.id;
+    const p = (ctx.state.modelProviders || []).find((x) => x.id === pid);
+    ctx.confirmDestructive({
+      title: `删除模型提供商「${ctx.esc(p ? p.name : pid)}」？`,
+      body: '删除后该提供商下的模型将从所有会话的可用列表消失，默认选择需要重设。',
+      warnList: [
+        `<b>${p && p.models ? p.models.length : 0}</b> 个模型将不可用`,
+        '保存的是本地模型配置，删除后需重新添加',
+      ],
+      action: 'model-del-provider-confirm', id: pid, confirmLabel: '确认删除',
+    });
+  }
+
+  async function act_model_del_provider_confirm(el, id, e) {
+    ctx.closeModal();
  {
         ctx.state.modelProviders = (ctx.state.modelProviders || []).filter(x => x.id !== el.dataset.id);
         const r = await ctx.bridge.saveModelConfig({ providers: ctx.state.modelProviders, defaultProvider: ctx.state.defaultProvider });
@@ -609,46 +704,134 @@ function installSessionActions(ACTIONS, ctx) {
   }
 
   async function act_model_cancel_edit(el, id, e) {
- { ctx.state.mpEditing = null; ctx.render();}
+ { ctx.state.mpEditing = null;
+        ctx.state.mpPreset = null; ctx.state.mpModels = []; ctx.state.mpModelsChecked = new Set();
+        ctx.state.mpModelsNote = ''; ctx.state.mpModelsSource = ''; ctx.state.mpModelsExpanded = false;
+        ctx.render();}
   
   }
 
+  /* ---------- models.dev 预设 + 可用模型拉取（方案 A） ---------- */
+  async function act_mp_preset_toggle(el, id, e) {
+    ctx.state.mpPresetOpen = !ctx.state.mpPresetOpen;
+    ctx.mpRefreshPreset();
+    if (ctx.state.mpPresetOpen) ctx.mpEnsureCatalog(); // 首次展开才拉目录
+  }
+  async function act_mp_preset_pick(el, id, e) {
+    ctx.mpApplyPreset(el.dataset.id);
+  }
+  async function act_mp_preset_clear(el, id, e) {
+    ctx.state.mpPreset = null;
+    ctx.state.mpPresetOpen = false;
+    ctx.mpRefreshPreset();
+  }
+  async function act_mp_catalog_retry(el, id, e) {
+    // 目录获取失败后的重试：先置 null 绕开 mpEnsureCatalog 的 early return
+    ctx.state.mpCatalog = null;
+    await ctx.mpEnsureCatalog();
+  }
+  async function act_mp_models_all(el, id, e) {
+    ctx.state.mpModelsChecked = new Set(ctx.state.mpModels.map((m) => m.id));
+    ctx.mpRefreshPool();
+  }
+  async function act_mp_models_none(el, id, e) {
+    ctx.state.mpModelsChecked = new Set();
+    ctx.mpRefreshPool();
+  }
+  async function act_mp_models_more(el, id, e) {
+    ctx.state.mpModelsExpanded = true;
+    ctx.mpRefreshPool();
+  }
+  async function act_mp_models_refetch(el, id, e) {
+    ctx.mpFetchModels(true);
+  }
+  async function act_ollama_adopt(el, id, e) {
+    // P2：composer chip「发现 Ollama · 一键接入」——写真提供商配置（非演示模式）
+    await ctx.adoptOllama();
+  }
+  async function act_view_mode_toggle(el, id, e) {
+    // P3：抽屉 / rail 的模式切换。手动切 = 用户偏好，此后不再被编排触发自动升级。
+    ctx.toggleViewMode();
+    ctx.closeNavDrawer();
+  }
+
   async function act_model_add_provider(el, id, e) {
- {
+    // P4-S3-02：保存期间禁用按钮，防连点重复提交（await saveModelConfig 有真实网络往返）
+    if (el && el.disabled) return;
+    if (el) el.disabled = true;
+    try {
+      await addOrUpdateProvider();
+    } finally {
+      if (el) el.disabled = false;
+    }
+
+    async function addOrUpdateProvider() {
         const type = ctx.$('#mp-type')?.value || 'ollama';
         const name = ctx.$('#mp-name')?.value?.trim();
         let url = ctx.$('#mp-url')?.value?.trim();
-        const full = (ctx.$('#mp-fullurl')?.checked);
         const key = ctx.$('#mp-key')?.value?.trim();
         const modelsStr = ctx.$('#mp-models')?.value?.trim();
         const apiMode = type === 'openai-compatible' ? (ctx.$('#mp-mode')?.value || 'chat') : 'ollama';
         if (!name || !url) { ctx.toast('请填写名称和 Base URL', 'warn'); return; }
-        if (!full) {
-          const proto = url.startsWith('http://') ? 'http://' : url.startsWith('https://') ? 'https://' : 'http://';
-          url = proto + url;
+        // P4-S3-03：缺协议一律补 http://（与 mpCurrentInput 同规则，去掉 full 门禁）
+        if (!/^https?:\/\//i.test(url)) url = 'http://' + url;
+        // P4-S3-01：模型来源优先级重写。原实现「勾选 > 手动输入 > 占位 'default'」有三个坑：
+        //   ① 手动框被 hidden 隐藏但值不清，旧值仍参与计算；
+        //   ② 面板拉取成功后用户取消全部勾选 → 静默保存假模型 'default'；
+        //   ③ 编辑时取消全部勾选 → 旧模型全部保留（用户操作被静默吞掉）。
+        // 新规则：面板出现过（mpModels.length>0）就只认勾选，为空则阻止保存；面板没出现过
+        // 才认手动输入；两者皆空也阻止——不再有 'default' 这种根本不存在的假模型。
+        const checked = ctx.state.mpModelsChecked;
+        let models;
+        if (ctx.state.mpModels.length) {
+          models = ctx.state.mpModels.filter((m) => checked.has(m.id)).map((m) => m.id);
+          if (!models.length) { ctx.toast('请至少勾选一个模型；都不想用可在高级区手动填写模型名称', 'warn'); return; }
+        } else if (modelsStr) {
+          models = modelsStr.split(',').map(s => s.trim()).filter(Boolean);
+          if (!models.length) { ctx.toast('请至少填写一个模型名称', 'warn'); return; }
+        } else {
+          ctx.toast('请先拉取可用模型并勾选，或在高级区手动填写模型名称', 'warn'); return;
         }
-        const models = modelsStr ? modelsStr.split(',').map(s => s.trim()).filter(Boolean) : ['default'];
+        const presetId = ctx.state.mpPreset?.id;
         const isEdit = !!ctx.state.mpEditing;
         const providers = [...(ctx.state.modelProviders || [])];
         if (isEdit) {
           const idx = providers.findIndex(p => p.id === ctx.state.mpEditing.id);
-          const provider = { id: ctx.state.mpEditing.id, name, type, apiMode, baseUrl: url, models, apiKey: key };
+          const provider = { id: ctx.state.mpEditing.id, name, type, apiMode, baseUrl: url, models, apiKey: key, presetId };
           if (idx >= 0) providers[idx] = provider;
           else providers.push(provider);
           ctx.state.mpEditing = null;
         } else {
           const id = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
-          providers.push({ id, name, type, apiMode, baseUrl: url, models, apiKey: key });
+          providers.push({ id, name, type, apiMode, baseUrl: url, models, apiKey: key, presetId });
         }
         const r2 = await ctx.bridge.saveModelConfig({ providers, defaultProvider: type === 'ollama' ? providers[providers.length - 1]?.id : (ctx.state.defaultProvider || providers[0]?.id) });
         if (r2 && r2.ok) {
           ctx.state.modelProviders = providers;
+          const inModal = !!ctx.$('#mp-key')?.closest('#modalRoot');
           try { const mc2 = await ctx.bridge.getModelConfig(); if (mc2 && mc2.providers) ctx.dynamicModels.list = mc2.providers.flatMap(p => p.models.map(n => ({ n, p: p.name + ' · ' + p.type, k: key ? 'sk-••••••••' : '(本地)', state: '已配' }))); } catch { ctx.dynamicModels.list = []; }
-          ctx.toast(isEdit ? `提供商「${name}」已更新` : `提供商「${name}」已添加`, 'ok');
-          if (!isEdit) { ctx.$('#mp-name').value = ''; ctx.$('#mp-url').value = ''; ctx.$('#mp-key').value = ''; ctx.$('#mp-models').value = ''; }
-          ctx.renderModelProviders();
-        } else { ctx.toast(`保存失败：${(r2 && r2.reason) || ''}`, 'danger'); }}
-  
+          ctx.toast(isEdit ? `提供商「${name}」已更新（${models.length} 个模型）` : `提供商「${name}」已添加`, 'ok');
+          // P4-S1-01：两条路径都必须刷新 chip 的事实源（selectedModels）并退出演示模式。
+          // 原实现只在模态分支做，设置页添加成功后回到会话页，composer chip 仍显示
+          // 「未配置模型 / 演示模式」——刚刚配置成功的事实与 UI 状态相反（铁律：不许撒谎）。
+          ctx.state.demoMode = false;
+          ctx.autoSelectModels(providers, ctx.state.defaultProvider, ctx.state.defaultModel);
+          if (inModal) {
+            ctx.state.mpPreset = null; ctx.state.mpModels = []; ctx.state.mpModelsChecked = new Set();
+            ctx.state.mpModelsNote = ''; ctx.state.mpModelsSource = ''; ctx.state.mpModelsExpanded = false;
+            ctx.closeModal();
+            ctx.render();
+            return;
+          }
+          // P4-S3-02：设置页保存成功后必须整页 render。原实现只调 renderModelProviders()
+          // 刷新列表、不重渲染表单——标题仍写「编辑提供商」、按钮仍写「保存」，而 mpEditing
+          // 已置 null；用户再点一次「保存」会走添加分支 push 一个同名 id 的提供商，列表出现
+          // 两行完全相同的项（删一行会同时删掉两行）。
+          ctx.state.mpPreset = null; ctx.state.mpModels = []; ctx.state.mpModelsChecked = new Set();
+          ctx.state.mpModelsNote = ''; ctx.state.mpModelsSource = ''; ctx.state.mpModelsExpanded = false;
+          ctx.render();
+        } else { ctx.toast(`保存失败：${(r2 && r2.reason) || ''}`, 'danger'); }
+    }
   }
 
   async function act_todo(el, id, e) {
@@ -944,6 +1127,8 @@ function installSessionActions(ACTIONS, ctx) {
             ctx.bridge.composeTeam(tid, task).then((r) => {
               if (r && r.error) { ctx.toast(r.error, 'err'); return; }
               ctx.state.delegationLast = r;
+              // P3 触发③：专家团派发成功 → 自动升级项目模式（委派树/派发入口常驻）
+              ctx.escalateToProject('派发专家团任务');
               ctx.render();
               ctx.toast(`编排完成 · ${r.rootId || ''}`, 'ok');
             }).catch((e) => ctx.toast('编排失败: ' + ((e && e.message) || e), 'err'));
@@ -954,6 +1139,7 @@ function installSessionActions(ACTIONS, ctx) {
 
   Object.assign(ACTIONS, {
     'nav': act_nav,
+    'nav-drawer': (el) => ctx.toggleNavDrawer(el),
     'toggle-theme': act_toggle_theme,
     'toggle-ctx': act_toggle_ctx,
     'ctx-tab': act_ctx_tab,
@@ -979,6 +1165,7 @@ function installSessionActions(ACTIONS, ctx) {
     'quick-analyze': act_quick_weekly,
     'home-create-proj': act_home_create_proj,
     'pick-folder': act_pick_folder,
+    'ws-pick': () => ctx.pickWorkspace(),
     'do-create-proj-home': act_do_create_proj_home,
     'proj-toggle': act_proj_toggle,
     'proj-menu': act_proj_menu,
@@ -1009,14 +1196,29 @@ function installSessionActions(ACTIONS, ctx) {
     'conn-discover': act_conn_discover,
     'conn-save': act_conn_save,
     'conn-clear': act_conn_clear,
+    'conn-clear-confirmed': act_conn_clear_confirmed,
     'conn-audit-clear': act_conn_audit_clear,
     'open-external': act_open_external,
     'conn-nav': act_conn_nav,
     'model-test': act_model_test,
     'model-edit-provider': act_model_edit_provider,
     'model-del-provider': act_model_del_provider,
+    'model-del-provider-confirm': act_model_del_provider_confirm,
+    'sblog-clear-confirm': act_sblog_clear_confirm,
+    'conn-audit-clear-confirm': act_conn_audit_clear_confirm,
+    'session-del-confirm': async (el, id) => { ctx.closeModal(); await ctx.doDeleteSession(el.dataset.id); },
     'model-cancel-edit': act_model_cancel_edit,
     'model-add-provider': act_model_add_provider,
+    'mp-preset-toggle': act_mp_preset_toggle,
+    'mp-preset-pick': act_mp_preset_pick,
+    'mp-preset-clear': act_mp_preset_clear,
+    'mp-catalog-retry': act_mp_catalog_retry,
+    'mp-models-all': act_mp_models_all,
+    'mp-models-none': act_mp_models_none,
+    'mp-models-more': act_mp_models_more,
+    'mp-models-refetch': act_mp_models_refetch,
+    'ollama-adopt': act_ollama_adopt,
+    'view-mode-toggle': act_view_mode_toggle,
     'todo': act_todo,
     'check-updates': act_check_updates,
     'modal-bg': act_modal_bg,

@@ -317,9 +317,16 @@ const cred = require('./dist/credentials.js');
           await new Promise((r) => setTimeout(r, 50));
         }
         const tool = (p) => ipc.get('orchdesk:tool-execute')(null, { name: 'file_read', arguments: { path: p } });
-        await tool(path.join(HOME, 'f1.txt'));
-        await tool(path.join(HOME, 'f2.txt'));
-        await tool(path.join(HOME, 'f3.txt'));
+        // 三次判定必须并发打出（Promise.all）。顺序 await 时每次 IPC 往返的延迟会把
+        // 三次 recordSandbox 拉出同一个 100ms 合帧窗口——慢机上恒定 3 次写，那测的是
+        // 机器速度而不是合帧（本用例历史上的 flaky 根因）。并发后三条挤在同一 tick：
+        // 治理前每条同步全量重写 → 恒定 3 次；治理后首条排定 flush、其余只标记 dirty
+        // → 合并为 1 次。两种形态都与机器快慢无关。
+        await Promise.all([
+          tool(path.join(HOME, 'f1.txt')),
+          tool(path.join(HOME, 'f2.txt')),
+          tool(path.join(HOME, 'f3.txt')),
+        ]);
         await new Promise((r) => setTimeout(r, 300)); // 等 flush 窗口
         console.log('TOOL_JSON:' + JSON.stringify({ writes }));
         process.exit(0);
@@ -330,12 +337,19 @@ const cred = require('./dist/credentials.js');
     try {
       stdout = execFileSync(process.execPath, ['-e', probe], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000 });
     } catch (err) {
-      throw new Error('probe 失败：' + err.message + '\n' + String(err.stdout || '') + String(err.stderr || ''));
+      // 与本文件首个 probe（models 保存）同一容错口径：探针 require 了 dist/main.js，
+      // Node 退出阶段与 Cordis 悬挂句竞炸 libuv 断言（UV_HANDLE_CLOSING）——崩溃发生在
+      // 测量结果打印之后，err.stdout 里已有 TOOL_JSON。此时测量有效，该用；只有连结果
+      // 都没打出来才是真失败。此前这里见到非零退出就抛，于是这条用例约 50% 概率把
+      // 已经拿到的正确结果判成 FAIL——那是测试基建的 flaky，不是产品缺陷。
+      stdout = String(err.stdout || '') + String(err.stderr || '');
     }
     const m = stdout.match(/TOOL_JSON:(.*)/);
-    if (!m) throw new Error('probe 未输出结果:\n' + stdout);
+    if (!m) throw new Error('probe 未输出结果:\n' + stdout.slice(0, 2000));
     const out = JSON.parse(m[1]);
     assert.ok(out.writes >= 1, 'flush 后应至少写一次，实际 ' + out.writes);
+    // 上界 2：并发三连下发时治理前恒定 3 次（每条同步全量重写），治理后合并为 1 次；
+    // 留 1 的余量仅防某条 handler 个体 stall 超过 100ms 窗口的病态机器。
     assert.ok(out.writes <= 2, '窗口内 3 次判定最多 2 次写（治理前逐条写为 3+），实际 ' + out.writes);
   });
 

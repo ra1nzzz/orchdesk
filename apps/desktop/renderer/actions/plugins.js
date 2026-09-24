@@ -44,7 +44,20 @@ function installPluginsActions(ACTIONS, ctx) {
   }
 
   async function act_mp_clear(el, id, e) {
- {
+    // P4-S3-11：晋升审计里记着「被 Director 拦下」的安全事件，误清即永久丢失。
+    // 同为审计轨迹的「清空沙箱日志」早有 confirmDestructive，这里补齐。
+    if (!ctx.state.memoryPromotions.total) return;
+    ctx.confirmDestructive({
+      title: '清空晋升审计？',
+      body: '晋升审计记录 SubAgent 结论向上一层晋升的全部历史，<b>包含被拦下的安全事件</b>，清空后不可恢复。',
+      warnList: [`将清空 ${ctx.state.memoryPromotions.total} 条记录`, '被拦下（拒绝）的记录也一并移除'],
+      action: 'mp-clear-confirmed', id: '', confirmLabel: '确认清空',
+    });
+  }
+
+  async function act_mp_clear_confirmed(el, id, e) {
+    ctx.closeModal();
+    {
         if (!ctx.state.memoryPromotions.total) return;
         ctx.bridge.clearMemoryPromotions().then((r) => {
           if (!r || !r.ok) { ctx.toast('清空失败（主进程未接入）', 'warn'); return; }
@@ -307,9 +320,24 @@ function installPluginsActions(ACTIONS, ctx) {
   }
 
   async function act_skill_uninstall(el, id, e) {
+    // P1：真删磁盘包，卸载前确认
+    const slug = el.dataset.n;
+    ctx.confirmDestructive({
+      title: `卸载技能「${ctx.esc(slug)}」？`,
+      body: '将<b>从磁盘真删除</b>该技能包（不是仅从界面移除），需重新安装才能恢复。',
+      warnList: [
+        '已加载该技能的会话在下次加载时不可用',
+        '安装来源（市场/guanji）需重新走安装流程',
+      ],
+      action: 'skill-uninstall-confirm', id: slug, confirmLabel: '确认卸载',
+    });
+  }
+
+  async function act_skill_uninstall_confirm(el, id, e) {
+    ctx.closeModal();
  {
         // 真删磁盘包。此前只从渲染层数组移除，文件还在 —— 下次启动又冒出来。
-        const slug = el.dataset.n;
+        const slug = el.dataset.id;
         try {
           const r = typeof ctx.bridge.uninstallSkill === 'function'
             ? await ctx.bridge.uninstallSkill(slug)
@@ -425,6 +453,21 @@ function installPluginsActions(ACTIONS, ctx) {
   }
 
   async function act_mcp_del(el, id, e) {
+    // P1：删除 MCP server 前确认（真删配置，不可恢复）
+    const mid = el.dataset.id;
+    ctx.confirmDestructive({
+      title: `删除 MCP server「${ctx.esc(mid)}」？`,
+      body: '删除后该 server 的配置、握手状态与已配置工具都会移除。',
+      warnList: [
+        '需要重新添加并握手后才能恢复',
+        '加密保存的 env 凭据一并移除',
+      ],
+      action: 'mcp-del-confirm', id: mid, confirmLabel: '确认删除',
+    });
+  }
+
+  async function act_mcp_del_confirm(el, id, e) {
+    ctx.closeModal();
  {
         const id = el.dataset.id;
         try {
@@ -483,6 +526,7 @@ function installPluginsActions(ACTIONS, ctx) {
     'skill-attach': act_skill_attach,
     'approval-grant': act_approval_grant,
     'mp-clear': act_mp_clear,
+    'mp-clear-confirmed': act_mp_clear_confirmed,
     'tp-new': act_tp_new,
     'tp-create': act_tp_create,
     'tp-dispose': act_tp_dispose,
@@ -510,6 +554,9 @@ function installPluginsActions(ACTIONS, ctx) {
     'mcp-probe': act_mcp_probe,
     'mcp-toggle': act_mcp_toggle,
     'mcp-del': act_mcp_del,
+    'caps-expand': (el) => { const box = el.closest('.pcaps'); if (box) box.dataset.expanded = '1'; },
+    'mcp-del-confirm': act_mcp_del_confirm,
+    'skill-uninstall-confirm': act_skill_uninstall_confirm,
     'hub-pair': act_hub_pair,
     'hub-send': act_hub_send,
     'hub-unpair': act_hub_unpair,

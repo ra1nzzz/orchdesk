@@ -2,7 +2,7 @@
 
 本地优先的多 Agent 编排桌面工作台（Electron + Node.js）。
 
-当前版本：v0.16.0
+当前版本：v0.16.1
 
 权威版本以 [`apps/desktop/package.json`](apps/desktop/package.json) 为准。
 

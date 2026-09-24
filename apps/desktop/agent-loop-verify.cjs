@@ -64,6 +64,13 @@ let requests = [];       // 记录所有请求，用于断言消息契约
 let fetchError = null;
 
 global.fetch = async (url, opts) => {
+  // 意图门本地模型探测（Ollama /api/generate）不参与模型网关桩：不记录 requests、
+  // 不消费 scenario——否则它会顶掉一条模型应答并污染计数（runtime 就绪时序不定，
+  // Gate 活跃时必炸）。返回不可解析内容 → 探测按「无本地模型」走漏斗兜底。
+  if (String(url).includes('/api/generate')) {
+    const notVerdict = { response: 'stub-not-a-verdict' };
+    return { ok: true, status: 200, text: async () => JSON.stringify(notVerdict), json: async () => notVerdict };
+  }
   const body = JSON.parse(opts.body || '{}');
   requests.push({ url, body });
   if (fetchError) throw new Error(fetchError);
@@ -158,6 +165,37 @@ const { check, summary } = createChecker();
     const last = s.msgs[s.msgs.length - 1];
     assert.strictEqual(last.role, 'assistant');
     assert.ok(Array.isArray(last.tools) && last.tools.some((t) => t.n === 'file_list'), '应记录 file_list 工具步骤');
+  });
+
+  console.log('== C0. 意图门端到端（A1 + 修复2：真实 IPC + runtime） ==');
+
+  // C0. 意图门端到端（A1 风控简化 + 修复2）：此前 UI e2e 的桥桩在渲染层就返回、
+  // 回合到不了主进程，意图门在 UI 层零覆盖；本套件驱动真实 IPC handler + 真实
+  // 插件 runtime（9 插件含 intent），模型走 fetch 桩——这里是门行为生效的层。
+  // 就绪等待：bootRuntime 异步；runtime 未就绪时 firePreStep 返回 null = 门静默
+  // 放行（曾让本组断言假失败/假通过），先等到 getRuntime() 非空。
+  {
+    const rtMod = require('./dist/dsh-runtime.js');
+    const t0 = Date.now();
+    while (!rtMod.getRuntime() && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(rtMod.getRuntime(), 'dsh runtime 应就绪（意图门依赖它）');
+  }
+  requests = [];
+  scenario = [chatReply('技能已安装完成', undefined)];
+  out = await runAgentTurn(null, 's-gate1', '用 pnpm 安装这个 skill', {});
+  await check('A1：命令词 prompt 放行到模型（提到 pnpm ≠ 拦截）', () => {
+    const modelCalls = requests.filter((r) => !String(r.url).includes('/api/generate'));
+    assert.strictEqual(modelCalls.length, 1, '模型应被调用 1 次，实际 ' + modelCalls.length);
+    assert.ok(out.text.includes('技能已安装'), '应拿到模型回复: ' + out.text);
+  });
+
+  requests = [];
+  scenario = [chatReply('不应到达模型', undefined)];
+  out = await runAgentTurn(null, 's-gate2', '把所有日志文件全部删除', {});
+  await check('底线：destructive prompt 被意图门拦截且模型零调用', () => {
+    const modelCalls = requests.filter((r) => !String(r.url).includes('/api/generate'));
+    assert.strictEqual(modelCalls.length, 0, '模型不应被调用，实际 ' + modelCalls.length);
+    assert.ok(out.text.includes('意图网关拦截'), '回复应说明拦截原因: ' + out.text);
   });
 
   console.log('== C. 文本兜底解析 ==');
@@ -414,11 +452,17 @@ const { check, summary } = createChecker();
   // 该 provider+model  memo 生效，后续回合转文本兜底（M-1 memo 收敛）。
   requests = [];
   const savedFetch2 = global.fetch;
-  let no = 0;
+  // body 感知桩（替代原计数式）：任何带 tools 的请求都被网关以「工具协议不支持」
+  // 拒绝；不带 tools 的请求走场景应答。与 attempts 三档阶梯（tools+tool_choice →
+  // tools → 无 tools）解耦——前两档都遭拒 → 第三档成功 → toolsRejected → memo。
+  // （计数式桩曾让第二档「tools 无 tool_choice」成功：提供方支持 tools 只是
+  // 不支持 tool_choice，不写 memo 才是正确行为——旧测试是意外通过。）
   global.fetch = async (url, opts) => {
-    no++;
-    if (no === 1) return { ok: false, status: 400, text: async () => 'unsupported parameter: tool_choice', json: async () => ({}) };
-    if (no === 2) return { ok: false, status: 400, text: async () => 'tools not supported by this gateway', json: async () => ({}) };
+    if (String(url).includes('/api/generate')) return savedFetch2(url, opts);
+    const body = JSON.parse(opts.body || '{}');
+    if (body.tools) {
+      return { ok: false, status: 400, text: async () => 'tools not supported by this gateway', json: async () => ({}) };
+    }
     return savedFetch2(url, opts);
   };
   scenario = [chatReply('明确拒绝工具后的文本回复', undefined)];
@@ -432,6 +476,7 @@ const { check, summary } = createChecker();
   await check('协议级拒绝后下一轮不下发 tools（memo 生效）', () => {
     assert.ok(!requests[0].body.tools, '已被协议拒绝的 provider 不应再下发 tools');
   });
+  global.fetch = savedFetch2; // 恢复记录桩：memo 测试结束，后续用例走正常网关语义
   // M-1 memo 有 TTL + models-save 失效：保存模型配置后 memo 清空，下一轮恢复原生协议（防永久毒化）。
   requests = [];
   scenario = [chatReply('恢复后', undefined)];

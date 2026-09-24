@@ -13,9 +13,14 @@
   <div class="logo">OD</div>
   <span class="app-name">OrchDesk</span>
   <span class="win-title" id="winTitle">会话 — 本地 Agent 工作台</span>
-  <div class="tray-hint"><span class="tray-dot"></span><span id="trayText">本地运行 · 1 专家在线</span></div>
+  <!-- P4-S1-12：不再写死「1 专家在线」——专家数随编排目录变化，写死即撒谎。
+       由 app.js 按 orchestrationCatalog / expertList 真实条数刷新。 -->
+  <div class="tray-hint"><span class="tray-dot"></span><span id="trayText">本地运行</span></div>
   <!-- 标题栏只留品牌/会话信息/时钟：浏览器·终端·文件的入口已下移到状态栏图标（右下角）
        与右栏 TAB（文件），主题切换在左下角导航底部，此处不再重复摆按钮。 -->
+  <!-- P1.2 轻模式导航入口：☰ 唤出导航抽屉（会话/插件/设置/主题），Ctrl+K 同效；
+       rail 在轻模式下隐藏，抽屉是其替代入口（project 态仍显示 rail）。 -->
+  <button class="iconbtn" id="navDrawerBtn" data-action="nav-drawer" title="导航（Ctrl+K）" aria-label="打开导航菜单" aria-expanded="false" aria-controls="navDrawer">☰</button>
   <span style="margin-left:auto" class="row">
     <span style="color:var(--fg-faint)" id="clock"></span>
   </span>
@@ -54,7 +59,8 @@
 
 <div id="modalRoot"></div>
 <div id="menuRoot"></div>
-<div id="toastRoot"></div>
+<div id="navDrawerRoot"></div>
+<div id="toastRoot" role="status" aria-live="polite"></div>
 <!-- 文件（P2-11）保持全屏覆盖层：预览/编辑/diff 需要宽幅，窄抽屉放不下。
      它的入口已从标题栏按钮改为右栏「文件」TAB。 -->
 <div id="fileRoot" class="fullscreen-panel hidden"></div>

@@ -70,7 +70,7 @@
     const lbl = ph === 'running' ? '执行中' : (ph === 'error' ? '出错' : '完成');
     const trowSt = sm ? 'style="margin-top:2px"' : '';
     const monoSt = sm ? 'style="font-size:11px"' : '';
-    const faintSt = sm ? 'style="margin-left:auto;font-size:10.5px"' : 'style="margin-left:auto"';
+    const faintSt = sm ? 'style="margin-left:auto;font-size:11px"' : 'style="margin-left:auto"';
     return `<div class="trow" ${trowSt}><span class="tdot" style="background:${dot};${anim}"></span><span class="mono" ${monoSt}>${esc(t.n)}</span><span class="faint" ${faintSt}>${lbl}</span></div>`;
   }
   // 专家 / 专家团：**回落到多 Agent 编排插件（multi）提供的真实目录**。
@@ -152,6 +152,7 @@
 
   /* ---------- 模型选择：持久化 + 默认策略 ---------- */
   const MODEL_SELECTION_KEY = 'orchdesk.modelSelection';
+  const WORKSPACE_KEY = 'orchdesk.workspaceDir';
   function saveModelSelection(models) {
     try { localStorage.setItem(MODEL_SELECTION_KEY, JSON.stringify(models || [])); } catch { /* 隐私模式等忽略 */ }
   }
@@ -161,6 +162,13 @@
       const arr = v ? JSON.parse(v) : null;
       return Array.isArray(arr) ? arr : null;
     } catch { return null; }
+  }
+  function loadWorkspaceDir() {
+    try { return localStorage.getItem(WORKSPACE_KEY) || ''; } catch { return ''; }
+  }
+  function saveWorkspaceDir(dir) {
+    state.workspaceDir = dir || '';
+    try { localStorage.setItem(WORKSPACE_KEY, state.workspaceDir); } catch { /* 隐私模式等忽略 */ }
   }
 
   /**
@@ -202,6 +210,9 @@
       state.selectedModels = localModels.length ? [dm.n, localModels[0].n] : [dm.n];
     }
     saveModelSelection(state.selectedModels);
+    // P2：真模型就位即退出演示模式。否则用户在设置页配好提供商后，doSend 仍会走
+    // echo 分支、chip 仍显示「演示模式」——配置生效了却看不到，比不配更糟。
+    if (state.selectedModels.length) state.demoMode = false;
   }
 
   function getModelPool() { return dynamicModels.list.length ? dynamicModels.list : MODELS; }
@@ -244,27 +255,46 @@
 
   /* ---------- 状态 ---------- */
   const state = {
-    page: 'session', theme: 'dark', sel: null, ctxOpen: 1, ctxTab: 'todo', wz: 0, wzExpert: 0,
+    page: 'session', theme: 'dark', sel: null, ctxOpen: 0, ctxTab: 'todo', wz: 0, wzExpert: 0,
+    // P4-S3-04/S3-06：授权服务是否真的加载过（区分「拉到了但空」与「没拉到」）。
+    // 未加载时风控区必须显式标注，不能拿兜底文案冒充活着。
+    authzLoaded: false,
     selProjForComposer: null, projDropdownOpen: false, composerMoreOpen: false,
+    // P1.4 隐式 cwd：轻会话的默认工作目录（'' = 未设置，用主进程默认）。
+    // localStorage 持久化（与模型选择同款的轻量偏好）。
+    workspaceDir: '',
     newConvMode: true,
     feedback: new Set(), authMode: 'default',
     // 思考链展开态（本轮 UI 重构）：key = `${sid}|${msg.t}`，存已展开「思考中」详情的消息。
     thinkExpanded: new Set(),
     /** 进行中的模型回合 sessionId；非空时 composer 显示「停止」。 */
     turnBusy: null,
+    // P1.3 任务监控自动浮出：ctxAutoOpened=本回合自动开过（仅此种情况才自动关）、
+    // ctxAutoToggled=用户在本回合手动调过面板（尊重手动，不再自动管理）。
+    ctxAutoOpened: false, ctxAutoToggled: false,
+    // P2 模型内嵌（spec §5.3）：Ollama 自发现结果 + 演示模式标志。
+    // demoMode 绝不写 selectedModels / modelProviders——演示回复不能被当成真模型结果。
+    ollama: { ok: false, models: [], reason: '' },
+    demoMode: false,
     authLevels: [], authAudit: [],
     // ④M-1：授权模式卡 / 白名单工具下拉数据化（canonical = authz 插件 AUTHZ_MODES / GRANT_TOOLS）
     authModes: [], grantTools: [],
     // 授权白名单（PRD FR-9）：会话 / 永久规则，来自 authz 插件真实服务
     grants: [],
     promptDocs: [], promptConflicts: [],
-    compAudit: [], tempPlugins: [],
+    compAudit: [], tempPlugins: [], tempPluginsLoaded: false,
     guanjiSkills: [], guanjiTokenSet: false, installedSkills: [], installedSkillsLoaded: false, askInputCb: null,
     hubStatus: { paired: false }, hubUrl: '', hubTaskText: '', hubResultText: '',
     memoryStats: null,
     pExpanded: new Set(),
     plugSideExpanded: new Set(['builtin', 'market', 'skills', 'experts', 'connectors']),
     selectedModels: [], thinkLevel: 'standard', modelProviders: [], mpEditing: null, defaultProvider: undefined,
+    // 简化方案（2026-09-23）：视图双态。light=默认轻模式（列表+主区，右栏收起，
+    // rail 收拢在 P1.2）；project=编排模式（右栏任务监控常驻）。持久化在 P3。
+    viewMode: 'light',
+    // models.dev 预设 + KEY 触发拉取（方案 A）：预设目录/选中项、拉取结果与勾选态
+    mpPreset: null, mpPresetOpen: false, mpCatalog: null, mpCatalogLoading: false,
+    mpModels: [], mpModelsChecked: new Set(), mpModelsSource: '', mpModelsLoading: false, mpModelsNote: '', mpModelsExpanded: false,
     maxToolIterations: 200, projects: [], sessions: {},
     // 实时工具步骤：sessionId → [{ n, ph, result }]，由主进程 orchdesk:tool-step 推送
     toolSteps: {},
@@ -312,7 +342,7 @@
       byModel: [], bySession: [],
     },
     // FR-6 回放数据源（ADR-0009）：事件流时间线。sid 不匹配当前回放会话 = 未加载。
-    sessionEvents: { sid: null, data: null, loaded: false },
+    sessionEvents: { sid: null, data: null, loaded: false, error: '', bridgeMissing: false },
     // 浏览器（ADR-0011）：内置 CDP 浏览器窗口。loaded=false = 桥未接入；
     // open=false = 窗口没开（面板显示「未打开」，不显示空白页或假地址）。
     // Agent 默认在后台隐藏窗口操作网页，这个面板是用户唯一的观察与制动入口。
@@ -337,7 +367,7 @@
     filePanelOpen: false,
     // 右栏「文件」TAB（本轮 UI 重构）：与「产物」不同——产物是本会话 Agent 生成的内容，
     // 文件是当前工作目录的全部文件。root 自动跟随会话所绑定项目的本地目录。
-    fileTab: { root: '', inited: false, loading: false, expanded: new Set(), children: new Map(), error: '' },
+    fileTab: { root: '', inited: false, loading: false, expanded: new Set(), children: new Map(), error: '', lastDir: '' },
     filePanel: { loaded: false, bridgeMissing: false, root: '', truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false,
       // P3 编辑/diff：view = preview | edit | diff；diffRows/diffTooLarge 是最近一次计算结果
       view: 'preview', editBuf: '', editBase: '', eol: 'lf', dirty: false, saving: false, discardArmed: false,
@@ -355,6 +385,26 @@
     // 插件页搜索（前端过滤；对内置插件卡片按名称/描述/能力/标识做不区分大小写子串匹配）
     plugSearch: '',
   };
+
+  /* ---------- P3 项目模式：状态记忆（spec §6「模式选择记忆」） ---------- */
+  const VIEWMODE_KEY = 'orchdesk.viewMode';
+  const VIEWMODE_PINNED_KEY = 'orchdesk.viewModePinned';
+  function loadViewMode() {
+    try { return localStorage.getItem(VIEWMODE_KEY) === 'project' ? 'project' : 'light'; } catch { return 'light'; }
+  }
+  function loadViewModePinned() {
+    try { return localStorage.getItem(VIEWMODE_PINNED_KEY) === '1'; } catch { return false; }
+  }
+  function saveViewMode() {
+    try {
+      localStorage.setItem(VIEWMODE_KEY, state.viewMode);
+      localStorage.setItem(VIEWMODE_PINNED_KEY, state.viewModePinned ? '1' : '0');
+    } catch { /* 隐私模式等忽略：记忆是增强，不是正确性依赖 */ }
+  }
+  // 启动即恢复：project 态右栏任务监控常驻（可收起），轻态默认收起。
+  state.viewMode = loadViewMode();
+  state.viewModePinned = loadViewModePinned();
+  if (state.viewMode === 'project') state.ctxOpen = 1;
 
   const $ = (s) => document.querySelector(s);
   const PAGES = [
@@ -434,8 +484,12 @@
 
   /* ---------- 渲染：导航 ---------- */
   function renderRail() {
+    // P3：project 态 rail 恢复，底部给模式切换（轻态 rail 隐藏，抽屉里已有同一入口）
+    const modeBtn = state.viewMode === 'project'
+      ? `<button class="navbtn" data-action="view-mode-toggle" title="切换回轻模式（单栏 + 按需面板）">${ic('zap')}<span class="nl">轻模式</span></button>`
+      : '';
     $('#rail').innerHTML = PAGES.map((p) => `<button class="navbtn ${state.page === p.id ? 'active' : ''}" data-action="nav" data-id="${p.id}" title="${p.n}">${ic(p.icon)}<span class="nl">${p.n}</span></button>`).join('') +
-      `<div class="sp"></div><button class="navbtn" data-action="toggle-theme" title="切换主题">${ic('sun')}<span class="nl">主题</span></button>`;
+      `<div class="sp"></div>${modeBtn}<button class="navbtn" data-action="toggle-theme" title="切换主题">${ic('sun')}<span class="nl">主题</span></button>`;
   }
 
   /* ---------- 渲染：消息（外部/用户可控内容统一转义，防 XSS） ---------- */
@@ -443,6 +497,24 @@
   const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, (c) => ESC_MAP[c]);
+  }
+  /* 右栏任务监控就地刷新（P1.3 实时刷新 + P2 演示回合共用同一份门控）。
+     只在「待办」TAB 刷；替换前后保住 .ctx-body 滚动位置；替换后补 hardenActions
+     （innerHTML 重建会丢掉委托层此前补的 tabindex）。 */
+  function refreshCtxLive() {
+    const ctxEl = $('#context');
+    if (!ctxEl || !state.ctxOpen || state.page !== 'session') return;
+    if (state.ctxTab !== 'todo') return;
+    const body = ctxEl.querySelector('.ctx-body');
+    const keep = body ? body.scrollTop : 0;
+    ctxEl.innerHTML = VIEWS.session.ctx();
+    if (keep) { const nb = ctxEl.querySelector('.ctx-body'); if (nb) nb.scrollTop = keep; }
+    hardenActions(ctxEl);
+  }
+  /** 路径末段（目录名）：三处曾各写一遍同样的 replace/split/pop（评审 C-F2）。 */
+  function dirBase(d) {
+    const s = String(d ?? '');
+    return s.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || s;
   }
 
   /* ---------- PRD FR-4.2 桌面集成 ---------- */
@@ -780,19 +852,24 @@
 
   /* ---------- FR-6 事件流回放数据源（ADR-0009） ---------- */
   function refreshSessionEvents(sid) {
+    // P4-S4-5：读取失败要与「桥真缺失」分开记——前者是「查不到」，后者是「没得查」。
+    state.sessionEvents.error = '';
+    state.sessionEvents.bridgeMissing = false;
     if (typeof bridge.getSessionEvents !== 'function') {
-      state.sessionEvents = { sid: sid, data: null, loaded: false };
+      // 桥真缺失：loaded 保持 false + bridgeMissing 标记，replaySourceNote 显示「未接入」
+      state.sessionEvents = { sid: sid, data: null, loaded: false, error: '', bridgeMissing: true };
       render();
       return;
     }
     bridge.getSessionEvents(sid).then((r) => {
       // 异步竞态防线：回来时用户可能已切到另一个会话的回放
       if (state.replayFor !== sid) return;
-      state.sessionEvents = { sid: sid, data: (r && typeof r === 'object') ? r : null, loaded: true };
+      state.sessionEvents = { sid: sid, data: (r && typeof r === 'object') ? r : null, loaded: true, error: '', bridgeMissing: false };
       render();
-    }).catch(() => {
+    }).catch((err) => {
       if (state.replayFor !== sid) return;
-      state.sessionEvents = { sid: sid, data: null, loaded: false };
+      // P4-S4-5：IPC 抛错是「查失败」，不是「没接入」——带上原因，别再冒充未接入
+      state.sessionEvents = { sid: sid, data: null, loaded: true, error: (err && err.message) || '未知错误', bridgeMissing: false };
       render();
     });
   }
@@ -856,7 +933,7 @@
     const sub = m.sub ? `<div class="subagent"><span class="badge ${m.sub.state === 'running' ? 'warn' : 'info'}">SubAgent</span><span class="mono">${esc(m.sub.name)}</span><span class="phases faint">${m.sub.state === 'running' ? '执行中 · 即用即走' : '已回收并销毁'}</span></div>` : '';
     // FR-5：单回合 token 徽标（网关没上报 usage 的回合没有该字段，不显示假 0）
     const tok = (m.tok && Number.isFinite(m.tok.p) && Number.isFinite(m.tok.c))
-      ? `<span class="faint mono" style="font-size:10.5px;margin-left:6px">↑${fmtTokens(m.tok.p)} ↓${fmtTokens(m.tok.c)}</span>` : '';
+      ? `<span class="faint mono" style="font-size:11px;margin-left:6px">↑${fmtTokens(m.tok.p)} ↓${fmtTokens(m.tok.c)}</span>` : '';
     const fb = (m.feedback && state.feedback.has(sid + '|' + m.t)) ? `<div class="feedback" style="color:var(--ok)">已记录反馈 · 已脱敏遥测</div>`
       : (m.feedback ? `<div class="feedback"><span>这条回答对你有帮助吗？</span><button data-action="trace" data-fb="positive" data-t="${m.t}">有帮助</button><button data-action="trace" data-fb="negative" data-t="${m.t}">需改进</button><span class="faint">反馈将用于改善回复质量</span></div>` : '');
     const raw = m.x || m.text || '';
@@ -969,6 +1046,17 @@
   }
 
   /* ---------- 渲染：侧栏（ZCode 风格：分组/项目切换 + 文件夹图标） ---------- */
+  // 会话行（侧栏三处共用：项目展开 / 轻模式目录分组 / 任务组）。提为函数声明是为了
+  // 让定义在前、调用在后的 renderProject 也能共用同一份实现——此前 renderProject 里
+  // 内联了一份副本，改样式要改两处（评审 C-F1）。
+  function sessItem(s) {
+    return `<div class="sess ${state.sel === s.id ? 'active' : ''}" data-action="sel" data-id="${s.id}">
+          <span class="sn" title="${esc(s.title)} ${esc(s.expert)}">${esc(s.title)}</span>
+          ${s.updated !== '刚刚' ? `<span class="st">${esc(s.updated)}</span>` : ''}
+          <button class="opbtn" data-action="sess-menu" data-id="${s.id}" title="会话操作">···</button>
+        </div>`;
+  }
+
   function renderSideSession() {
     const active = state.projects.filter(p => !p.archived);
     const archived = state.projects.filter(p => p.archived);
@@ -986,11 +1074,7 @@
         </div>
         ${expanded ? `<div class="proj-list">${p.sessions.map((sid) => {
           const s = state.sessions[sid]; if (!s) return '';
-          return `<div class="sess ${state.sel === sid ? 'active' : ''}" data-action="sel" data-id="${sid}">
-            <span class="sn" title="${esc(s.title)} ${esc(s.expert)}">${esc(s.title)}</span>
-            ${s.updated !== '刚刚' ? `<span class="st">${esc(s.updated)}</span>` : ''}
-            <button class="opbtn" data-action="sess-menu" data-id="${sid}" title="会话操作">···</button>
-          </div>`;
+          return sessItem(s);
         }).join('')}</div>` : ''}
       </div>`;
     };
@@ -1008,26 +1092,62 @@
     // 任务模式会话（不属于任何项目的独立会话）
     const allProjectIds = new Set(state.projects.map(p => p.id));
     const taskSessions = Object.values(state.sessions).filter(s => s.pid === '__task__' || !allProjectIds.has(s.pid));
-    const taskExpanded = state.pExpanded.has('__task__');
-    const taskBlock = taskSessions.length ? `<div class="proj">
+    let taskBlock = '';
+    if (state.viewMode !== 'project' && taskSessions.length) {
+      // P1.4 轻模式：轻会话按工作目录分组（无 cwd 的归「任务」组，行为与旧版一致）
+      const wsMap = new Map();
+      const noWs = [];
+      taskSessions.forEach((s) => {
+        const d = String(s.cwd || '').trim();
+        if (d) { if (!wsMap.has(d)) wsMap.set(d, []); wsMap.get(d).push(s); }
+        else noWs.push(s);
+      });
+      const blocks = [];
+      for (const [d, list] of wsMap) {
+        const key = 'ws:' + d;
+        const exp = state.pExpanded.has(key);
+        blocks.push(`<div class="proj">
+      <div class="proj-head" data-action="proj-toggle" data-id="${esc(key)}" title="${esc(d)}">
+        <span class="pf ${exp ? 'open' : ''}">${ic('chev', 12)}</span>
+        <span class="pf-open" style="color:var(--fg-faint)">${ic('folder', 14)}</span>
+        <span class="pn" style="text-transform:none;font-weight:500;letter-spacing:0;font-size:12px">${esc(dirBase(d))}</span>
+        <span class="pc">${list.length}</span>
+      </div>
+      ${exp ? `<div class="proj-list">${list.map(sessItem).join('')}</div>` : ''}
+    </div>`);
+      }
+      if (noWs.length) {
+        const exp = state.pExpanded.has('__task__');
+        blocks.push(`<div class="proj">
+      <div class="proj-head" data-action="proj-toggle" data-id="__task__">
+        <span class="pf ${exp ? 'open' : ''}">${ic('chev', 12)}</span>
+        <span class="pn" style="color:var(--fg-faint);text-transform:none;font-weight:500;letter-spacing:0;font-size:12px">${ic('zap', 14)} 任务</span>
+        <span class="pc">${noWs.length}</span>
+      </div>
+      ${exp ? `<div class="proj-list">${noWs.map(sessItem).join('')}</div>` : ''}
+    </div>`);
+      }
+      taskBlock = blocks.join('');
+    } else if (taskSessions.length) {
+      // project 态：原有「任务」组
+      const taskExpanded = state.pExpanded.has('__task__');
+      taskBlock = `<div class="proj">
       <div class="proj-head" data-action="proj-toggle" data-id="__task__">
         <span class="pf ${taskExpanded ? 'open' : ''}">${ic('chev', 12)}</span>
         <span class="pn" style="color:var(--fg-faint);text-transform:none;font-weight:500;letter-spacing:0;font-size:12px">${ic('zap', 14)} 任务</span>
         <span class="pc">${taskSessions.length}</span>
       </div>
-      ${taskExpanded ? `<div class="proj-list">${taskSessions.map((s) => {
-        return `<div class="sess ${state.sel === s.id ? 'active' : ''}" data-action="sel" data-id="${s.id}">
-          <span class="sn" title="${esc(s.title)} ${esc(s.expert)}">${esc(s.title)}</span>
-          ${s.updated !== '刚刚' ? `<span class="st">${esc(s.updated)}</span>` : ''}
-          <button class="opbtn" data-action="sess-menu" data-id="${s.id}" title="会话操作">···</button>
-        </div>`;
-      }).join('')}</div>` : ''}
-    </div>` : '';
+      ${taskExpanded ? `<div class="proj-list">${taskSessions.map(sessItem).join('')}</div>` : ''}
+    </div>`;
+    }
 
+    // P4-S1-10：原实现这里只有一个「项目」tab、无 data-action，CSS 却给了 cursor:pointer
+    // 和 hover 背景——看着是可切换的过滤器，点了没有任何反应；标签还承诺了一个不存在
+    // 的「任务」tab。改为如实描述当前列表内容的静态标签（可点样式在 CSS 里按容器限定）。
     return `<div class="proj-seg">
       <span class="seg-label">项目 / 任务</span>
       <div class="seg-tabs">
-        <span class="seg-tab active">项目</span>
+        <span class="seg-tab active" title="项目与其下会话；轻会话按工作目录分组">项目</span>
       </div>
     </div>
     <div style="display:align-items:center;gap:4px;padding:4px 10px 8px">
@@ -1118,9 +1238,33 @@
   }
 
   function thinkLabel(l) { return ({ off: '关闭', standard: '标准', deep: '深度', max: '最大' })[l] || '标准'; }
+  /* P4：意图门状态从运行时读，不写死。原实现是一行静态 HTML「本地模型」+ 绿点，
+     意图门插件未装载/被停用时 UI 仍宣称本地模型在初筛，placeholder 也承诺「先经意图
+     识别插件初筛」——安全初筛控件的状态是编造的（铁律：fail-closed + UI 不许撒谎）。
+     判定与 pluginBadge / 能力 TAB 同源：运行时 ready 且插件 active 才叫就绪。 */
+  function intentCtlState() {
+    const rt = state.pluginRuntime;
+    const ready = !!(rt && rt.ready && Array.isArray(rt.plugins));
+    const live = ready ? rt.plugins.find((x) => x.name === 'intent') : null;
+    if (live && live.active) {
+      return { label: '本地模型', color: 'var(--ok)', placeholderSuffix: '（先经意图识别插件初筛）', tip: '意图识别插件已启用：prompt 到达模型前先做本地初筛' };
+    }
+    if (live && !live.available) {
+      return { label: '未接入 · 按拒绝处理', color: 'var(--warn)', placeholderSuffix: '', tip: '意图识别插件未接入：fail-closed 按拒绝处理，高风险 prompt 会被拦下并转人工确认' };
+    }
+    if (live) {
+      return { label: '已停用 · 按拒绝处理', color: 'var(--warn)', placeholderSuffix: '', tip: '意图识别插件已停用：fail-closed 按拒绝处理' };
+    }
+    if (ready) {
+      return { label: '未装载 · 按拒绝处理', color: 'var(--warn)', placeholderSuffix: '', tip: '意图识别插件未装载：fail-closed 按拒绝处理' };
+    }
+    return { label: '运行时未接入 · 按拒绝处理', color: 'var(--warn)', placeholderSuffix: '', tip: '插件运行时未接入，无法确认意图门状态：fail-closed 按拒绝处理' };
+  }
+
   function renderComposer(s) {
-    const mpLabel = state.selectedModels.length > 1 ? state.selectedModels.length + ' 个模型' : (state.selectedModels[0] || '选择模型');
     const thinkIdx = ({ off: 0, standard: 1, deep: 2, max: 3 })[state.thinkLevel] || 1;
+    const intentCtl = intentCtlState();
+    renderTrayHint();
     // 当前选中项目
     const activeProjects = state.projects.filter(p => !p.archived);
     const curProj = state.selProjForComposer ? activeProjects.find(p => p.id === state.selProjForComposer) : null;
@@ -1136,7 +1280,7 @@
         ${activeProjects.length ? activeProjects.map(p => `<div class="pd-item ${curProj && curProj.id === p.id ? 'active' : ''}" data-action="composer-proj-pick" data-pid="${p.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
           <div><div>${esc(p.n)}</div>${p.d ? `<div class="pd-meta">${esc(p.d)}</div>` : ''}</div>
-          ${curProj && curProj.id === p.id ? '<span class="badge ok" style="margin-left:auto;font-size:10px">当前</span>' : ''}
+          ${curProj && curProj.id === p.id ? '<span class="badge ok" style="margin-left:auto;font-size:11px">当前</span>' : ''}
         </div>`).join('') : '<div class="pd-item" style="color:var(--fg-faint);cursor:default">暂无项目</div>'}
         <div class="pd-sep"></div>
         <div class="pd-item ${!curProj ? 'active' : ''}" data-action="composer-proj-task" title="不关联项目，直接对话">
@@ -1147,7 +1291,7 @@
     </div>`;
     return `<div class="composer"><div class="box">
       ${projSelector}
-      <textarea id="composer" placeholder="向 ${s.expert} 发消息…（先经意图识别插件初筛）"></textarea>
+      <textarea id="composer" placeholder="向 ${s.expert} 发消息…${intentCtl.placeholderSuffix}"></textarea>
       <div id="outboundWarn" class="outbound-warn" hidden></div>
       <div class="bar">
         <div class="composer-more">
@@ -1169,29 +1313,163 @@
             <div class="composer-more-sep"></div>
             <div class="composer-more-item think-item">
               <div class="think-row"><span class="cm-label">思维深度</span><span class="tl">${thinkLabel(state.thinkLevel)}</span></div>
-              <input type="range" min="0" max="3" step="1" value="${thinkIdx}" data-action="think-slider">
+              <input type="range" min="0" max="3" step="1" value="${thinkIdx}" data-action="think-slider" aria-label="思维深度" aria-valuetext="${thinkLabel(state.thinkLevel)}">
             </div>
-            <div class="composer-more-item" style="cursor:default">
-              <span class="cm-icon"><span class="dot" style="background:var(--ok);width:7px;height:7px;border-radius:50%"></span></span>
+            <div class="composer-more-item" style="cursor:default" title="${esc(intentCtl.tip)}">
+              <span class="cm-icon"><span class="dot" style="background:${intentCtl.color};width:7px;height:7px;border-radius:50%"></span></span>
               <span class="cm-label">意图识别</span>
-              <span class="cm-val">本地模型</span>
+              <span class="cm-val">${esc(intentCtl.label)}</span>
             </div>
           </div>
         </div>
         <div class="right">
-          <button class="c-mp ${state.selectedModels.length > 1 ? 'multi' : ''}" data-action="model-pick"><span class="md"></span><span class="mn">${mpLabel}</span>${ic('chev', 12)}</button>
+          ${modelChipHTML()}
           <button class="btn sm primary" data-action="send">发送</button>
         </div>
       </div>
     </div></div>`;
   }
 
+  /* ---------- P2：composer 模型 chip（内嵌配置入口，spec §5.3） ----------
+   * 四态取代原来「有模型才显示、没有就写死选择模型」的按钮：
+   *   ready  = 有可用模型     → 绿点 + 模型名，点击开模型选择器（原行为）
+   *   ollama = 本机有 Ollama  → 橙点 + 「发现 Ollama · 一键接入」
+   *   none   = 两者皆无       → 黄点 + 「未配置模型」，点击开内嵌预设面板
+   *   demo   = 演示模式中     → 明确标注，不伪装成真模型（UI 不许撒谎）
+   * 欢迎页与会话页 composer 共用同一份（原为两处逐字重复的按钮）。 */
+  function modelChipState() {
+    // 就绪态优先于演示态：万一 autoSelectModels 的退出没跑到（并发/异常），
+    // 有真模型时就绝不再显示「演示模式」——UI 不许撒谎。
+    if (state.selectedModels.length) {
+      return {
+        kind: 'ready',
+        label: state.selectedModels.length > 1 ? state.selectedModels.length + ' 个模型' : state.selectedModels[0],
+        tip: '当前可用模型，点击切换',
+      };
+    }
+    if (state.demoMode) return { kind: 'demo', label: '演示模式', tip: '当前回复是本地回显，未调用任何模型。点击配置真模型' };
+    const hasOllamaProvider = (state.modelProviders || []).some((p) => p.type === 'ollama');
+    if (state.ollama.ok && state.ollama.models.length && !hasOllamaProvider) {
+      return { kind: 'ollama', label: '发现 Ollama · 一键接入', tip: `本机 Ollama 有 ${state.ollama.models.length} 个模型，点击即接入` };
+    }
+    return { kind: 'none', label: '未配置模型', tip: '点击用 models.dev 预设 + KEY 两步完成配置' };
+  }
+  function modelChipHTML() {
+    const st = modelChipState();
+    const dot = st.kind === 'ready' ? 'var(--ok)' : st.kind === 'demo' ? 'var(--accent-fg)' : 'var(--warn)';
+    const multi = st.kind === 'ready' && state.selectedModels.length > 1 ? ' multi' : '';
+    return `<button class="c-mp mp-${st.kind}${multi}" data-action="${st.kind === 'ollama' ? 'ollama-adopt' : 'model-pick'}" title="${esc(st.tip)}" aria-label="${esc(st.tip)}"><span class="md" style="background:${dot}"></span><span class="mn">${esc(st.label)}</span>${st.kind === 'ready' ? ic('chev', 12) : ''}</button>`;
+  }
+
+  /* ---------- P2：内嵌模型配置面板 + Ollama 一键接入 ---------- */
+  // 复用设置页同一套 mp* 表单状态与动作（预设下拉 / KEY 防抖拉取 / 默认全选），
+  // 只把「类型/名称/URL/协议」收进高级折叠——轻用户看到的就是两步。
+  function openModelSetupModal() {
+    openModal(`<div class="mh">${ic('bot', 18)}<b>配置模型</b></div>
+      <div class="mb">
+        <div class="faint" style="margin-bottom:12px">两步完成：① 选预设（或直接粘 KEY）→ ② 点「添加并开始聊天」。模型列表会自动拉取并默认全选。</div>
+        <div class="mp-form">
+          <div class="mp-row">
+            <label class="mp-label">① 提供商预设</label>
+            <div class="mp-preset">
+              ${mpPresetControlHTML()}
+              ${state.mpPresetOpen ? mpPresetPopHTML() : ''}
+            </div>
+          </div>
+          <div class="mp-row">
+            <label class="mp-label">② API Key</label>
+            <input type="password" id="mp-key" placeholder="sk-...（Ollama 本地可留空）" class="mp-inp">
+          </div>
+          <div class="mp-row">
+            <label class="mp-label">模型</label>
+            <div class="mp-models-wrap"><div id="mp-models-pool">${mpModelsPoolHTML()}</div></div>
+          </div>
+          <details class="mp-adv"${state.mpEditing ? ' open' : ''}>
+            <summary>高级：类型 / 名称 / Base URL / 协议</summary>
+            <div class="mp-row">
+              <label class="mp-label">类型</label>
+              <select id="mp-type" class="mp-inp" style="max-width:180px">
+                <option value="ollama">Ollama 本地</option>
+                <option value="openai-compatible">OpenAI 兼容</option>
+              </select>
+            </div>
+            <div class="mp-row">
+              <label class="mp-label">名称</label>
+              <input type="text" id="mp-name" placeholder="如 OpenAI、DeepSeek" class="mp-inp">
+            </div>
+            <div class="mp-row">
+              <label class="mp-label">Base URL</label>
+              <div class="mp-url-wrap">
+                <input type="text" id="mp-url" placeholder="localhost:11434" class="mp-inp mp-url-inp">
+                <label class="mp-url-check"><input type="checkbox" id="mp-fullurl" checked> 完整 URL（含 http://）</label>
+              </div>
+            </div>
+            <div class="mp-row">
+              <label class="mp-label">API 协议</label>
+              <select id="mp-mode" class="mp-inp" style="max-width:200px">
+                <option value="chat">/v1/chat/completions（标准对话）</option>
+                <option value="responses">/v1/responses（Responses API）</option>
+                <option value="completions">/v1/completions（文本补全）</option>
+              </select>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="mf">
+        <button class="btn ghost" data-action="modal-cancel">取消</button>
+        <button class="btn primary" data-action="model-add-provider">添加并开始聊天</button>
+      </div>`);
+    mpEnsureCatalog();
+    // 预填：探到本机 Ollama 时直接填好本地字段并拉一次模型——零配置用户只需点「添加」。
+    const typeEl = $('#mp-type'), nameEl = $('#mp-name'), urlEl = $('#mp-url');
+    if (typeEl && nameEl && urlEl && !state.mpPreset && state.ollama.ok && state.ollama.models.length) {
+      typeEl.value = 'ollama';
+      nameEl.value = 'Ollama（本机）';
+      urlEl.value = 'http://127.0.0.1:11434';
+      mpFetchModels(true);
+    }
+  }
+  /* 一键接入本机 Ollama（chip「发现 Ollama」的直接动作）。写的是真提供商配置
+     （持久化），不是演示模式；探到的模型全部纳入并设为默认。 */
+  async function adoptOllama() {
+    if (!state.ollama.ok || !state.ollama.models.length) { toast('未探测到本机 Ollama', 'warn'); return; }
+    const models = state.ollama.models.slice();
+    const providers = [...(state.modelProviders || [])];
+    const pid = 'ollama-local';
+    const provider = { id: pid, name: 'Ollama（本机）', type: 'ollama', apiMode: 'ollama', baseUrl: 'http://127.0.0.1:11434', models };
+    const idx = providers.findIndex((p) => p.id === pid);
+    if (idx >= 0) providers[idx] = provider; else providers.push(provider);
+    const r = await bridge.saveModelConfig({ providers, defaultProvider: pid, defaultModel: models[0] });
+    if (!r || !r.ok) { toast(`接入失败：${(r && r.reason) || ''}`, 'danger'); return; }
+    state.modelProviders = providers;
+    state.defaultProvider = pid;
+    state.defaultModel = models[0];
+    // 模型池直接用刚保存的 providers 建，不再回读 getModelConfig：回读拿到的是
+    // 「保存前」快照时会把刚接入的提供商冲掉（并发写入/e2e 桩都会这样），chip
+    // 于是又回到「未配置」——接入动作看起来没生效。
+    dynamicModels.list = providers.flatMap((p) => (p.models || []).map((n) => ({
+      n, p: p.name + ' · ' + p.type, k: p.type === 'ollama' ? '(本地)' : 'API', state: '已配',
+    })));
+    state.demoMode = false;   // 真模型就位，退出演示
+    autoSelectModels(providers, pid, models[0]);
+    render();
+    toast(`已接入本机 Ollama · ${models.length} 个模型`, 'ok');
+  }
+
   /* ---------- 渲染：会话主区（ZCode 风格：新对话/欢迎页 + 快捷入口） ---------- */
   function renderHomeScreen() {
     const activeProjects = state.projects.filter(p => !p.archived);
     const curProj = state.selProjForComposer && state.selProjForComposer !== '__task__' ? activeProjects.find(p => p.id === state.selProjForComposer) : null;
-    const projLabel = curProj ? curProj.n : '选择项目（或进入任务模式）';
-    
+    // P1.4：项目选择降级为可选（留空即用隐式工作目录）；标签同步改口径
+    const projLabel = curProj ? curProj.n : '选择项目（可选）';
+    // P1.4：隐式工作目录 chip——轻会话的默认 cwd，一键更改
+    const wsName = state.workspaceDir ? dirBase(state.workspaceDir) : '';
+    const wsChip = `<button type="button" class="ws-chip" data-action="ws-pick" title="设置轻会话的默认工作目录">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <span>${wsName ? esc(wsName) : '设置工作目录'}</span>
+      ${state.workspaceDir ? '<span class="ws-change">更改</span>' : ''}
+    </button>`;
+
     // 项目选择下拉
     const projSelector = `<div style="position:relative">
       <div class="proj-select ${state.projDropdownOpen ? 'open' : ''}" data-action="proj-select-toggle" title="选择项目">
@@ -1204,7 +1482,7 @@
         ${activeProjects.length ? activeProjects.map(p => `<div class="pd-item ${curProj && curProj.id === p.id ? 'active' : ''}" data-action="composer-proj-pick" data-pid="${p.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
           <div><div>${esc(p.n)}</div>${p.d ? `<div class="pd-meta">${esc(p.d)}</div>` : ''}</div>
-          ${curProj && curProj.id === p.id ? '<span class="badge ok" style="margin-left:auto;font-size:10px">当前</span>' : ''}
+          ${curProj && curProj.id === p.id ? '<span class="badge ok" style="margin-left:auto;font-size:11px">当前</span>' : ''}
         </div>`).join('') : '<div class="pd-item" style="color:var(--fg-faint);cursor:default">暂无项目</div>'}
         <div class="pd-sep"></div>
         <div class="pd-item" data-action="home-create-proj" title="创建新项目">
@@ -1229,6 +1507,7 @@
     return `<div class="home-screen">
       <div class="home-greeting">${esc(getGreeting())}</div>
       <div class="home-input-wrap">
+        <div class="home-ws-row">${wsChip}</div>
         <div class="composer"><div class="box">
           ${projSelector}
           <textarea id="homeComposer" placeholder="向 OrchDesk 提问…" rows="1"></textarea>
@@ -1247,12 +1526,12 @@
                 </div>
                 <div class="composer-more-item think-item">
                   <div class="think-row"><span class="cm-label">思维深度</span><span class="tl">${thinkLabel(state.thinkLevel)}</span></div>
-                  <input type="range" min="0" max="3" step="1" value="${({off:0,standard:1,deep:2,max:3}[state.thinkLevel]||1)}" data-action="think-slider">
+                  <input type="range" min="0" max="3" step="1" value="${({off:0,standard:1,deep:2,max:3}[state.thinkLevel]||1)}" data-action="think-slider" aria-label="思维深度" aria-valuetext="${thinkLabel(state.thinkLevel)}">
                 </div>
               </div>
             </div>
             <div class="right">
-              <button class="c-mp ${state.selectedModels.length > 1 ? 'multi' : ''}" data-action="model-pick"><span class="md"></span><span class="mn">${state.selectedModels.length > 1 ? state.selectedModels.length + ' 个模型' : (state.selectedModels[0] || '选择模型')}</span>${ic('chev', 12)}</button>
+              ${modelChipHTML()}
               <button class="btn sm primary" data-action="home-send">发送</button>
             </div>
           </div>
@@ -1282,6 +1561,12 @@
     const ev = state.sessionEvents;
     if (ev.loaded && ev.data && ev.data.source === 'event-log') return 'append-only 事件流重建';
     if (ev.loaded && ev.data && ev.data.source === 'legacy') return '历史会话：事件流无记录或不完整，从消息数组重建';
+    // P4-S4-5：四态分清。原实现只有「未接入」一个兜底，把「加载中」「查失败」
+    // 「桥真缺失」全说成同一句。bridgeMissing 必须排在 !loaded 之前——桥缺失时
+    // loaded 本来就是 false，顺序反了会把「未接入」误显示成「加载中」。
+    if (ev.bridgeMissing) return '从消息数组重建（事件流未接入）';
+    if (!ev.loaded) return '事件流加载中…';
+    if (ev.error) return `事件流读取失败：${ev.error} · 已从消息数组重建`;
     return '从消息数组重建（事件流未接入）';
   }
   function renderReplay(s) {
@@ -1380,13 +1665,20 @@
       const tabsHTML = tabs.map(t => `<button class="ctx-tab ${tabId === t.id ? 'active' : ''}" data-action="ctx-tab" data-id="${t.id}">${t.label}</button>`).join('');
 
       if (!s) {
+        // P4：副标题不再写死「DSH 插件 · 已启用」——同一个面板的「能力」TAB 在运行时
+        // 未接入时显示「未接入」，两处对自己依赖的后端给出互相矛盾的状态。与设置页
+        // statbar 的运行时文案共用同一判定（Nielsen ④一致性 + 铁律三态）。
+        const rtOk = !!(state.pluginRuntime && state.pluginRuntime.ready);
+        const sub = rtOk
+          ? `插件运行时就绪 · ${state.pluginRuntime.activeCount}/${state.pluginRuntime.total}`
+          : '插件运行时未接入';
         return `<div class="ctx-header">
             <div class="ctx-title">${ic('clipboard', 16)} 任务监控</div>
-            <div class="ctx-subtitle">DSH 插件 · 已启用</div>
+            <div class="ctx-subtitle">${esc(sub)}</div>
           </div>
           <div class="ctx-tabs">${tabsHTML}</div>
           <div class="ctx-body">
-            <div class="ctx-empty"><div class="empty-icon">${ic('clipboard', 28)}</div>选择会话后查看任务跟踪<br><span style="font-size:10px">发送消息后 Agent 步骤、产物、技能将在此显示</span></div>
+            <div class="ctx-empty"><div class="empty-icon">${ic('clipboard', 28)}</div>选择会话后查看任务跟踪<br><span style="font-size:11px">发送消息后 Agent 步骤、产物、技能将在此显示</span></div>
           </div>
           <div id="previewRoot"></div>`;
       }
@@ -1418,6 +1710,18 @@
           toolActions.push({ text: 'SubAgent: ' + (m.sub.name || ''), status: m.sub.state === 'disposed' ? 'done' : 'running', time: m.t || '' });
         }
       });
+      // 回合进行中：把实时工具步骤（主进程 orchdesk:tool-step 推送；renderMsg 的
+      // typing 分支也在读同一份 state.toolSteps）并进执行明细。此前右栏只从已落库的
+      // m.tools 取，回合中永远只有计划、看不到正在执行什么——与 P1.3「工具步骤时
+      // 从右侧滑出」的承诺不符。
+      // 两个坑都踩过：① 合并必须放在 msgs.forEach 之外——放里面会按历史消息数重复
+      // 追加（10 条历史的会话 3 个工具显示成 30 行、计数「30 个动作」）；
+      // ② 用 turnBusy===本会话 门控，回合一结束就停合并，否则与 m.tools 重复一遍。
+      if (state.turnBusy === s.id && Array.isArray(state.toolSteps[s.id])) {
+        state.toolSteps[s.id].forEach((t) => {
+          toolActions.push({ text: t.n, status: t.ph === 'done' ? 'done' : t.ph === 'running' ? 'running' : 'pending', time: '' });
+        });
+      }
 
       // ---- 提取产物 ----
       const products = [];
@@ -1463,9 +1767,11 @@
           // 没有语义步骤时，至少把执行明细摆出来（旧版就是从这里取的），并说明待办的语义来源
           bodyHTML = toolActions.length
             ? '<div class="ctx-empty" style="padding-top:14px"><div class="empty-icon">' + ic('clipboard', 24) + '</div>'
-              + '尚未识别到任务分拆<br><span style="font-size:10px">让 Agent 先输出计划清单（markdown 列表或 ```orch-plan 块）即可在此跟踪</span></div>'
+              // P4-S4-6：原文案把内部协议语法（```orch-plan 围栏）直接暴露给终端用户。
+              // 用户不需要知道 Agent 用什么格式表达计划，只需要知道「复杂任务会自动拆步骤」。
+              + 'Agent 还没有给出可跟踪的步骤<br><span style="font-size:11px">复杂任务会自动拆成待办；下面「执行明细」是本回合真实执行过的每个动作</span></div>'
               + '<div class="ctx-section"><div class="ctx-section-title">执行明细 · ' + toolActions.length + ' 个动作</div>' + toolActions.map((st) => stepRow(st, true)).join('') + '</div>'
-            : '<div class="ctx-empty"><div class="empty-icon">' + ic('check', 28) + '</div>暂无任务步骤<br><span style="font-size:10px">发送消息后将跟踪 Agent 的任务分拆与操作</span></div>';
+            : '<div class="ctx-empty"><div class="empty-icon">' + ic('check', 28) + '</div>暂无任务步骤<br><span style="font-size:11px">发送消息后将跟踪 Agent 的任务分拆与操作</span></div>';
         } else {
           const srcLabel = plan.source === 'plan' ? '任务分拆' : '任务分拆（解析自回复列表）';
           bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">' + srcLabel
@@ -1478,7 +1784,7 @@
         }
       } else if (tabId === 'products') {
         if (products.length === 0) {
-          bodyHTML = '<div class="ctx-empty"><div class="empty-icon">' + ic('fileText', 28) + '</div>暂无产物<br><span style="font-size:10px">Agent 生成代码时将在此显示</span></div>';
+          bodyHTML = '<div class="ctx-empty"><div class="empty-icon">' + ic('fileText', 28) + '</div>暂无产物<br><span style="font-size:11px">Agent 生成代码时将在此显示</span></div>';
         } else {
           bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">会话产物 (' + products.length + ')</div>' + products.map(p => {
             const iconCls = p.type === 'md' ? 'md' : p.type === 'code' ? 'code' : 'img';
@@ -1515,7 +1821,7 @@
         bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">插件'
           + (rtList ? ' · 使用中 ' + plugActive + '/' + rtList.length : ' · 运行时未接入')
           + '</div>'
-          + (rtList ? '' : '<div class="faint" style="font-size:10px;padding:2px 0 6px">插件运行时未接入 · 以下为声明清单，非实时装载状态</div>')
+          + (rtList ? '' : '<div class="faint" style="font-size:11px;padding:2px 0 6px">插件运行时未接入 · 以下为声明清单，非实时装载状态</div>')
           + plugRows + '</div>';
         // ② 技能：本地磁盘真实扫描（数据目录/skills/*.skill）。
         //    未接入（扫描失败）与「已扫描但没装」分别标注，不混为一谈。
@@ -1535,8 +1841,8 @@
             : ' · 未接入')
           + '</div>'
           + (state.installedSkillsLoaded
-            ? (skills.length ? skRows : '<div class="faint" style="font-size:10px;padding:2px 0 6px">暂无已安装技能 · 插件页 → 技能市场（观雅集）可安装</div>')
-            : '<div class="faint" style="font-size:10px;padding:2px 0 6px">技能目录未接入（主进程桥不可用）· 非「没有技能」</div>')
+            ? (skills.length ? skRows : '<div class="faint" style="font-size:11px;padding:2px 0 6px">暂无已安装技能 · 插件页 → 技能市场（观雅集）可安装</div>')
+            : '<div class="faint" style="font-size:11px;padding:2px 0 6px">技能目录未接入（主进程桥不可用）· 非「没有技能」</div>')
           + '</div>';
         // ③ MCP 连接（真接入）：真实 server 配置 + 连接状态 + 工具清单。
         //    此前这里写死 4 个「filesystem/intent/memory/orchestration」并拿插件装载状态
@@ -1554,17 +1860,17 @@
           const msg = m.lastMessage ? esc(m.lastMessage) : '';
           return '<div class="ctx-mcp"><span class="mcp-dot ' + (connected ? 'connected' : 'disconnected') + '"></span>'
             + '<span style="flex:1">' + esc(m.name || m.id) + '</span>'
-            + '<span style="font-size:10px;color:var(--fg-dim)">' + esc(label) + toolTitle + '</span></div>'
-            + (msg ? '<div class="faint" style="font-size:10px;padding:0 0 4px 26px">' + msg + '</div>' : '');
+            + '<span style="font-size:11px;color:var(--fg-dim)">' + esc(label) + toolTitle + '</span></div>'
+            + (msg ? '<div class="faint" style="font-size:11px;padding:0 0 4px 26px">' + msg + '</div>' : '');
         }).join('');
         bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接'
           + (mcpLoaded ? ' · ' + mcpStats.connected + '/' + mcpStats.total : ' · 未接入')
           + '</div>'
           + (!mcpLoaded
-            ? '<div class="faint" style="font-size:10px;padding:2px 0 6px">MCP 桥未接入（主进程不可用）· 非「没有配置」</div>'
+            ? '<div class="faint" style="font-size:11px;padding:2px 0 6px">MCP 桥未接入（主进程不可用）· 非「没有配置」</div>'
             : (mcps.length
               ? mcpRows
-              : '<div class="faint" style="font-size:10px;padding:2px 0 6px">暂无 MCP server · 插件页 → MCP 可添加（命令/参数/env）</div>'))
+              : '<div class="faint" style="font-size:11px;padding:2px 0 6px">暂无 MCP server · 插件页 → MCP 可添加（命令/参数/env）</div>'))
           + '</div>';
       }
 
@@ -1591,17 +1897,29 @@
       // 此前部分条目带 data-action、部分完全没有，看起来一样但点了没反应。
       const nav = (target, label, badge, on) => `<div class="ss-i pside-nav ${on ? 'on' : ''}" data-action="pside-nav" data-target="${target}"><span class="id"></span><span class="in">${label}</span>${badge || ''}</div>`;
       const staticRow = (label, badge) => `<div class="ss-i ss-i-static" title="仅展示，无对应操作"><span class="id"></span><span class="in">${label}</span>${badge || ''}</div>`;
-      const builtIn = PLUGINS.map((p) => nav('psec-builtin', p.n,
-        p.on ? '<span class="ib badge ok">启</span>' : p.deferred ? '<span class="ib badge">延后</span>' : '<span class="ib badge">关</span>',
-        p.on)).join('');
-      const market = (state.market.loaded
+      // 分区级跳转：该组暂无条目、但主区分区确实存在（连接器 / MCP / 临时插件 / 市场
+      // 在未接入或空列表时）。可点（滚到分区）但视觉弱化，不假装有内容——此前这些兜底
+      // 行完全静态，[psec-*] 分区「无侧栏入口」告警误报，用户也只能靠滚屏发现分区。
+      const secJump = (target, label, badge) => `<div class="ss-i ss-i-jump" data-action="pside-nav" data-target="${target}" title="该组暂无条目，点击跳到配置区"><span class="id"></span><span class="in">${label}</span>${badge || ''}</div>`;
+      // P4-S2-4：侧栏徽章改读运行时（pluginBadge），与主区卡片徽章/开关同源。
+      // 原实现读常量 p.on——运行时就绪后会出现「侧栏显示 启 + 绿点，卡片显示 已停用」
+      // 的同页矛盾。pluginBadge 在运行时不认识该插件时会回落常量，语义不变。
+      const builtIn = PLUGINS.map((p) => nav('psec-builtin', p.n, pluginBadge(p.id), pluginSwitchedOn(p.id))).join('');
+      // 本地市场未接入或为空：分区仍在，给分区级跳转（不假装有条目）
+      const market = (state.market.loaded && state.market.items.length
         ? state.market.items.map((m) => nav('psec-market', esc(m.manifest && m.manifest.name || m.dir), marketBadge(m), m.active)).join('')
-        : '') +
+        : secJump('psec-market', '本地插件市场', `<span class="ib badge">${state.market.loaded ? '暂无' : '未接入'}</span>`)) +
         // 远程源未接入：无本地落点，标为静态（不假装可点）
         PLUGIN_MARKET.map((p) => staticRow(esc(p.n), '<span class="ib badge">远程未接入</span>')).join('');
       const skills = SKILLS_MARKET.map((s) => nav('psec-skills', `<span class="mono" style="font-size:11.5px">${esc(s.n)}</span>`,
         s.auth ? '<span class="ib badge warn">授权</span>' : '<span class="ib badge ok">可装</span>')).join('');
-      const experts = [...expertList().map((e) => staticRow(e, '<span class="ib badge info">专家</span>')),
+      // P4-S2-12：编排目录拉不到时回落硬编码 EXPERTS/TEAMS，必须显式标注兜底——
+      // 否则 8 专家 + 3 团的兜底数据与真实目录同权展示，用户无从分辨（orchestrationLive()
+      // 此前写了没人调用，三态标注被漏做；这里接上）。
+      const orchNote = !orchestrationLive()
+        ? `<div class="ss-i ss-i-static" title="编排插件目录未接入，以下为内置兜底名单"><span class="id"></span><span class="in">编排目录未接入 · 兜底名单</span><span class="ib badge">未接入</span></div>`
+        : '';
+      const experts = orchNote + [...expertList().map((e) => staticRow(e, '<span class="ib badge info">专家</span>')),
         ...teamList().map((t) => `<div class="ss-i ss-i-action"><span class="id"></span><span class="in">${esc(t.n)}</span><button class="btn sm ghost" data-action="team-compose" data-tid="${esc(t.id || '')}" data-tn="${esc(t.n)}">派发任务</button><span class="ib badge ceo">团</span></div>`)].join('');
       // 委派树结果（composeTeam 返回后渲染；CEO→Director→Worker 三层）。
       // ②半接线修复后 composeTeam 会把 task 真实喂给各 Director 经 agentRunner 执行，
@@ -1625,13 +1943,27 @@
         // 点击 = 滚到连接器分区 + 展开该连接器配置（此前只展开不滚动，
         // 若分区在下方视口外，点了像没反应）。
         ? state.connectors.items.map((c) => `<div class="ss-i ${c.state && c.state.lastTestOk === true ? 'on' : ''}" data-action="conn-nav" data-id="${esc(c.id)}"><span class="id"></span><span class="in">${esc(c.name)}</span>${connBadge(c)}</div>`).join('')
-        : '<div class="ss-i ss-i-static"><span class="id"></span><span class="in">连接器注册表</span><span class="ib badge">未接入</span></div>';
+        : secJump('psec-connectors', '连接器配置', '<span class="ib badge">未接入</span>');
       const connCount = state.connectors.loaded ? state.connectors.stats.total : 0;
+      // MCP / 临时插件：主区分区（psec-mcp / psec-temp）此前的侧栏盲区（/layout），
+      // 用户只能靠滚屏发现。这里补上可跳转的侧栏组，未接入态显式标注。
+      const mcpItems = state.mcp.loaded
+        ? (state.mcp.servers.length
+            ? state.mcp.servers.map((m) => nav('psec-mcp', esc(m.name || m.id), m.lastConnectOk === true ? '<span class="ib badge ok">连</span>' : '<span class="ib badge">待连</span>')).join('')
+            : secJump('psec-mcp', 'MCP 配置', '<span class="ib badge">暂无</span>'))
+        : secJump('psec-mcp', 'MCP 配置', '<span class="ib badge">未接入</span>');
+      const mcpCount = state.mcp.loaded ? state.mcp.stats.total : 0;
+      const tempItems = state.tempPlugins.length
+        ? state.tempPlugins.map((p) => nav('psec-temp', `<span class="mono" style="font-size:11.5px">${esc(p.name)}</span>`, '<span class="ib badge warn">内存</span>')).join('')
+        // P4-S2-5：区分「拉到了但真没有」与「没拉到」
+        : secJump('psec-temp', '临时插件', `<span class="ib badge">${state.tempPluginsLoaded ? '暂无' : '未接入'}</span>`);
       return sec('builtin', '内置插件', PLUGINS.length, builtIn) +
         sec('market', '插件市场', (state.market.loaded ? state.market.items.length : 0) + PLUGIN_MARKET.length, market) +
         sec('skills', '技能市场', SKILLS_MARKET.length, skills) +
         sec('experts', '专家·专家团', expertList().length + teamList().length, expertsHtml) +
-        sec('connectors', '连接器', connCount, connItems);
+        sec('connectors', '连接器', connCount, connItems) +
+        sec('mcp', 'MCP', mcpCount, mcpItems) +
+        sec('temp', '临时插件', state.tempPlugins.length, tempItems);
     },
     main() {
       // 插件页搜索（2026-09-06）：顶部搜索条即时过滤内置插件卡片。
@@ -1652,7 +1984,7 @@
                 ${p.model ? `<span class="badge info">${p.model}</span>` : ''}</div>
               <div class="pdesc">${p.d}</div>
               <div class="pmeta">${p.repo ? `<span class="mono">${p.repo}</span>·` : ''}<span class="faint">能力声明</span></div>
-              <div class="pcaps">${p.caps.map((c, i) => `<span class="badge cap ${i === 0 ? '' : (c.includes('write') || c.includes('dispose') || c.includes('commit') ? 'warn' : '')}">${c}</span>`).join('')}</div>
+              <div class="pcaps" data-expanded="0">${(() => { const cs = p.caps || []; const chip = (c, warn, x) => `<span class="badge cap ${x || ''} ${warn ? 'warn' : ''}">${c}</span>`; const isWarn = (c) => c.includes('write') || c.includes('dispose') || c.includes('commit'); const rest = cs.slice(3); return cs.slice(0, 3).map((c, i) => chip(c, i > 0 && isWarn(c))).join('') + (rest.length ? rest.map((c) => chip(c, isWarn(c), 'extra')).join('') + `<span class="badge cap more" data-action="caps-expand" title="展开全部能力声明">+${rest.length}</span>` : ''); })()}</div>
             </div>
             <div class="pactions">
               <!-- 内联 onclick 里的 toast 在 IIFE 作用域外，点击必抛 ReferenceError；
@@ -1683,7 +2015,7 @@
       const formRows = c.fields.map((f) => {
         const val = (c.values && c.values[f.key]) || '';
         const inputType = f.type === 'secret' ? 'password' : 'text';
-        return `<div class="mb-row"><label>${esc(f.label)}${f.required ? '' : ' <span class="faint">（选填）</span>'}</label><input class="inp" type="${inputType}" id="connf-${esc(c.id)}-${esc(f.key)}" placeholder="${esc(f.placeholder || '')}" value="${esc(val)}">${f.hint ? `<div class="faint" style="font-size:10.5px;margin-top:2px">${esc(f.hint)}</div>` : ''}</div>`;
+        return `<div class="mb-row"><label>${esc(f.label)}${f.required ? '' : ' <span class="faint">（选填）</span>'}</label><input class="inp" type="${inputType}" id="connf-${esc(c.id)}-${esc(f.key)}" placeholder="${esc(f.placeholder || '')}" value="${esc(val)}">${f.hint ? `<div class="faint" style="font-size:11px;margin-top:2px">${esc(f.hint)}</div>` : ''}</div>`;
       }).join('');
       return `<div class="plug" data-cid="${esc(c.id)}" ${open ? '' : ''}>
             <div class="ph">
@@ -1711,7 +2043,7 @@
     }).join('')}
           ${state.connAudit.entries.length ? `<div class="sec-title" style="margin-top:12px;font-size:12px">审计（保存/清除/探测，${state.connAudit.total} 条 · 上限 ${state.connAudit.max}）</div>
           <div style="max-height:180px;overflow:auto">
-            ${state.connAudit.entries.map((e) => `<div class="row" style="padding:3px 0;border-top:1px solid var(--border)"><span class="mono" style="font-size:11px;width:86px">${esc(e.id)}</span><span class="badge ${e.action === 'test' ? 'ok' : e.action === 'test-fail' ? 'warn' : ''}" style="margin:0 6px">${esc(e.action)}</span><span style="flex:1;font-size:11.5px">${esc(e.message)}</span><span class="faint mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString()}</span></div>`).join('')}
+            ${state.connAudit.entries.map((e) => `<div class="row" style="padding:3px 0;border-top:1px solid var(--border)"><span class="mono" style="font-size:11px;width:86px">${esc(e.id)}</span><span class="badge ${e.action === 'test' ? 'ok' : e.action === 'test-fail' ? 'warn' : ''}" style="margin:0 6px">${esc(e.action)}</span><span style="flex:1;font-size:11.5px">${esc(e.message)}</span><span class="faint mono" style="font-size:11px">${new Date(e.ts).toLocaleString()}</span></div>`).join('')}
           </div>
           <div class="row" style="margin-top:6px"><button class="btn sm ghost" data-action="conn-audit-clear">清空审计</button></div>` : ''}
         </div>
@@ -1739,7 +2071,10 @@
             </div>
           </div>`;
     }).join('')}
-          <div class="row" style="margin-top:10px"><button class="btn sm primary" data-action="mcp-add">+ 添加 MCP server</button></div>
+          ${/* P4-S2-11：桥未接入时不给「+ 添加 MCP server」可点形态。原实现无条件渲染，用户点开、填完 ID/命令/env，保存时才 toast「主进程未接入」——整个填写过程是无效劳动，且与 fail-closed「不可用即不可操作」的姿态相悖。 */''}
+          ${state.mcp.loaded
+            ? '<div class="row" style="margin-top:10px"><button class="btn sm primary" data-action="mcp-add">+ 添加 MCP server</button></div>'
+            : '<div class="row" style="margin-top:10px"><button class="btn sm" disabled title="MCP 桥未接入，无法添加">+ 添加 MCP server</button><span class="faint" style="font-size:11px;margin-left:8px">需主进程接入</span></div>'}
         </div>
         <div class="sec-title psec" id="psec-market" style="margin-top:18px">本地插件市场</div>
         <div class="card" style="padding:12px">
@@ -1780,7 +2115,11 @@
         <div class="sec-title muted psec" id="psec-temp" style="margin-top:18px">临时插件（自进化 · 仅驻内存 · 重启即失）</div>
         <div class="card temp-plug-card">
           <div class="faint" style="margin-bottom:8px">Agent 运行时自建的临时插件；信任级 = Shell，须沙箱内运行，不持久化。加载前经静态分析 + CONFIRM（fail-closed）。</div>
-          ${state.tempPlugins.length ? state.tempPlugins.map((p) => `<div class="tp-item"><span class="mono">${p.name}</span><span class="badge warn">shell</span><span class="faint">仅驻内存</span><button class="btn sm ghost" data-action="tp-dispose" data-id="${p.id}">卸载</button></div>`).join('') : '<div class="faint">暂无临时插件（创建后在此列出，重启即失）</div>'}
+          ${state.tempPlugins.length ? state.tempPlugins.map((p) => `<div class="tp-item"><span class="mono">${p.name}</span><span class="badge warn">shell</span><span class="faint">仅驻内存</span><button class="btn sm ghost" data-action="tp-dispose" data-id="${p.id}">卸载</button></div>`).join('')
+            // P4-S2-5：没拉到就不能说「暂无」——「未接入」与「为空」必须可区分
+            : (state.tempPluginsLoaded
+              ? '<div class="faint">暂无临时插件（创建后在此列出，重启即失）</div>'
+              : '<div class="faint">临时插件列表未接入（主进程桥不可用）· 不是「没有临时插件」</div>')}
           <div class="row" style="margin-top:8px"><button class="btn sm" data-action="tp-new">+ 新建临时插件</button></div>
         </div>
         <div class="sec-title psec" id="psec-skills" style="margin-top:18px">技能市场（观雅集）</div>
@@ -1808,7 +2147,7 @@
             return `<div class="is-row">
               <span class="is-name mono">${esc(s.slug)}</span>
               <span class="badge ${on ? 'ok' : ''}">${on ? '已启用' : '已停用'}</span>
-              ${size ? `<span class="faint mono" style="font-size:10.5px">${size}</span>` : ''}
+              ${size ? `<span class="faint mono" style="font-size:11px">${size}</span>` : ''}
               <span style="flex:1"></span>
               <button class="btn sm" data-action="skill-toggle" data-n="${esc(s.slug)}">${on ? '停用' : '启用'}</button>
               <button class="btn sm ghost danger-text" data-action="skill-uninstall" data-n="${esc(s.slug)}">卸载</button>
@@ -1824,7 +2163,11 @@
           <div class="levels">
             ${state.authLevels.length
               ? state.authLevels.map((l) => `<div class="lv"><span class="lv-n">L${l.level}</span><span class="lv-l">${esc(l.label)}</span><span class="faint">${esc(l.scope)}</span>${l.requiresApproval ? '<span class="badge warn">需授权</span>' : ''}</div>`).join('')
-              : '<div class="faint">分级定义加载中…</div>'}
+              // P4-S3-06：原实现只有「加载中…」一个分支，init 里 getAuthLevels 失败/返回空时
+              // 它会永久卡死——没有「未接入」也没有重试。fail-closed 语义下要说清楚。
+              : (state.authzLoaded
+                ? '<div class="faint">授权插件未返回分级定义（重进设置页或重启应用可重试）</div>'
+                : '<div class="faint">分级定义未接入（授权服务不可用 · fail-closed：按最严处理）</div>')}
           </div>
         </div>
         <div class="sec-title">当前激活</div>
@@ -1845,11 +2188,204 @@
   };
 
   /* ---------- 渲染：设置视图 ---------- */
+  /* 设置页分区注册表（/layout）：侧栏导航与主区分区的唯一真源。
+     曾出现「凭据」导航项无对应分区（死入口）、「分层记忆」分区无导航入口的漂移；
+     渲染期断言双向覆盖（见 render() 末尾），新增分区忘登记会立刻在控制台暴露。 */
+  const SETTINGS_SECTIONS = [
+    { id: 'model', n: '模型', icon: 'bot' },
+    { id: 'sandbox', n: '沙箱与授权', icon: 'shield' },
+    { id: 'prompt', n: '系统提示词', icon: 'at' },
+    { id: 'desktop', n: '桌面集成', icon: 'settings' },
+    { id: 'memory', n: '分层记忆', icon: 'archive' },
+    { id: 'data', n: '数据目录', icon: 'folder' },
+    { id: 'about', n: '关于', icon: 'at' },
+  ];
+  /* ---------- 模型提供商：models.dev 预设 + KEY 触发拉取（方案 A） ---------- */
+  function fmtCtx(n) {
+    if (!n) return '';
+    if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + 'M';
+    if (n >= 1000) return Math.round(n / 1000) + 'K';
+    return String(n);
+  }
+  function fmtPrice(a, b) {
+    if (a == null && b == null) return '';
+    const f = (v) => (v == null ? '?' : '$' + v);
+    return `${f(a)}/${f(b)}`;
+  }
+  function mpModelChips(m) {
+    const chips = [];
+    if (m.ctx) chips.push(`<span class="badge" title="上下文窗口">${fmtCtx(m.ctx)}</span>`);
+    const pr = fmtPrice(m.priceIn, m.priceOut);
+    if (pr) chips.push(`<span class="badge" title="每百万 token 输入/输出单价">${pr}</span>`);
+    (m.caps || []).forEach((c) => chips.push(`<span class="badge info">${c === 'tool_call' ? '工具调用' : '推理'}</span>`));
+    if (m.enriched) chips.push('<span class="badge ok" title="元数据来自 models.dev 目录">目录</span>');
+    return chips.join('');
+  }
+  function mpPresetControlHTML() {
+    return `<button type="button" class="mp-inp mp-preset-btn" id="mp-preset-btn" data-action="mp-preset-toggle" role="combobox" aria-haspopup="listbox" aria-expanded="${state.mpPresetOpen ? 'true' : 'false'}" aria-controls="mp-preset-pop">${state.mpPreset ? `${esc(state.mpPreset.name)} <span class="faint">${esc(state.mpPreset.id)}</span>` : '选择预设（可选）…'}</button>${state.mpPreset ? '<button type="button" class="mp-preset-clear" data-action="mp-preset-clear" title="清除预设，改回自定义" aria-label="清除预设">×</button>' : ''}`;
+  }
+  function mpPresetPopHTML() {
+    return `<div class="mp-preset-pop" id="mp-preset-pop"><input type="text" id="mp-preset-search" class="mp-inp" placeholder="搜索名称 / id / 域名，如 deepseek、智谱、openrouter" aria-label="搜索提供商预设" autocomplete="off"><div class="mp-preset-list" id="mp-preset-list" role="listbox" aria-label="提供商预设列表">${mpPresetItemsHTML()}</div></div>`;
+  }
+  function mpPresetItemsHTML() {
+    if (state.mpCatalogLoading) return '<div class="faint" style="padding:8px">目录加载中…</div>';
+    const list = state.mpCatalog;
+    if (!list) return '<div class="faint" style="padding:8px">目录获取失败（离线或主进程不可用）。可手动填写下方字段，或 <button type="button" class="btn sm ghost" data-action="mp-catalog-retry">重试</button>。</div>';
+    if (!list.length) return '<div class="faint" style="padding:8px">目录为空</div>';
+    // 全量渲染（勿再加 slice 上限：models.dev 目录 120+ 提供商，截断会让
+    // StepFun 这类后段提供商永远搜不到/滚不到——踩过）。
+    return list.map((p) => `<div class="mp-preset-item" role="option" aria-selected="${state.mpPreset && state.mpPreset.id === p.id ? 'true' : 'false'}" tabindex="0" data-action="mp-preset-pick" data-id="${esc(p.id)}" data-search="${esc((p.name + ' ' + p.id + ' ' + (p.api || '')).toLowerCase())}"><span class="mp-preset-name">${esc(p.name)}</span><span class="mp-preset-id mono">${esc(p.id)}</span><span class="mp-preset-count">${p.modelCount} 模型</span></div>`).join('');
+  }
+  function mpModelsPoolHTML() {
+    let note = '';
+    if (state.mpModelsLoading) note = '<div class="mp-models-status" id="mp-models-status">正在获取可用模型…</div>';
+    else if (state.mpModelsNote) {
+      const retry = /获取失败|不可用/.test(state.mpModelsNote) ? ' <button type="button" class="btn sm ghost" data-action="mp-models-refetch">重试</button>' : '';
+      note = `<div class="mp-models-status" id="mp-models-status">${esc(state.mpModelsNote)}${retry}</div>`;
+    }
+    if (state.mpModelsLoading || !state.mpModels.length) return note;
+    const shown = state.mpModelsExpanded ? state.mpModels : state.mpModels.slice(0, 12);
+    const rest = state.mpModels.length - shown.length;
+    const items = shown.map((m) => {
+      const on = state.mpModelsChecked.has(m.id) ? 'checked' : '';
+      return `<label class="mp-model"><input type="checkbox" data-mid="${esc(m.id)}" ${on}><span class="mono">${esc(m.id)}</span>${m.name && m.name !== m.id ? ` <span class="faint">${esc(m.name)}</span>` : ''}<span class="mp-model-chips">${mpModelChips(m)}</span></label>`;
+    }).join('');
+    const srcLabel = state.mpModelsSource === 'mixed' ? '实时列表 + models.dev 增强' : state.mpModelsSource === 'catalog' ? 'models.dev 目录（非 KEY 实测范围）' : (state.mpModelsSource || '已保存');
+    return note + `<fieldset class="mp-models-fs"><legend>可用模型 <span class="faint">（${srcLabel}）</span></legend>
+      <div class="row" style="gap:6px;margin-bottom:6px;align-items:center">
+        <button type="button" class="btn sm ghost" data-action="mp-models-all">全选</button>
+        <button type="button" class="btn sm ghost" data-action="mp-models-none">全不选</button>
+        <span class="faint" id="mp-models-count">已选 ${state.mpModelsChecked.size}/${state.mpModels.length}</span>
+      </div>
+      <div class="mp-models-list" id="mp-models-list">${items}</div>
+      ${rest > 0 ? `<button type="button" class="btn sm ghost" data-action="mp-models-more" id="mp-models-more">展开全部（还有 ${rest} 个）</button>` : ''}
+    </fieldset>`;
+  }
+  /** 局部刷新模型池（不整页 render——保住表单其它已填字段）。 */
+  function mpRefreshPool() {
+    const pool = $('#mp-models-pool'); if (!pool) return;
+    pool.innerHTML = mpModelsPoolHTML();
+    const inp = $('#mp-models');
+    const hint = pool.previousElementSibling;
+    // P4-S3-01：隐藏手动输入框时必须连值一起清掉。只隐藏不清值时，旧值仍在参与保存
+    // 计算——用户看到的是勾选面板，存进去的却可能混着手动框里的残留模型名。
+    if (inp) { inp.hidden = !!state.mpModels.length; if (state.mpModels.length) inp.value = ''; }
+    if (hint && hint.tagName === 'SPAN') hint.hidden = !!state.mpModels.length;
+  }
+  function mpRefreshPreset() {
+    const box = document.querySelector('.mp-preset'); if (!box) return;
+    box.innerHTML = mpPresetControlHTML() + (state.mpPresetOpen ? mpPresetPopHTML() : '');
+    if (state.mpPresetOpen) { const s = $('#mp-preset-search'); if (s) s.focus(); }
+  }
+  function mpRefreshPresetList() {
+    const list = $('#mp-preset-list'); if (list) list.innerHTML = mpPresetItemsHTML();
+  }
+  function mpPresetFilter() {
+    const q = ($('#mp-preset-search')?.value || '').trim().toLowerCase();
+    let visible = 0;
+    // 内联 display 隐藏（与 plugSearchFilter/skillSearchFilter 同惯用法）：
+    // 本项目没有通用 .hidden 规则，类切换不产生视觉隐藏——曾因此出现
+    // 「类换了但列表不过滤」的真 bug（e2e 只断言类存在性时没抓住）。
+    document.querySelectorAll('#mp-preset-list .mp-preset-item').forEach((el) => {
+      const hit = !q || (el.dataset.search || '').includes(q);
+      el.style.display = hit ? '' : 'none';
+      if (hit) visible++;
+    });
+    let empty = $('#mp-preset-empty');
+    if (!visible) {
+      if (!empty) {
+        empty = document.createElement('div');
+        empty.id = 'mp-preset-empty';
+        empty.className = 'faint';
+        empty.style.padding = '8px';
+        empty.textContent = '无匹配的提供商';
+        $('#mp-preset-list')?.appendChild(empty);
+      }
+    } else if (empty) empty.remove();
+  }
+  async function mpEnsureCatalog() {
+    if (state.mpCatalog || state.mpCatalogLoading) return;
+    state.mpCatalogLoading = true;
+    mpRefreshPresetList();
+    try {
+      const r = await bridge.getModelCatalog();
+      // 失败必须与「真空目录」区分：null=不可用（显式说明+可重试），[]=真拉到但一个
+      // 都没有。把 null 当空数组会让用户以为目录就这么少（铁律：未接入≠为空≠失败）。
+      state.mpCatalog = r && r.ok ? (r.providers || []) : null;
+    } catch { state.mpCatalog = null; }
+    state.mpCatalogLoading = false;
+    mpRefreshPresetList();
+  }
+  function mpCurrentInput() {
+    const type = $('#mp-type')?.value || 'ollama';
+    let url = $('#mp-url')?.value?.trim() || '';
+    // P4-S3-03：去掉 full 门禁——缺协议一律补 http://（已有协议的不动）。原实现勾着
+    // 「完整 URL」反而不补，按 placeholder（localhost:11434）填写就探不到，失败提示又是
+    // 泛泛的「获取失败」，把真实原因藏起来。
+    if (url && !/^https?:\/\//i.test(url)) url = 'http://' + url;
+    return { type, baseUrl: url, apiKey: ($('#mp-key')?.value || '').trim(), presetId: state.mpPreset?.id };
+  }
+  let mpFetchTimer = null, mpFetchToken = 0;
+  function scheduleMpFetch() {
+    clearTimeout(mpFetchTimer);
+    mpFetchTimer = setTimeout(() => mpFetchModels(false), 800);
+  }
+  async function mpFetchModels(force) {
+    const { type, baseUrl, apiKey, presetId } = mpCurrentInput();
+    if (!baseUrl) return;
+    // 非强制时，OpenAI 兼容要求 KEY 基本填完（≥8 字符）才探测，避免边打字边发请求
+    if (!force && type !== 'ollama' && apiKey.length < 8) return;
+    const token = ++mpFetchToken;
+    state.mpModelsLoading = true;
+    state.mpModelsNote = '';
+    mpRefreshPool();
+    const fail = (msg) => {
+      if (token !== mpFetchToken) return;
+      state.mpModels = []; state.mpModelsChecked = new Set();
+      state.mpModelsNote = `获取失败：${msg}。可手动填写模型名称。`;
+      state.mpModelsLoading = false;
+      mpRefreshPool();
+    };
+    try {
+      const r = await bridge.listModels({ type, baseUrl, apiKey, presetId });
+      if (token !== mpFetchToken) return;
+      if (r && r.ok) {
+        state.mpModels = r.models || [];
+        state.mpModelsChecked = new Set(state.mpModels.map((m) => m.id)); // 默认勾选全部可用
+        state.mpModelsSource = r.source;
+        const n = state.mpModels.length;
+        const enriched = state.mpModels.filter((m) => m.enriched).length;
+        state.mpModelsNote = r.source === 'catalog'
+          ? `提供商列表端点不可用，已回退 models.dev 目录（${n} 个声明模型；非你的 KEY 实测可用范围）`
+          : `已获取 ${n} 个可用模型（实时列表${enriched ? `，models.dev 增强 ${enriched} 个` : '；models.dev 无该提供商目录'}）`;
+        state.mpModelsExpanded = false;
+        state.mpModelsLoading = false;
+        mpRefreshPool();
+      } else {
+        fail((r && r.reason) || '未知原因');
+      }
+    } catch (err) {
+      fail((err && err.message) || err);
+    }
+  }
+  function mpApplyPreset(id) {
+    const p = (state.mpCatalog || []).find((x) => x.id === id);
+    if (!p) return;
+    state.mpPreset = { id: p.id, name: p.name, api: p.api };
+    state.mpPresetOpen = false;
+    // 就地更新控件与字段（不 render——表单可能已填了一半）
+    mpRefreshPreset();
+    const nameEl = $('#mp-name'); if (nameEl && !nameEl.value) nameEl.value = p.name;
+    const typeEl = $('#mp-type'); if (typeEl && p.id === 'ollama') typeEl.value = 'ollama';
+    const urlEl = $('#mp-url'); if (urlEl && p.api) urlEl.value = p.api;
+    mpFetchModels(true); // KEY 可能已填：预设落定即拉一次
+  }
+
   VIEWS.settings = {
     side() {
       return `<div class="sec-title">设置</div>
         <div class="settings-nav">
-        ${[{ id: 'model', n: '模型', icon: 'bot' }, { id: 'cred', n: '凭据', icon: 'shield' }, { id: 'sandbox', n: '沙箱与授权', icon: 'shield' }, { id: 'prompt', n: '系统提示词', icon: 'at' }, { id: 'desktop', n: '桌面集成', icon: 'settings' }, { id: 'data', n: '数据目录', icon: 'folder' }, { id: 'about', n: '关于', icon: 'at' }]
+        ${SETTINGS_SECTIONS
           .map((s) => `<div class="node settings-nav-item" data-action="settings-nav" data-id="${s.id}"><span class="sni-icon">${ic(s.icon, 14)}</span><span class="sni-label">${s.n}</span></div>`).join('')}
         </div>`;
     },
@@ -1861,8 +2397,11 @@
       const rtOk = state.pluginRuntime && state.pluginRuntime.ready;
       return `<div class="main-inner"><h1 class="pg">设置</h1><div class="pg-sub">模型、沙箱、授权、桌面集成等能力均以插件形式挂载，在此统一管理。</div>
         <div class="statbar">
-          <div class="stat"><div class="sk">授权模式</div><div class="sv"><span class="dot" style="background:var(--ok)"></span>${authModeLabel(state.authMode)}</div></div>
-          <div class="stat"><div class="sk">沙箱</div><div class="sv"><span class="badge ok" style="font-weight:600">Windows ACL</span></div></div>
+          // P4-S3-13：授权模式点与沙箱徽标不再「永远健康」。原实现无论默认/信任/偏执
+          // 都挂同一个绿点、沙箱服务未就绪也照样显示 ok 徽标——同一行里状态语义一半真
+          // 一半装饰。现在按档位给色，授权服务未接入时明说（fail-closed：按最严处理）。
+          <div class="stat"><div class="sk">授权模式</div><div class="sv"><span class="dot" style="background:${state.authzLoaded ? (state.authMode === 'paranoid' ? 'var(--danger)' : state.authMode === 'trusted' ? 'var(--warn)' : 'var(--ok)') : 'var(--fg-faint)'}"></span>${authModeLabel(state.authMode)}${state.authzLoaded ? '' : ' · 未接入'}</div></div>
+          <div class="stat"><div class="sk">沙箱</div><div class="sv">${state.sandbox.mode ? `<span class="badge ok" style="font-weight:600">Windows ACL · ${esc(state.sandbox.mode)}</span>` : '<span class="badge">未接入</span>'}</div></div>
           <div class="stat"><div class="sk">数据目录</div><div class="sv" style="font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px" title="${esc(ddOk ? state.dataDirInventory.dir : '')}">${ddOk ? '…/' + esc(ddShort) : '本地（未扫描）'}</div></div>
           <div class="stat"><div class="sk">运行时</div><div class="sv" style="font-size:12px;font-weight:500">${rtOk ? `插件运行时就绪 · ${state.pluginRuntime.activeCount}/${state.pluginRuntime.total}` : '插件运行时未启动'}</div></div>
         </div>
@@ -1882,13 +2421,21 @@
           </div>
           <div style="margin-top:10px;padding:8px 12px;background:var(--bg-inset);border-radius:8px;display:flex;align-items:center;gap:8px">
             <span class="faint" style="font-size:11.5px;white-space:nowrap;flex:none">Agent 迭代</span>
-            <input type="range" id="max-iter-pick" min="1" max="500" step="1" value="${state.maxToolIterations || 200}" style="flex:1">
+            <input type="range" id="max-iter-pick" min="1" max="500" step="1" value="${state.maxToolIterations || 200}" style="flex:1" aria-label="Agent 迭代次数" aria-valuetext="${state.maxToolIterations || 200} 次">
             <span id="max-iter-val" class="mono" style="font-size:11px;color:var(--fg-dim);min-width:32px;text-align:right">${state.maxToolIterations || 200}</span>
           </div>
           ${renderUsageCard()}
           <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
             <b style="font-size:12.5px;margin-bottom:10px;display:block">${state.mpEditing ? '编辑提供商' : '添加提供商'}</b>
             <div class="mp-form">
+              <div class="mp-row">
+                <label class="mp-label">提供商预设</label>
+                <div class="mp-preset">
+                  ${mpPresetControlHTML()}
+                  ${state.mpPresetOpen ? mpPresetPopHTML() : ''}
+                </div>
+                <span class="faint" style="font-size:11px;margin-left:8px">来自 models.dev 目录，选中自动填充名称与 Base URL</span>
+              </div>
               <div class="mp-row">
                 <label class="mp-label">类型</label>
                 <select id="mp-type" class="mp-inp" style="max-width:180px">
@@ -1922,8 +2469,11 @@
               </div>
               <div class="mp-row">
                 <label class="mp-label">模型</label>
-                <input type="text" id="mp-models" placeholder="gpt-4o, claude-3-5-sonnet（逗号分隔）" class="mp-inp">
-                <span class="faint" style="font-size:11px;margin-left:8px">逗号分隔多个模型名称</span>
+                <div class="mp-models-wrap">
+                  <input type="text" id="mp-models" placeholder="gpt-4o, claude-3-5-sonnet（逗号分隔）" class="mp-inp" ${state.mpModels.length ? 'hidden' : ''}>
+                  <span class="faint" style="font-size:11px;margin-left:8px" ${state.mpModels.length ? 'hidden' : ''}>逗号分隔多个模型名称（拉取失败时的手动兜底）</span>
+                  <div id="mp-models-pool">${mpModelsPoolHTML()}</div>
+                </div>
               </div>
               <div class="mp-row" style="margin-top:4px">
                 <label class="mp-label"></label>
@@ -1950,19 +2500,29 @@
           <div class="sec-title" style="margin:16px 0 8px">网络域名白名单</div>
           <div class="faint" style="margin-bottom:6px">一行一个域名（如 <span class="mono">github.com</span>），<span class="mono">*</span> 表示不限。<b>留空 = 全部拒绝</b>（fail-closed）：web_fetch / browser_open 命中不了白名单即直接拒绝。内网/云元数据端点另受 SSRF 防护拦截。</div>
           <textarea class="inp mono" id="net-allow" rows="3" style="width:100%;font-size:11.5px">${esc((state.sandbox.networkAllow || []).join('\n'))}</textarea>
+          <div class="faint" style="margin:6px 0">${state.authMode === 'trusted' ? '信任模式：列表已自动合并开发常用域名（github/npm/pypi/models.dev 等）；保存后合并项随你的列表一同落盘。' : ''}</div>
           <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="sandbox-save-net">保存白名单</button><span class="faint" id="net-allow-tip"></span></div>
           <div class="sec-title" style="margin:16px 0 8px">L0-L4 分级</div>
           <div class="levels">
-            ${state.authLevels.length ? state.authLevels.map((l) => `<div class="lv"><span class="lv-n">L${l.level}</span><span class="lv-l">${l.label}</span><span class="faint">${l.scope}</span>${l.requiresApproval ? '<span class="badge warn">需授权</span>' : ''}</div>`).join('') : '<div class="faint">分级定义加载中…</div>'}
+            ${state.authLevels.length ? state.authLevels.map((l) => `<div class="lv"><span class="lv-n">L${l.level}</span><span class="lv-l">${l.label}</span><span class="faint">${l.scope}</span>${l.requiresApproval ? '<span class="badge warn">需授权</span>' : ''}</div>`).join('')
+              // P4-S3-06：设置页这处原来也只有「加载中…」一个分支，init 里 getAuthLevels
+              // 失败/返回空时它会永久卡死。与授权模式弹窗里的那处同一套三态。
+              : (state.authzLoaded
+                ? '<div class="faint">授权插件未返回分级定义（重进设置页或重启应用可重试）</div>'
+                : '<div class="faint">分级定义未接入（授权服务不可用 · fail-closed：按最严处理）</div>')}
           </div>
           <div class="sec-title" style="margin:16px 0 8px">授权白名单（可查看可撤销）</div>
           <div class="faint" style="margin-bottom:6px">粒度分「会话 / 永久」，规则 = 操作类型 + 目标模式（仅 <span class="mono">*</span> 通配，整串匹配）。命中即放行并计入审计；<b>偏执模式下白名单不生效</b>（切到偏执 = 全锁）。<b>永久粒度不允许</b>「任意操作」或 <span class="mono">*</span> 目标（一次点击不该等于永久免审一切）。</div>
+          ${/* P4-S3-08：原实现的默认组合（工具=任意操作 *、粒度=永久）恰好是后端明文拒绝的
+               组合，而 placeholder 又明示「或 *」、说明文字说「永久不允许 *」——用户按默认
+               填完点添加才收到英文味很重的错误 reason。防错要靠事前：把会被拒的组合在选项里
+               标注出来，默认落到合法组合。 */''}
           <div class="grant-add">
             <select id="grant-tool" class="inp" style="width:150px">
-              ${(state.grantTools.length ? state.grantTools : ['*', 'file_write', 'shell_command', 'web_fetch']).map((t) => `<option value="${t}">${t === '*' ? '任意操作' : t}</option>`).join('')}
+              ${(state.grantTools.length ? state.grantTools : ['file_write', 'shell_command', 'web_fetch', '*']).map((t) => `<option value="${t}">${t === '*' ? '任意操作（永久粒度不可用）' : t}</option>`).join('')}
             </select>
-            <input type="text" id="grant-pattern" class="inp mono" placeholder="目标模式，如 D:/Code/OrchDesk/* 或 *" style="flex:1;font-size:11.5px">
-            <select id="grant-scope" class="inp" style="width:110px"><option value="permanent">永久</option><option value="session">本会话</option></select>
+            <input type="text" id="grant-pattern" class="inp mono" placeholder="目标模式，如 D:/Code/OrchDesk/*（永久粒度不接受 *）" style="flex:1;font-size:11.5px">
+            <select id="grant-scope" class="inp" style="width:110px"><option value="session">本会话</option><option value="permanent">永久（需具体目标）</option></select>
             <button class="btn sm primary" data-action="grant-add">+ 添加</button>
           </div>
           <div class="grant-list">
@@ -1980,11 +2540,11 @@
           </div>
           <div class="sec-title" style="margin:16px 0 8px">审计日志（近期）</div>
           <div class="audit-log">
-            ${state.authAudit.length ? state.authAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge ${e.kind === 'approval-decided' ? (e.outcome === 'allowed-once' ? 'ok' : 'danger') : 'info'}">${e.kind}</span>${e.toolName ? `<span class="mono faint">${e.toolName}</span>` : ''}${e.outcome ? `<span class="faint">${e.outcome}</span>` : ''}${e.mode ? `<span class="faint">mode=${e.mode}</span>` : ''}</div>`).join('') : '<div class="faint">暂无审计事件（L3/L4 操作与模式切换会记录于此）</div>'}
+            ${state.authAudit.length ? state.authAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:11px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge ${e.kind === 'approval-decided' ? (e.outcome === 'allowed-once' ? 'ok' : 'danger') : 'info'}">${e.kind}</span>${e.toolName ? `<span class="mono faint">${e.toolName}</span>` : ''}${e.outcome ? `<span class="faint">${e.outcome}</span>` : ''}${e.mode ? `<span class="faint">mode=${e.mode}</span>` : ''}</div>`).join('') : '<div class="faint">暂无审计事件（L3/L4 操作与模式切换会记录于此）</div>'}
           </div>
           <div class="sec-title" style="margin:16px 0 8px">补偿层审计（边界外操作）</div>
           <div class="audit-log">
-            ${state.compAudit.length ? state.compAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge warn">补偿</span><span class="mono faint">${(e.text || '').replace(/</g, '&lt;')}</span>${e.note ? `<span class="faint">${e.note}</span>` : ''}</div>`).join('') : '<div class="faint">暂无补偿动作记录（外发/不可逆操作后在此提供「补偿动作」）</div>'}
+            ${state.compAudit.length ? state.compAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:11px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge warn">补偿</span><span class="mono faint">${(e.text || '').replace(/</g, '&lt;')}</span>${e.note ? `<span class="faint">${e.note}</span>` : ''}</div>`).join('') : '<div class="faint">暂无补偿动作记录（外发/不可逆操作后在此提供「补偿动作」）</div>'}
           </div>
           <div class="row" style="margin-top:8px"><button class="btn sm" data-action="comp-record">+ 记录补偿动作</button><span class="faint">不保证完全撤销，仅尽力补偿</span></div>
           <div class="sec-title" style="margin:16px 0 8px">沙箱日志（可检索）</div>
@@ -2008,7 +2568,7 @@
           </div>
           <div class="audit-log sblog sl-log">
             ${state.sandboxLog.entries.length ? state.sandboxLog.entries.map((e) => `<div class="al">
-              <span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString('zh-CN')}</span>
+              <span class="mono" style="font-size:11px">${new Date(e.ts).toLocaleString('zh-CN')}</span>
               <span class="badge ${e.decision === 'allowed' ? 'ok' : (e.decision === 'denied' ? 'danger' : 'warn')}">${SL_DECISION_LABELS[e.decision] || e.decision}</span>
               <span class="badge info">${SL_KIND_LABELS[e.kind] || e.kind}</span>
               <span class="mono faint">${esc(e.tool)}</span>
@@ -2090,7 +2650,7 @@
           </div>
           <div class="audit-log sblog mp-log">
             ${state.memoryPromotions.entries.length ? state.memoryPromotions.entries.map((e) => `<div class="al">
-              <span class="mono" style="font-size:10.5px">${new Date(e.ts).toLocaleString('zh-CN')}</span>
+              <span class="mono" style="font-size:11px">${new Date(e.ts).toLocaleString('zh-CN')}</span>
               <span class="badge ${e.ok ? 'ok' : 'danger'}">${e.ok ? '已晋升' : '被拦下'}</span>
               <span class="mono faint">${esc(e.from)} → ${esc(e.to)}</span>
               <span class="badge info">${e.actor === 'auto' ? '自动' : '手动'}</span>
@@ -2101,7 +2661,9 @@
         </div>
         <div class="sec-title" id="settings-section-data"><span class="ico">${ic('folder', 14)}</span>数据目录</div>
         <div class="card">
-          <div class="row"><span class="mono">${esc(state.dataDirInventory.dir || '%APPDATA%/OrchDesk')}</span><span class="faint">· 本地优先，数据不出本机</span></div>
+          // P4-S3-10：未扫描时不再显示字面量 %APPDATA%/OrchDesk——那是一个未经核实、
+          // 却以真实面目呈现的路径。同页 statbar 对同一数据正确显示「本地（未扫描）」。
+          <div class="row"><span class="mono">${esc(state.dataDirInventory.dir || '本地（未扫描）')}</span><span class="faint">· 本地优先，数据不出本机</span></div>
           ${state.dataDirInventory.ok
     ? `<div class="faint" style="margin-top:6px;font-size:11.5px">共 ${esc(state.dataDirInventory.totalSizeText)} · ${state.dataDirInventory.totalFiles} 个文件${state.dataDirInventory.errors.length ? ` · <span class="badge warn">${state.dataDirInventory.errors.length} 项扫描失败</span>` : ''}</div>
              <div class="dir-inv">${state.dataDirInventory.items.map((i) => `<div class="di-row">
@@ -2143,7 +2705,10 @@
   const WZ = [
     { t: '欢迎使用 OrchDesk', h: `<div style="font-size:18px;font-weight:700;margin-bottom:8px">本地优先的 Agent 工作台</div>
       <div class="mut" style="margin-bottom:14px">打开就是会话。像 DSH 一样，你只需和一个 Agent 对话；脑-手解耦、多Agent编排、意图识别在后台安静运行，需要时再进「插件」或「设置」。</div>
-      <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:center"><span class="badge ok">就绪</span><div><b>deepseek-harness 运行时</b><div class="faint mono">基线 99f6f02 · 本地运行</div></div></div>` },
+      // P4-S1-13：不再写死「deepseek-harness 运行时 · 就绪 · 基线 99f6f02」——徽章和
+      // commit 全无运行时背书，与 statbar 里同款硬编码曾被当 BUG 修掉是同一模式。
+      // 向导是纯本地引导，只说本地运行，不冒充任何后端状态。
+      <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:center"><span class="badge ok">本地</span><div><b>OrchDesk 运行时</b><div class="faint">数据留在本机 · 模型可随时配置</div></div></div>` },
     { t: '选择默认专家', h: `<div style="margin-bottom:10px" class="mut">你想先和谁对话？（之后可随时切换，或用专家团）</div>
       ${expertList().map((e, i) => `<div class="expert-opt ${state.wzExpert === i ? 'sel' : ''}" data-action="wz-expert" data-i="${i}"><div class="avatar" style="background:${i === 0 ? 'var(--ceo)' : 'var(--director)'}">${e[0]}</div><div><b>${e}</b><div class="faint">${i === 0 ? '主会话：理解/拆解/回收/沉淀' : '领域专家'}</div></div></div>`).join('')}` }
   ];
@@ -2189,6 +2754,20 @@
     wrap.style.display = allModels.length ? '' : 'none';
   }
 
+  /** 只重渲设置页主区 + 分区高亮/滚动（P4-S3-14：分区导航不该清空用户填了一半的表单）。 */
+  function renderSettingsMain() {
+    const v = VIEWS.settings;
+    if (!v || state.page !== 'settings') { render(); return; }
+    const main = $('#main');
+    if (main) main.innerHTML = v.main();
+    hardenActions($('#main'));
+    const target = $('#settings-section-' + state.settingsSection);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.querySelectorAll('[data-action="settings-nav"]').forEach((el) => {
+      el.classList.toggle('active', el.dataset.id === state.settingsSection);
+    });
+  }
+
   function render() {
     try {
       renderRail();
@@ -2201,6 +2780,11 @@
       $('#main').innerHTML = v.main();
       $('#context').innerHTML = v.ctx();
       $('#appGrid').classList.toggle('has-ctx', state.ctxOpen);
+      // P1.1 布局双态：light（默认）= 列表+主区、右栏收起；project = 完整体验
+      $('#appGrid').classList.toggle('light', state.viewMode !== 'project');
+      $('#appGrid').classList.toggle('project', state.viewMode === 'project');
+      // P1.2：body 级轻模式标记（标题栏 ☰ 显隐 / rail 隐藏的 CSS 钩子）
+      document.body.classList.toggle('light-mode', state.viewMode !== 'project');
       $('#winTitle').textContent = (PAGES.find((x) => x.id === state.page)?.n || '会话') + ' — 本地 Agent 工作台';
       // P1 键盘可达（/harden）：渲染后给所有非原生可交互的 [data-action] 补
       // role/tabindex —— 项目惯用 div+data-action，靠逐个补必漏（焦点样式有了，
@@ -2208,6 +2792,25 @@
       hardenActions($('#main')); hardenActions($('#side')); hardenActions($('#context'));
       if (state.page === 'plugins') { plugSearchFilter(); skillSearchFilter(); }
       if (state.page === 'settings') renderModelProviders();
+      // 设置页分区注册表断言（/layout）：导航项与主区分区必须双向覆盖。
+      // 曾漂移出「凭据」死入口与「分层记忆」无入口——这里让下一次漂移当场现形。
+      if (state.page === 'settings') {
+        const navIds = SETTINGS_SECTIONS.map((s) => s.id);
+        const secIds = [...document.querySelectorAll('[id^="settings-section-"]')].map((el) => el.id.replace('settings-section-', ''));
+        const navNoSec = navIds.filter((id) => !secIds.includes(id));
+        const secNoNav = secIds.filter((id) => !navIds.includes(id));
+        if (navNoSec.length || secNoNav.length) {
+          console.warn('[settings] 分区注册表漂移：导航无分区 =', navNoSec, '；分区无导航 =', secNoNav);
+        }
+      }
+      // 插件页同理：每个主区分区（.psec[id]）都应至少有一个侧栏跳转入口
+      // （[data-target]）。曾出现 MCP / 临时插件两个分区无任何侧栏入口。
+      if (state.page === 'plugins') {
+        const secIds = [...document.querySelectorAll('[id^="psec-"]')].map((el) => el.id);
+        const targets = new Set([...document.querySelectorAll('#side [data-target]')].map((el) => el.dataset.target));
+        const orphan = secIds.filter((id) => !targets.has(id));
+        if (orphan.length) console.warn('[plugins] 主区分区无侧栏入口：', orphan);
+      }
       if (state.page === 'settings' && state.settingsSection) {
         const target = $('#settings-section-' + state.settingsSection);
         if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2307,8 +2910,12 @@
   }
 
   function toast(msg, type = '') {
+    const root = $('#toastRoot');
+    // 堆叠上限 3 条：多行摘要（check-updates / import-data 等）连续触发时
+    // 旧 toast 会让新 toast 挤出视口。屏读经 toastRoot 的 aria-live 播报。
+    while (root.children.length >= 3) root.firstElementChild.remove();
     const t = document.createElement('div'); t.className = 'toast ' + type; t.textContent = msg;
-    $('#toastRoot').appendChild(t); setTimeout(() => t.remove(), 3200);
+    root.appendChild(t); setTimeout(() => t.remove(), 3200);
   }
 
   /* ---------- Markdown 渲染器（基于 marked.js） ---------- */
@@ -2356,8 +2963,31 @@
       if (e.target.closest('[data-action="preview-close"]') || e.target === body) body.remove();
     });
   }
-  function openModal(html) { $('#modalRoot').innerHTML = `<div class="overlay" data-action="modal-bg"><div class="modal">${html}</div></div>`; }
-  function closeModal() { $('#modalRoot').innerHTML = ''; }
+  let _modalReturnFocus = null;
+  function openModal(html) {
+    _modalReturnFocus = document.activeElement;
+    $('#modalRoot').innerHTML = `<div class="overlay" data-action="modal-bg"><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`;
+    // P1 键盘可达（/audit）：开模态即把焦点移入对话框，Tab 在模态内循环，关闭后
+    // 焦点还给触发元素。此前模态对键盘用户是陷阱——无初始焦点、不能 ESC 关。
+    const modal = $('#modalRoot').querySelector('.modal');
+    if (!modal) return;
+    const focusables = () => [...modal.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+    const first = focusables()[0];
+    if (first) first.focus();
+    modal.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Tab') return;
+      const items = focusables(); if (!items.length) return;
+      const idx = items.indexOf(document.activeElement);
+      if (ev.shiftKey && idx <= 0) { ev.preventDefault(); items[items.length - 1].focus(); }
+      else if (!ev.shiftKey && (idx === -1 || idx === items.length - 1)) { ev.preventDefault(); items[0].focus(); }
+    });
+  }
+  function closeModal() {
+    $('#modalRoot').innerHTML = '';
+    // 焦点还给触发元素，避免键盘用户被弹回文档头
+    if (_modalReturnFocus && _modalReturnFocus.isConnected) { try { _modalReturnFocus.focus(); } catch { /* ignore */ } }
+    _modalReturnFocus = null;
+  }
 
   function openMenu(anchor, items) {
     $('#menuRoot').innerHTML = '';
@@ -2368,11 +2998,88 @@
     pop.style.left = (r.right - 180) + 'px';
     pop.innerHTML = items.map((it) => `<div class="mi ${it.danger ? 'danger' : ''}" data-action="menu-item" data-id="${it.id || ''}">${it.svg ? `<span>${it.svg}</span>` : ''}<span>${it.label}</span></div>`).join('');
     $('#menuRoot').appendChild(pop);
+    // 不用 {once:true}（与导航抽屉同一个坑）：菜单里点了「不关菜单」的项后，
+    // once 监听已被该次点击消耗，再点菜单外将永远关不掉。改为常驻监听 + 自判自摘。
     setTimeout(() => {
       document.addEventListener('click', function close(ev) {
+        if (!$('#menuRoot').innerHTML) { document.removeEventListener('click', close); return; }
         if (!ev.target.closest('.pop')) { $('#menuRoot').innerHTML = ''; document.removeEventListener('click', close); }
-      }, { once: true });
+      });
     }, 0);
+  }
+
+  /* ---------- P1.2 轻模式导航抽屉（rail 的替代入口；Ctrl+K / ☰ 唤出） ---------- */
+  function navDrawerHTML() {
+    const proj = state.viewMode === 'project';
+    return `<div class="nav-drawer" id="navDrawer" role="menu" aria-label="导航菜单">
+      ${PAGES.map((p) => `<button class="nd-item ${state.page === p.id ? 'active' : ''}" role="menuitem" data-action="nav" data-id="${p.id}">${ic(p.icon, 16)}<span>${p.n}</span></button>`).join('')}
+      <div class="nd-sep"></div>
+      <button class="nd-item" role="menuitem" data-action="view-mode-toggle">${ic(proj ? 'zap' : 'grid', 16)}<span>${proj ? '切换到轻模式' : '切换到项目模式'}</span></button>
+      <button class="nd-item" role="menuitem" data-action="toggle-theme">${ic('sun', 16)}<span>切换主题</span></button>
+    </div>`;
+  }
+  /* P3：模式切换。手动切 = 用户偏好，之后不再被编排触发自动升级（viewModePinned）。 */
+  function toggleViewMode() {
+    state.viewMode = state.viewMode === 'project' ? 'light' : 'project';
+    state.viewModePinned = true;
+    // 项目模式 = 今天的完整体验：右栏任务监控常驻（仍可手动收起）
+    if (state.viewMode === 'project' && !state.ctxOpen) state.ctxOpen = 1;
+    saveViewMode();
+    render();
+    toast(state.viewMode === 'project'
+      ? '已进入项目模式：右栏任务监控常驻，编排入口就位'
+      : '已回到轻模式：单栏 + 按需面板', 'ok');
+  }
+  /**
+   * P3：编排触发 → 自动升级到项目模式（spec §6 触发条件）。
+   * 两条克制：已在项目态不重复动作；用户手动切过（viewModePinned）绝不打扰——
+   * 自动升级是「按需」，不是「替用户决定」。
+   */
+  function escalateToProject(reason) {
+    if (state.viewMode === 'project' || state.viewModePinned) return false;
+    state.viewMode = 'project';
+    if (!state.ctxOpen) state.ctxOpen = 1;
+    saveViewMode();
+    render();
+    toast(`已切换到项目模式（${reason}）· Ctrl+K 抽屉可切回轻模式`, 'ok');
+    return true;
+  }
+  function toggleNavDrawer(anchor) {
+    const root = $('#navDrawerRoot');
+    if (!root) return;
+    if (root.innerHTML) { closeNavDrawer(); return; }
+    root.innerHTML = navDrawerHTML();
+    const btn = anchor || $('#navDrawerBtn');
+    const dd = $('#navDrawer');
+    // 锚点不可见时（project 态 ☰ 被 CSS 隐藏，Ctrl+K 仍可唤出）getBoundingClientRect
+    // 全为 0 → 抽屉定位到视口 (0,0) 被裁掉。offsetParent 为 null 即不可见，回落到固定位。
+    const r = btn && btn.offsetParent ? btn.getBoundingClientRect() : null;
+    if (dd) {
+      if (r) {
+        dd.style.top = (r.bottom + 4) + 'px';
+        dd.style.left = Math.max(8, r.left) + 'px';
+      } else {
+        dd.style.top = '48px';
+        dd.style.left = '12px';
+      }
+    }
+    btn?.setAttribute?.('aria-expanded', 'true');
+    // 不用 {once:true}：抽屉内的「切换主题」不关抽屉，once 监听被该次点击消耗后，
+    // 再点抽屉外将永远关不掉（A-P2-1）。改为常驻监听，抽屉已关时自行摘除。
+    setTimeout(() => {
+      document.addEventListener('click', function close(ev) {
+        if (!$('#navDrawerRoot')?.innerHTML) { document.removeEventListener('click', close); return; }
+        if (!ev.target.closest('.nav-drawer') && !ev.target.closest('[data-action="nav-drawer"]')) {
+          closeNavDrawer();
+          document.removeEventListener('click', close);
+        }
+      });
+    }, 0);
+  }
+  function closeNavDrawer() {
+    const root = $('#navDrawerRoot');
+    if (root) root.innerHTML = '';
+    $('#navDrawerBtn')?.setAttribute?.('aria-expanded', 'false');
   }
 
   /* ---------- 会话工作区（BUG-023）：项目绑定目录 → 会话默认 cwd ---------- */
@@ -2387,8 +3094,24 @@
     return p ? String(p.path || '').trim() : '';
   }
 
+  /* P1.4：选择隐式工作目录（轻会话默认 cwd；欢迎页 chip 调用） */
+  async function pickWorkspace() {
+    try {
+      const r = await bridge.pickFolder();
+      if (r && r.ok && r.path) {
+        saveWorkspaceDir(r.path);
+        render();
+        toast(`工作目录已设置：${r.path}`, 'ok');
+      }
+    } catch {
+      const selected = prompt('请输入工作目录路径：');
+      if (selected) { saveWorkspaceDir(selected); render(); }
+    }
+  }
+
   async function applySessionCwd(sid) {
-    const dir = projectPathOf(sid);
+    // P1.4：项目绑定目录优先；轻会话回落会话级 cwd（隐式工作目录）
+    const dir = projectPathOf(sid) || String((state.sessions[sid] && state.sessions[sid].cwd) || '').trim();
     if (!dir) return;
     try {
       const r = await bridge.setSessionCwd(sid, dir);
@@ -2399,6 +3122,8 @@
   }
 
   function createSessionInProject(pid) {
+    // P3 触发①：主动建项目会话 → 自动升级项目模式（用户手动切过则不打扰）
+    escalateToProject('创建项目会话');
     const id = 's' + Date.now().toString(36);
     const p = state.projects.find((x) => x.id === pid);
     const s = { id, pid, title: '新会话', expert: expertList()[state.wzExpert] || expertList()[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
@@ -2441,6 +3166,14 @@
   async function doAbortSend() {
     const sid = state.turnBusy;
     if (!sid) return;
+    // P2 演示模式没有主进程回合可停：直接清忙态，runDemoTurn 的循环守卫随即退出。
+    if (state.demoMode) {
+      state.turnBusy = null;
+      patchComposerSend(false);
+      updateMsgList();
+      toast('已停止演示回合', 'warn');
+      return;
+    }
     if (typeof bridge.abortAgentTurn !== 'function') {
       toast('当前运行时不支持停止', 'warn');
       return;
@@ -2449,6 +3182,72 @@
       await bridge.abortAgentTurn(sid);
     } catch (err) {
       toast('停止失败', 'danger');
+    }
+  }
+
+  /* P2 演示模式（spec §5.3）：无真模型时的 echo Agent。
+     目的只有一个：让用户在不配置任何 KEY 的情况下把 OrchDesk 的界面逛完（右栏
+     任务监控、侧栏分组、快捷入口…）。回复明确自证是回显，不伪造模型能力；
+     工具步骤走与真回合同一套 state.toolSteps 通道，右栏因此有东西可看。 */
+  async function runDemoTurn(s, text, typingIdx) {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // 侧栏会话行如实标注。不调 render()——回合中整页重建会把 composer 的「停止」
+    // 状态打回「发送」（updateMsgList 的存在意义就是不重建这两块）。
+    s.model = '演示模式';
+    // 但 chip 必须立刻翻到「演示模式」：doSend 只改了 state.demoMode，不重渲染的话
+    // 整个回合 UI 都停在「未配置模型」——用户刚被告诉进了演示模式，眼前却是旧态。
+    // 只换 chip 这一个按钮（原生 button，无 tabindex 要补，委托监听不受影响）。
+    const chipEl = document.querySelector('.composer .c-mp');
+    if (chipEl) chipEl.outerHTML = modelChipHTML();
+    const plan = [
+      { n: 'orch-plan', ph: 'running' },
+      { n: 'orch-plan', ph: 'done', result: '演示：已解析输入（未调用任何模型）' },
+      { n: 'workspace-scan', ph: 'running' },
+      { n: 'workspace-scan', ph: 'done', result: '演示：已读取工作目录结构（本地模拟）' },
+    ];
+    try {
+      for (const st of plan) {
+        if (state.turnBusy !== s.id) return;   // 用户点了停止
+        const list = state.toolSteps[s.id] = state.toolSteps[s.id] || [];
+        const rec = [...list].reverse().find((x) => x.n === st.n && x.ph === 'running');
+        if (rec && st.ph !== 'running') { rec.ph = st.ph; rec.result = st.result || ''; }
+        else list.push({ n: st.n, ph: st.ph, result: st.result || '' });
+        updateMsgList();
+        refreshCtxLive();
+        await sleep(300);
+      }
+      const echo = String(text || '').slice(0, 60);
+      s.msgs[typingIdx] = {
+        r: 'agent', t: nowTime(),
+        x: `【演示模式 · 本地回显，未调用任何模型】\n\n收到你的输入：「${echo}」\n\n这一步是为了让你在配置模型之前就把 OrchDesk 全部界面逛完：\n· 右栏「任务监控」随回合浮出，上面的步骤条就是模拟的工具执行\n· 侧栏按工作目录分组；欢迎页可设默认工作目录（隐式 cwd）\n· 分叉 / 回放 / 技能 / 终端 / 文件面板都可以直接点开看\n\n配置任意 OpenAI 兼容 API（或本机 Ollama）后，同样的输入会得到真实模型回复。点 composer 里的模型 chip 即可配置。`,
+        // intent 用 'ACT'：renderMsg 只对 intent !== 'ACT' 挂徽标，且非 CONFIRM
+        // 一律渲染成「意图 · 已拦截」——演示回复挂个拦截徽标是彻底的误告。
+        intent: 'ACT', feedback: 1,
+        // 形状与主进程 runAgentTurn 返回的 toolSteps 一致（{n, ph, result}）——
+        // renderMsg/toolRow 读的是 t.n 与 t.ph，给错形状会渲染出空行与「undefined 步」。
+        tools: plan.filter((x) => x.ph === 'done').map((x) => ({ n: x.n, ph: 'done', result: x.result })),
+        steps: plan.filter((x) => x.ph === 'done').length,
+      };
+      updateMsgList();
+      toast('演示回合完成 · 配置模型后即可获得真实回复', 'warn');
+    } catch (err) {
+      s.msgs[typingIdx] = { r: 'agent', t: nowTime(), x: '（演示回合异常：' + ((err && err.message) || err) + '）' };
+      updateMsgList();
+    } finally {
+      if (state.turnBusy === s.id) state.turnBusy = null;
+      patchComposerSend(false);
+      // 回合结束整页刷新（与真回合路径同一处）：侧栏标题/待办/chip 终态一起落定。
+      render();
+      // P1.3 收梢：与真回合一致——仅自动浮出过的面板等 5s 自动收，用户手动调过则不关。
+      // 放在这里而不是 doSend 的 finally：演示分支提前 return，那边的 finally 不会跑。
+      if (state.viewMode !== 'project' && state.ctxAutoOpened && !state.ctxAutoToggled) {
+        setTimeout(() => {
+          if (state.turnBusy || state.ctxAutoToggled || !state.ctxOpen) return;
+          state.ctxOpen = false;
+          state.ctxAutoOpened = false;
+          $('#appGrid')?.classList.remove('has-ctx');
+        }, 5000);
+      }
     }
   }
 
@@ -2461,10 +3260,11 @@
       // 配置可能在「设置 → 模型」刚更新过，或上一次 getModelConfig 请求失败，
       // 发送前再自动选择一次；仍为空才拦截（并给出可达的路径，而非死胡同）。
       autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
-      if (state.selectedModels.length === 0) {
-        toast('未检测到可用模型 · 已跳转到「设置 → 模型管理」', 'warn');
-        state.page = 'settings'; state.settingsSection = 'model'; render();
-        return;
+      if (state.selectedModels.length === 0 && !state.demoMode) {
+        // P2 演示模式：两者皆无时不把用户堵死在设置页——进入 echo 演示，让全部 UI
+        // 可逛；chip 常驻标注，配置真模型后立即退出。绝不写 selectedModels。
+        state.demoMode = true;
+        toast('未配置模型 · 已进入演示模式（回复为本地回显）', 'warn');
       }
     }
     const s = state.sessions[state.sel]; if (!s) return;
@@ -2477,9 +3277,26 @@
     // 动作」展示形态随即生效）。
     state.toolSteps[s.id] = [];
     state.turnBusy = s.id;
+    // P1.3：轻模式回合开始自动浮出任务监控（project 态常驻）。
+    // 语义与 spec「回合中浮出 / 结束 5s 收起 / 用户可钉住」对齐：
+    //   · ctxAutoOpened = 本回合由自动浮出打开 → 才参与结束 5s 后的自动收起；
+    //   · 用户空闲时手动展开 = 钉住：不自动开（已开）也不自动收（见 finally 分支）；
+    //   · ctxAutoToggled = 本回合手动调过 → 仅本回合接管，下回合重置（否则一旦手动
+    //     收起就再也浮不出，与「回合中浮出」的产品承诺相悖）。
+    state.ctxAutoToggled = false;
+    // 演示回合与真回合同一套浮出/收梢语义：ctxAutoOpened 在此置位，收梢在
+    // runDemoTurn 的 finally 里统一安排（否则演示回合的面板永远不收）。
+    if (state.viewMode !== 'project' && !state.ctxOpen) {
+      state.ctxOpen = true;
+      state.ctxAutoOpened = true;
+      $('#appGrid')?.classList.add('has-ctx');
+      const ctxEl = $('#context');
+      if (ctxEl && state.page === 'session') ctxEl.innerHTML = VIEWS.session.ctx();
+    }
     c.value = '';
     updateMsgList();
     patchComposerSend(true);
+    if (state.demoMode && state.selectedModels.length === 0) { await runDemoTurn(s, text, typingIdx); return; }
     try {
       const res = await bridge.runAgentTurn(s.id, text, { models: state.selectedModels, thinkLevel: state.thinkLevel });
       const tsteps = (res && Array.isArray(res.tools) && res.tools.length) ? res.tools : undefined;
@@ -2503,6 +3320,18 @@
     } finally {
       if (state.turnBusy === s.id) state.turnBusy = null;
       patchComposerSend(false);
+      // P1.3：回合结束 5s 后自动收起任务监控（仅自动开过的面板；用户手动调过则不关）
+      if (state.viewMode !== 'project' && state.ctxAutoOpened && !state.ctxAutoToggled) {
+        setTimeout(() => {
+          if (state.turnBusy || state.ctxAutoToggled || !state.ctxOpen) return;
+          state.ctxOpen = false;
+          state.ctxAutoOpened = false;
+          $('#appGrid')?.classList.remove('has-ctx');
+        }, 5000);
+      }
+      // P3 触发④：Agent 产出多步计划 → 自动升级项目模式（任务监控/编排可视化就位）。
+      // 单步不算——一步就能干完的活不值得把用户搬去重形态。
+      if (extractPlanSteps(s.msgs).steps.length >= 2) escalateToProject('Agent 产出多步计划');
     }
   }
 
@@ -2681,7 +3510,7 @@
     }
     if (!pages.length) {
       host.innerHTML = `<div class="bw-head">${ic('globe', 14)}<b>浏览器</b>${closeBtn}</div>`
-        + '<div class="bw-empty">浏览器未打开。<br><span style="font-size:10.5px">让 Agent 访问网页时会自动打开并在此登记页面</span></div>';
+        + '<div class="bw-empty">浏览器未打开。<br><span style="font-size:11px">让 Agent 访问网页时会自动打开并在此登记页面</span></div>';
       return;
     }
     const tabsHTML = pages.map((p) => {
@@ -2710,6 +3539,13 @@
    * 浏览器与终端改为这里的图标——未激活灰、激活点亮，点击切换开关。
    * 只在首次建 DOM，之后仅改 class/title，避免频繁重绘丢焦点。
    */
+  /** P4-S1-12：状态栏专家数按真实目录刷新（原为 index.html 里写死的「1 专家在线」）。 */
+  function renderTrayHint() {
+    const el = $('#trayText'); if (!el) return;
+    const n = expertList().length;
+    el.textContent = n > 0 ? `本地运行 · ${n} 位专家在线` : '本地运行';
+  }
+
   function renderStatusBarActions() {
     const host = $('#sbActions');
     if (!host) return;
@@ -2984,10 +3820,11 @@
   }
 
   async function newTerminalSession() {
-    // BUG-023：当前会话所属项目绑定了目录时，终端落在项目目录里（否则落到主进程 cwd）。
-    // 目录不存在时主进程会自行回落，不用这里兜底。
-    const projPath = projectPathOf(state.sel);
-    const r = await bridge.terminalCreate(projPath ? { cwd: projPath } : {});
+    // BUG-023：终端落在当前会话的工作目录里（项目绑定目录 > 轻模式隐式 cwd）。
+    // P4-S5-2：原实现只认项目绑定目录，轻模式会话的终端静默落到主进程 cwd，与 Agent
+    // 实际干活的目录不一致。目录不存在时主进程会自行回落，不用这里兜底。
+    const wsDir = fileTabRootDir();
+    const r = await bridge.terminalCreate(wsDir ? { cwd: wsDir } : {});
     if (!r || r.ok === false) {
       toast(`创建终端失败：${(r && r.reason) || '未接入'}`, 'err');
       return;
@@ -3105,16 +3942,18 @@
     // 三个分支**都要**有进全屏面板的入口 —— 目录读不到时用户恰恰最需要它。
     const fullBtn = `<button class="btn sm ghost" data-action="file-panel" title="在全屏面板中打开（可预览 / 编辑 / diff / 选目录）">${ic('plus', 12)}</button>`;
     if (ft.error) {
-      return `<div class="ctx-empty"><div class="empty-icon">${ic('warn', 24)}</div>目录读取失败<br><span style="font-size:10px">${esc(ft.error)}</span></div>`
+      return `<div class="ctx-empty"><div class="empty-icon">${ic('warn', 24)}</div>目录读取失败<br><span style="font-size:11px">${esc(ft.error)}</span></div>`
         + `<div class="ftab-acts">${fullBtn}<button class="btn sm ghost" data-action="ftab-pick">选择目录</button></div>`;
     }
     if (!ft.root) {
       // 没有绑定目录时不冒充「空目录」：明确区分「未绑定」与「绑定了但空」
-      return `<div class="ctx-empty"><div class="empty-icon">${ic('folder', 24)}</div>当前会话的项目未绑定本地目录<br>`
-        + `<span style="font-size:10px">绑定后自动显示该目录的文件，也可手动选择</span></div>`
+      // P4-S5-2：文案按「隐式 cwd 也未设」重写，并给出去欢迎页设定的下一步——
+      // 原文案只提「项目未绑定」，向轻模式用户灌输一个他们不需要理解的「项目」概念。
+      return `<div class="ctx-empty"><div class="empty-icon">${ic('folder', 24)}</div>尚未设置工作目录<br>`
+        + `<span style="font-size:11px">在欢迎页点「设置工作目录」后自动显示该目录的文件，也可手动选择</span></div>`
         + `<div class="ftab-acts"><button class="btn sm ghost" data-action="ftab-pick">选择目录</button>${fullBtn}</div>`;
     }
-    const base = ft.root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || ft.root;
+    const base = dirBase(ft.root);
     return `<div class="ftab-head" title="${esc(ft.root)}">${ic('folderOpen', 13)}<span class="ftab-root">${esc(base)}</span>`
       + `<button class="btn sm ghost" data-action="ftab-refresh" title="刷新">${ic('refresh', 12)}</button>`
       + `<button class="btn sm ghost" data-action="ftab-pick" title="更换目录">${ic('folder', 12)}</button>`
@@ -3123,12 +3962,31 @@
       + `<div class="ftab-tip faint">点击文件在全屏面板中预览</div>`;
   }
 
-  /** 首次进入文件 TAB 时按项目目录自动装载（用户裁决：自动跟随项目目录）。 */
+  /**
+   * P4-S5-2/S4-3：文件 TAB 的根目录 = 当前会话的工作目录。
+   * 顺序：项目绑定目录 > 轻模式隐式 cwd（s.cwd，欢迎页设定、已下发主进程）。
+   * 原实现只认项目绑定目录——新用户主流路径「欢迎页设工作目录 → 对话 → 点文件 TAB」
+   * 得到的是「当前会话的项目未绑定本地目录」，被迫重选一个刚才已经选过的目录。
+   */
+  function fileTabRootDir() {
+    const s = state.sessions[state.sel];
+    return projectPathOf(state.sel) || String((s && s.cwd) || '').trim();
+  }
+  /** 首次进入文件 TAB 时按工作目录自动装载；切换会话后根目录变化则重载（S4-3/S5-4）。 */
   async function ensureFileTabRoot() {
     const ft = state.fileTab;
-    if (ft.inited || ft.loading) return;
-    const dir = projectPathOf(state.sel) || '';
-    if (!dir) { ft.inited = true; return; }
+    if (ft.loading) return;
+    const dir = fileTabRootDir();
+    // 根目录变了就必须重装：ft.inited 原是全局一次性 guard，切到别的项目/目录的会话后
+    // 仍显示上一个目录的树——把别项目的文件呈现为当前会话的文件（铁律：不许撒谎）。
+    // 防重入：装载成功（ft.root===dir）或这个目录已经试过且没成功（ft.root 仍空而
+    // lastDir===dir）都不再动。少了后半条，失败态下会变成
+    // render → ensureFileTabRoot → render 的死循环（每次渲染重试一次 fileTree）。
+    if (ft.inited && (ft.root === dir || (!ft.root && ft.lastDir === dir))) return;
+    if (ft.inited) { ft.root = ''; ft.children.clear(); ft.expanded.clear(); ft.error = ''; }
+    ft.lastDir = dir;
+    ft.inited = true;
+    if (!dir) return;
     ft.loading = true;
     try {
       const r = await bridge.fileTree(dir);
@@ -3537,14 +4395,25 @@
     } catch { /* 占位环境保留本地数据 */ }
   }
   async function doSwitchAuth(target) {
-    state.authMode = target; // 乐观更新；真实持久化经桥。
+    // 乐观更新可以，但持久化失败必须回滚：不回滚时设置页 statbar 与模式卡的「当前」
+    // 徽章会一直标着一个并未生效的模式——用户以为已切到偏执（全锁），实际后端仍是
+    // 信任/默认（沙箱可写）。UI 展示的安全姿态比现实更严，方向危险（P4-S6-2，P0）。
+    const prev = state.authMode;
+    state.authMode = target;
     render();
     try {
       const res = await bridge.setAuthMode(target);
-      if (!res || res.ok === false) toast('授权模式切换未持久化（运行时未接入？）', 'warn');
-      else toast(`已切换为「${authModeLabel(target)}」`, target === 'paranoid' ? 'ok' : 'warn');
+      if (!res || res.ok === false) {
+        state.authMode = prev;
+        render();
+        toast(`授权模式切换未生效，已回滚为「${authModeLabel(prev)}」（运行时未接入？）`, 'err');
+        return;
+      }
+      toast(`已切换为「${authModeLabel(target)}」`, target === 'paranoid' ? 'ok' : 'warn');
     } catch {
-      toast('授权模式切换失败（运行时未接入）', 'warn');
+      state.authMode = prev;
+      render();
+      toast(`授权模式切换失败，已回滚为「${authModeLabel(prev)}」（运行时未接入）`, 'err');
     }
   }
 
@@ -3597,14 +4466,16 @@
     const pickable = !!(FORK && n > 0);
     openModal(`<div class="mh">${ic('fork', 18)}<b>从此会话创建分支</b></div>
       <div class="mb">
-        <div>分支继承 <span class="mono">#${sid}</span> 在<b>分叉点之前</b>的消息，之后写入独立会话，<b>互不污染</b>。</div>
-        <div class="warn-list"><div>· 可在分叉点独立探索</div><div>· 主干不受影响</div><div>· 可随时合并或丢弃分支</div></div>
-        <div style="margin-top:10px">分支名：<input type="text" id="fork-name" value="分支-${sid}-1" style="margin-top:4px"></div>
+        <div>分支继承 <span class="mono">#${esc(sid)}</span> 在<b>分叉点之前</b>的消息，之后写入独立会话，<b>互不污染</b>。</div>
+        // P4-S4-4：删掉「可随时合并或丢弃分支」——全仓没有任何分支合并 UI/IPC，
+        // 向用户预告一个不存在的功能，事后必然找不到入口。
+        <div class="warn-list"><div>· 可在分叉点独立探索</div><div>· 主干不受影响</div><div>· 分支可随时归档 / 删除（侧栏 ··· 菜单）</div></div>
+        <div style="margin-top:10px">分支名：<input type="text" id="fork-name" value="分支-${esc(sid)}-1" style="margin-top:4px"></div>
         ${pickable ? `<div style="margin-top:12px">
           <div class="row" style="justify-content:space-between">
             <span class="cm-label">分叉点</span><span class="tl mono" id="fork-at-label">${esc(forkOptionLabel(n, msgs))}</span>
           </div>
-          <input type="range" id="fork-at" min="0" max="${n}" step="1" value="${n}" data-action="fork-slider" data-sid="${esc(sid)}" style="width:100%">
+          <input type="range" id="fork-at" min="0" max="${n}" step="1" value="${n}" data-action="fork-slider" data-sid="${esc(sid)}" style="width:100%" aria-label="分叉点" aria-valuetext="${esc(forkOptionLabel(n, msgs))}">
           <div class="faint" style="font-size:11px;margin-top:2px">拖动选择从哪一条之后分出；默认继承全部 ${n} 条</div>
         </div>` : `<div class="faint" style="margin-top:10px">${FORK ? '当前会话还没有消息，分支将从空起点开始。' : '分叉模块未加载，无法选择分叉点。'}</div>`}
       </div>
@@ -3618,25 +4489,41 @@
     const s = state.sessions[sid];
     openModal(`<div class="mh">${ic('edit', 18)}<b>重命名会话</b></div>
       <div class="mb">
-        <div>新名称：<input type="text" value="${s ? s.title : ''}" style="margin-top:6px"></div>
-        <div class="faint" style="margin-top:8px">会话 ID 保持 <span class="mono">#${sid}</span> 不变。</div>
+        <div>新名称：<input type="text" value="${s ? esc(s.title) : ''}" style="margin-top:6px"></div>
+        <div class="faint" style="margin-top:8px">会话 ID 保持 <span class="mono">#${esc(sid)}</span> 不变。</div>
       </div>
       <div class="mf">
         <button class="btn ghost" data-action="modal-cancel">取消</button>
-        <button class="btn primary" data-action="rename-confirm" data-id="${sid}">保存</button>
+        <button class="btn primary" data-action="rename-confirm" data-id="${esc(sid)}">保存</button>
       </div>`);
   }
 
   function confirmArchiveProject(pid) {
     const p = state.projects.find((x) => x.id === pid);
-    openModal(`<div class="mh danger">${ic('archive', 18)}<b>归档项目「${p ? p.n : ''}」？</b></div>
+    openModal(`<div class="mh danger">${ic('archive', 18)}<b>归档项目「${p ? esc(p.n) : ''}」？</b></div>
       <div class="mb">
         <div>归档后将折叠到「已归档」分组，<b>不可在前台直接打开</b>。所有会话日志和事件仍保留在数据目录，可随时还原。</div>
         <div class="warn-list"><div>· 项目内 <b>${p ? p.sessions.length : 0}</b> 个会话一并归档</div><div>· 插件与配置保留</div><div>· 归档后可在「已归档」组中点击还原</div></div>
       </div>
       <div class="mf">
         <button class="btn ghost" data-action="modal-cancel">取消</button>
-        <button class="btn danger" data-action="archive-confirm" data-id="${pid}">确认归档</button>
+        <button class="btn danger" data-action="archive-confirm" data-id="${esc(pid)}">确认归档</button>
+      </div>`);
+  }
+
+  /* 破坏性操作统一确认（P1）：删会话 / MCP / 提供商 / 技能 / 提示词 / 清审计日志
+     此前一键直达、无确认无撤销，与产品 fail-closed 的安全姿态自相矛盾。复用归档 /
+     切授权模式既有的 warn-list 模态范式：列明将失去的内容，确认走独立 action，
+     执行函数原样不动（只改入口）。 */
+  function confirmDestructive(o) {
+    openModal(`<div class="mh danger">${ic(o.icon || 'trash', 18)}<b>${esc(o.title)}</b></div>
+      <div class="mb">
+        ${o.body ? `<div>${o.body}</div>` : ''}
+        ${o.warnList && o.warnList.length ? `<div class="warn-list" style="margin-top:10px">${o.warnList.map((w) => `<div>· ${w}</div>`).join('')}</div>` : ''}
+      </div>
+      <div class="mf">
+        <button class="btn ghost" data-action="modal-cancel">取消</button>
+        <button class="btn danger" data-action="${o.action}" data-id="${esc(o.id)}">${esc(o.confirmLabel || '确认删除')}</button>
       </div>`);
   }
 
@@ -3665,11 +4552,8 @@
   function openModelPicker() {
     const pool = getModelPool();
     if (!pool.length) {
-      openModal(`<div class="mh">${ic('bot', 18)}<b>选择模型</b></div>
-        <div class="mb">
-          <div class="faint">尚未配置任何模型提供商。请到 <b>设置 → 模型管理</b> 添加提供商（OpenAI 兼容 API 或 Ollama 本地）。</div>
-        </div>
-        <div class="mf"><button class="btn ghost" data-action="modal-cancel">关闭</button></div>`);
+      // P2：无模型时不把用户弹去设置页——就地开内嵌配置面板（两步：预设 + KEY）。
+      openModelSetupModal();
       return;
     }
     const poolNames = new Set(pool.map(m => m.n));
@@ -3708,6 +4592,8 @@
   /* ---------- 交互 ---------- */
   // 点击空白处关闭项目下拉
   document.body.addEventListener('click', (e) => {
+    // 预设下拉：点击面板外即关（与项目下拉同一模式）
+    if (state.mpPresetOpen && !e.target.closest('.mp-preset')) { state.mpPresetOpen = false; mpRefreshPreset(); }
     if ((state.projDropdownOpen && !e.target.closest('.proj-select') && !e.target.closest('.proj-dropdown')) ||
         (state.composerMoreOpen && !e.target.closest('.composer-more'))) {
       state.projDropdownOpen = false;
@@ -3724,9 +4610,53 @@
   document.body.addEventListener('input', (e) => {
     if (e.target && e.target.id === 'plugSearch') plugSearchFilter();
     else if (e.target && e.target.id === 'skillSearch') skillSearchFilter();
+    else if (e.target.id === 'mp-preset-search') mpPresetFilter();
+    // KEY / URL / 类型 / 完整URL 勾选变化：防抖 800ms 后重新拉取可用模型
+    else if (e.target.id === 'mp-key' || e.target.id === 'mp-url' || e.target.id === 'mp-type' || e.target.id === 'mp-fullurl') scheduleMpFetch();
+    // 模型勾选面板：checkbox 变更只更新 Set 与计数，不重渲染
+    else if (e.target && e.target.dataset && e.target.dataset.mid) {
+      const mid = e.target.dataset.mid;
+      if (e.target.checked) state.mpModelsChecked.add(mid); else state.mpModelsChecked.delete(mid);
+      const c = $('#mp-models-count');
+      if (c) c.textContent = `已选 ${state.mpModelsChecked.size}/${state.mpModels.length}`;
+    }
   });
   document.body.addEventListener('keydown', (e) => {
+    // P1.2：Ctrl+K / Cmd+K 唤出导航抽屉（轻模式主导航入口；与 ☰ 同效）。
+    // 焦点在终端内部时不抢——xterm/vim 等交互程序大量使用 Ctrl+K（A-P2-5：此前只有
+    // Escape 分支有 inTerm 守卫，Ctrl+K 漏了，会在终端里误唤抽屉）。
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+      const inTerm = e.target && e.target.closest && e.target.closest('#terminalRoot .term-container');
+      if (inTerm) return;
+      e.preventDefault();
+      toggleNavDrawer($('#navDrawerBtn'));
+      return;
+    }
+    // P1.2：Esc 关导航抽屉
+    if (e.key === 'Escape' && $('#navDrawerRoot')?.innerHTML) { closeNavDrawer(); return; }
+    // 预设下拉键盘导航：↑/↓ 移动、Enter 选中、Esc 关闭（先于硬委托，避免双触发）
+    if (e.target && e.target.closest && e.target.closest('.mp-preset-pop')) {
+      // 可见性按内联 display 判：mpPresetFilter 用 el.style.display 隐藏，本项目没有
+      // .hidden 规则。此前用 :not(.hidden) 选，过滤后键盘导航仍会跳到已隐藏的项（A-P2-2）。
+      const items = [...document.querySelectorAll('#mp-preset-list .mp-preset-item')]
+        .filter((el) => el.style.display !== 'none');
+      const cur = document.querySelector('#mp-preset-list .mp-preset-item.hl');
+      let idx = items.indexOf(cur);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (cur) cur.classList.remove('hl');
+        if (items.length) {
+          idx = e.key === 'ArrowDown' ? (idx + 1) % items.length : (idx - 1 + items.length) % items.length;
+          items[idx].classList.add('hl');
+        }
+        return;
+      }
+      if (e.key === 'Enter') { e.preventDefault(); if (cur || items[0]) (cur || items[0]).click(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); state.mpPresetOpen = false; mpRefreshPreset(); return; }
+    }
     if (e.key === 'Escape') {
+      // 模态优先：ESC 关对话框（含破坏性操作确认），焦点经 closeModal 还回触发元素
+      if ($('#modalRoot').firstElementChild) { closeModal(); return; }
       // 终端 / 文件面板：ESC 收起。但焦点在终端内部（xterm 的输入区 / 降级输入框）
       // 时不收 —— vim/less 等交互程序也用 ESC，不能被面板快捷键抢走。
       const inTerm = e.target && e.target.closest && e.target.closest('#terminalRoot .term-container');
@@ -3758,7 +4688,7 @@
      ctx 注入本 IIFE 私有面；模块内一律 ctx.X 引用，不直连 app.js 作用域。 */
   const ACTIONS = {};
   {
-    const ctx = { $, MODEL_SELECTION_KEY, MODE_RANK, SKILLS_MARKET, applyBrowserState, applySessionCwd, askInput, autoSelectModels, bridge, browserAct, cancelFileEdit, closeFilePanel, closeModal, closeTerminalPanel, confirmArchiveProject, confirmNewBranch, confirmRename, confirmSwitchAuth, createSessionInProject, desktopAutostartDesc, doAbortSend, doArchiveProject, doArchiveSession, doDeletePrompt, doDeleteSession, doFork, doInstallGuanjiSkill, doNewConv, doRename, doSavePrompt, doSend, doSwitchAuth, dynamicModels, esc, expertList, fileTabLoadDir, getModelPool, ic, importSuspend, loadFileDir, memReasonText, newTerminalSession, nowTime, openAuthPicker, openBrowserPanel, openExpertPicker, openFilePanel, openFilePreview, openMenu, openModal, openModelPicker, openProductPreview, openPromptEditor, openSkillPicker, openTerminalPanel, persist, pickFileRoot, pushFloatingContext, refreshConnectorAudit, refreshConnectors, refreshDataDirInventory, refreshMarket, refreshMcp, refreshMemoryDomain, refreshMemorySummarize, refreshSandboxLog, refreshSessionEvents, refreshTerminal, refreshUsage, reloadFilePreview, render, renderBrowserSide, renderFilePanel, renderModelProviders, renderStatusBarActions, renderTerminalPanel, renderWizard, saveFileEdit, saveModelSelection, startFileEdit, state, toast, toggleFileDiff, toggleTermFull, updateProtocolRow, updateTraceUi };
+    const ctx = { $, MODEL_SELECTION_KEY, MODE_RANK, SKILLS_MARKET, adoptOllama, applyBrowserState, applySessionCwd, askInput, autoSelectModels, bridge, browserAct, cancelFileEdit, checkOutbound, closeFilePanel, closeModal, closeNavDrawer, closeTerminalPanel, confirmArchiveProject, confirmDestructive, confirmNewBranch, confirmRename, confirmSwitchAuth, confirmOutboundIfNeeded, createSessionInProject, desktopAutostartDesc, doAbortSend, doArchiveProject, doArchiveSession, doDeletePrompt, doDeleteSession, doFork, doInstallGuanjiSkill, doNewConv, doRename, doSavePrompt, doSend, doSwitchAuth, dynamicModels, escalateToProject, esc, expertList, fileTabLoadDir, getModelPool, ic, importSuspend, loadFileDir, memReasonText, mpApplyPreset, mpEnsureCatalog, mpFetchModels, mpRefreshPool, mpRefreshPreset, mpRefreshPresetList, newTerminalSession, nowTime, openAuthPicker, openBrowserPanel, openExpertPicker, openFilePanel, openFilePreview, openMenu, openModal, openModelPicker, openModelSetupModal, openProductPreview, openPromptEditor, openSkillPicker, openTerminalPanel, persist, pickFileRoot, pickWorkspace, pushFloatingContext, refreshConnectorAudit, refreshConnectors, refreshDataDirInventory, refreshCtxLive, refreshMarket, refreshMcp, refreshMemoryDomain, refreshMemorySummarize, refreshSandboxLog, refreshSessionEvents, refreshTerminal, refreshUsage, reloadFilePreview, render, renderBrowserSide, renderFilePanel, renderModelProviders, renderSettingsMain, renderStatusBarActions, renderTerminalPanel, renderWizard, saveFileEdit, saveModelSelection, saveWorkspaceDir, startFileEdit, state, toast, toggleFileDiff, toggleNavDrawer, toggleTermFull, toggleViewMode, updateProtocolRow, updateTraceUi };
     for (const install of (window.__orchdeskActionModules || [])) install(ACTIONS, ctx);
   }
 
@@ -3767,25 +4697,65 @@
     const el = e.target.closest('[data-action]'); if (!el) return;
     const a = el.dataset.action, id = el.dataset.id;
     const fn = ACTIONS[a];
-    if (fn) { await fn(el, id, e); return; }
+    if (fn) {
+      // 动作异常绝不静默死亡：此前 fn 抛错只产生 unhandled rejection，
+      // 用户侧「点了没反应」且控制台之外无迹可寻（P1 修复）。
+      try { await fn(el, id, e); }
+      catch (err) {
+        console.error('[orchdesk] 动作执行失败：', a, err);
+        toast(`操作「${a}」执行失败：${(err && err.message) || err}`, 'danger');
+      }
+      return;
+    }
     // 动作名拼错 / 新增动作忘了接线 —— 别静默吞掉（保留原 default 语义）。
     console.warn('[orchdesk] 未知的 data-action：', a);
   });
 let outboundTimer = null;
-  async function updateOutboundWarn(text) {
+  // P4-S1-05：不可逆操作的「一 shot 确认」标志。needsConfirm 时第一次发送被拦下并
+  // 提示，用户再点一次才放行——不会把用户卡死在无限警告里。输入变化即重置。
+  let outboundConfirmed = false;
+  /** 取一次不可逆操作判定（同步 Promise 版，无防抖）。发送前用它兜底。 */
+  function checkOutbound(text) {
+    try { return Promise.resolve(bridge.withhold(text || '')); } catch { return Promise.resolve(null); }
+  }
+  function updateOutboundWarn(text) {
     const el = $('#outboundWarn'); if (!el) return;
     clearTimeout(outboundTimer);
+    outboundConfirmed = false;   // 输入变了，上次的「已警告」作废
     outboundTimer = setTimeout(async () => {
       try {
-        const w = await Promise.resolve(bridge.withhold(text || ''));
+        const w = await checkOutbound(text);
         if (w && w.needsConfirm) { el.hidden = false; el.textContent = w.warning || '⚠ 此操作不可撤销：发送前需二次确认'; }
         else { el.hidden = true; el.textContent = ''; }
       } catch { el.hidden = true; }
     }, 300);
   }
+  /**
+   * P4-S1-05：发送前的不可逆操作判定。返回 false = 本次发送应被拦下。
+   * 存在的理由：会话页 composer 的预警走 300ms 防抖 input 监听，而欢迎页才是新用户
+   * 第一站——act_home_send 把文本搬进 #composer 后立即 doSend，防抖定时器只可能在
+   * 发送之后才 fire，欢迎页里那个 #outboundWarn 等于死的。于是在欢迎页发送前同步判
+   * 一次；needsConfirm 时拦下并提示「再点一次发送」，第二次放行（一 shot 确认）。
+   * 判定本身失败不拦路——补偿层在后端仍会 fail-closed，这里不做双重否决。
+   */
+  function confirmOutboundIfNeeded(text) {
+    return Promise.resolve(bridge.withhold(text || '')).then((w) => {
+      if (w && w.needsConfirm && !outboundConfirmed) {
+        outboundConfirmed = true;
+        toast(w.warning || '⚠ 此操作不可撤销：请再点一次「发送」确认', 'warn');
+        return false;
+      }
+      outboundConfirmed = false;
+      return true;
+    }).catch(() => true);
+  }
 
   document.body.addEventListener('input', (e) => {
-    if (e.target.id === 'composer') { updateOutboundWarn(e.target.value); return; }
+    // P4-S1-05：欢迎页的 #homeComposer 也要预警。原实现只绑 #composer，而欢迎页才是
+    // 新用户的第一站——act_home_send 把文本搬进 #composer 后立即 doSend，合成 input 事件
+    // 触发的 300ms 定时器只可能在发送之后才 fire，欢迎页里那个 #outboundWarn 是死的：
+    // 不可逆操作预警在新用户主路径上完全失效（铁律：fail-closed / 不静默）。
+    if (e.target.id === 'composer' || e.target.id === 'homeComposer') { updateOutboundWarn(e.target.value); return; }
     // 文件编辑缓冲（P3）：只更新 dirty 徽标，不重渲染（textarea 重渲染会丢焦点/光标）
     if (e.target.id === 'fileEditBuf') {
       const fp = state.filePanel;
@@ -3853,7 +4823,11 @@ let outboundTimer = null;
       state.defaultModel = e.target.value;
       autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
       render();
-      bridge.saveModelConfig({ providers: state.modelProviders, defaultProvider: state.defaultProvider, defaultModel: state.defaultModel }).catch(() => {});
+      // P4-S3-09：静默保存改为有反馈。原实现 .catch(() => {}) 把失败吞掉，用户无从得知
+      // 默认模型有没有生效（切换默认模型、拖迭代滑块两条路都是如此）。
+      bridge.saveModelConfig({ providers: state.modelProviders, defaultProvider: state.defaultProvider, defaultModel: state.defaultModel })
+        .then((r) => { if (r && r.ok) toast(`默认模型已设为「${state.defaultModel}」`, 'ok'); else toast(`默认模型未生效：${(r && r.reason) || '保存失败'}`, 'warn'); })
+        .catch((err) => toast(`默认模型未生效：${(err && err.message) || err}`, 'warn'));
     }
     if (e.target.id === 'max-iter-pick') {
       state.maxToolIterations = Math.max(1, Math.min(500, parseInt(e.target.value) || 200));
@@ -3866,6 +4840,9 @@ let outboundTimer = null;
   /* ---------- 启动 ---------- */
   async function init() {
     console.log('[init] starting...', 'sessions:', Object.keys(state.sessions).length, 'projects:', state.projects.length);
+
+    // P1.4：恢复隐式工作目录（轻会话默认 cwd，localStorage 持久化）
+    state.workspaceDir = loadWorkspaceDir();
 
     // 立即渲染空壳（用户先看到界面，不等数据）
     render();
@@ -3969,7 +4946,12 @@ let outboundTimer = null;
         let liveRenderTimer = null;
         const scheduleLiveRender = () => {
           if (liveRenderTimer) return;
-          liveRenderTimer = setTimeout(() => { liveRenderTimer = null; updateMsgList(); }, 150);
+          liveRenderTimer = setTimeout(() => {
+            liveRenderTimer = null;
+            updateMsgList();
+            // P1.3：任务监控浮出期间，右栏待办随工具步骤实时刷新（门控见 refreshCtxLive）
+            refreshCtxLive();
+          }, 150);
         };
         bridge.onToolStep((step) => {
           const s = state.sessions[step.sessionId];
@@ -4002,7 +4984,10 @@ let outboundTimer = null;
     const results = await Promise.allSettled([
       // 授权
       bridge.getAuthMode().then(r => { if (r?.mode) state.authMode = r.mode; }).catch(() => {}),
-      bridge.getAuthLevels().then(r => { if (Array.isArray(r) && r.length) state.authLevels = r; }).catch(() => {}),
+      bridge.getAuthLevels().then((r) => {
+        state.authzLoaded = true;
+        if (Array.isArray(r) && r.length) state.authLevels = r;
+      }).catch(() => { state.authzLoaded = false; }),
       // ④M-1：授权模式卡 + 白名单工具下拉数据化（canonical = authz 插件；加载后覆盖兜底文案）
       (typeof bridge.getAuthModes === 'function'
         ? bridge.getAuthModes().then((r) => {
@@ -4040,10 +5025,31 @@ let outboundTimer = null;
       (typeof bridge.getDesktop === 'function'
         ? bridge.getDesktop().then(r => { if (r && r.config) state.desktop = r; })
         : Promise.resolve()).catch(() => {}),
-      bridge.listTempPlugins().then(r => { if (Array.isArray(r)) state.tempPlugins = r; }).catch(() => {}),
+      // P4-S2-5：临时插件列表的三态。原实现 catch(() => {}) 不置任何标志，侧栏跳转行
+      // 和主区一律显示「暂无」——把「桥未接入/读取失败」说成「真的没有临时插件」
+      // （本项目自己踩过三次的 null 当空数组坑）。
+      bridge.listTempPlugins().then((r) => {
+        state.tempPluginsLoaded = true;
+        if (Array.isArray(r)) state.tempPlugins = r;
+      }).catch(() => { state.tempPluginsLoaded = false; }),
       // 浏览器（ADR-0011）：启动即同步一次状态，标题栏入口才能如实显示开/关
       (typeof bridge.getBrowserStatus === 'function'
         ? bridge.getBrowserStatus().then(r => { applyBrowserState(r); })
+        : Promise.resolve()).catch(() => {}),
+      // P4：终端状态同样启动即同步。此前只有浏览器同步了，terminal.loaded 初值 false 且
+      // refreshTerminal 只在用户首次打开面板/建会话/进程退出时才跑——冷启后终端图标一直
+      // 置灰显示「未接入主进程」+ not-allowed 光标，而桥其实是好的、点击也能打开。
+      // 把「已接入」持续显示成「未接入」是铁律里的「UI 不许撒谎」。
+      (typeof bridge.terminalStatus === 'function'
+        ? bridge.terminalStatus().then((st) => {
+            if (st && typeof st === 'object') {
+              state.terminal.loaded = true;
+              state.terminal.ptyAvailable = !!st.ptyAvailable;
+              state.terminal.via = st.via || state.terminal.via;
+              if (Array.isArray(st.sessions)) state.terminal.sessions = st.sessions;
+              renderStatusBarActions();
+            }
+          })
         : Promise.resolve()).catch(() => {}),
       // 插件运行时真实状态（插件页开关据此显示，而非硬编码的 p.on）
       (typeof bridge.getPluginRuntime === 'function'
@@ -4053,8 +5059,20 @@ let outboundTimer = null;
       (typeof bridge.getOrchestrationCatalog === 'function'
         ? bridge.getOrchestrationCatalog().then(r => {
             if (r && Array.isArray(r.experts) && r.experts.length) state.orchestrationCatalog = r;
+            renderTrayHint();
           })
         : Promise.resolve()).catch(() => {}),
+      // P2：本机 Ollama 自发现（composer 模型 chip 的零配置入口）。失败也置位——
+      // chip 要能区分「探过没有」与「还没探」，不能把未探测显示成就绪。
+      (typeof bridge.probeOllama === 'function'
+        ? bridge.probeOllama().then((r) => {
+            state.ollama = { ok: !!(r && r.ok), models: (r && r.models) || [], reason: (r && r.ok ? '' : ((r && r.reason) || '未探测到本机 Ollama')) };
+            if (!state.ollama.ok) console.warn('[ollama] 自发现未命中：', state.ollama.reason);
+          }).catch((err) => {
+            state.ollama = { ok: false, models: [], reason: (err && err.message) || '探测异常' };
+            console.warn('[ollama] 自发现异常：', state.ollama.reason);
+          })
+        : Promise.resolve()),
       // 模型管理
       bridge.getModelConfig().then(async (mc) => {
         if (mc && mc.providers && mc.providers.length) {
