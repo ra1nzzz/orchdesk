@@ -41,5 +41,10 @@ autoInstallPeers: false
 # electron 的 postinstall 负责下载 Electron 二进制，必须放行，否则 CI 报
 # ERR_PNPM_IGNORED_BUILDS 且打不出包。
 allowBuilds:
+  '@google/genai': true
   electron: true
   esbuild: true
+  fs-ext: true
+  koffi: true
+  node-pty: true
+  protobufjs: true
