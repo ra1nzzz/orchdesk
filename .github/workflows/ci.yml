@@ -82,22 +82,34 @@ jobs:
         shell: bash
         run: pnpm install --frozen-lockfile
 
-      # 插件 tsc 需要解析 @deepseek-ai/{cordis,schemastery,dsh-agent,dsh-session}；
-      # Verify 还要真正执行 cordis → 必须连它的运行期依赖 cosmokit 一起物化
-      # （cordis/lib/index.js 只 import cosmokit，cosmokit 自身无外部 import，
-      # 所以这 5 个包就够了）。这些包在插件 package.json 里是 peerDependencies，
-      # 而 pnpm-workspace.yaml 设了 autoInstallPeers: false —— 根 install 不会链接它们，
-      # 本地根 node_modules 里那份是历史上物化/安装留下的，CI 必须自建。
+      # 插件 tsc 要解析 @deepseek-ai/{cordis,schemastery,dsh-agent,dsh-session}，Verify 还要
+      # 真正执行它们 → 必须连整条运行期依赖闭包一起物化。这些包在插件 package.json 里是
+      # peerDependencies("*")，而 pnpm-workspace.yaml 设了 autoInstallPeers: false，
+      # 根 install 不链接它们；本地根 node_modules 里那份是历史上物化+安装留下的。
+      #
+      # 闭包而不是硬编码清单：cordis→cosmokit、dsh-session→dsh-brand→…一链路过好几层，
+      # 逐个包补（本轮已经这么错过三次：cosmokit → dsh-brand → …）。从 4 个种子包出发沿
+      # dependencies+peerDependencies 递归，只在 dsh workspace 内取——像 dsh-invariants
+      # 这种公网不存在的包也从 workspace 拿，避开 404。
       - name: Materialize dsh modules (typecheck + runtime)
         shell: bash
         run: |
           node -e "
           const fs=require('fs'),path=require('path');
-          function cp(src,dst){fs.mkdirSync(dst,{recursive:true});for(const e of fs.readdirSync(src,{withFileTypes:true})){if(['node_modules','src','tests'].includes(e.name))continue;const s=path.join(src,e.name),d=path.join(dst,e.name);if(e.isDirectory())cp(s,d);else fs.copyFileSync(s,d);}}
           const DSH='references/deepseek-harness';
-          const map={'vendor/cordis':'cordis','vendor/cosmokit':'cosmokit','vendor/schemastery':'schemastery','packages/core/agent':'dsh-agent','packages/core/session':'dsh-session'};
-          for(const [src,dst] of Object.entries(map))cp(path.join(DSH,src),path.join('node_modules','@deepseek-ai',dst));
-          console.log('materialized',Object.keys(map).length,'dsh modules (含 cosmokit 运行期依赖)');
+          const idx=new Map();
+          (function walk(d,depth){ if(depth>5)return; let ents=[]; try{ents=fs.readdirSync(d,{withFileTypes:true});}catch{return;}
+            for(const e of ents){ if(!e.isDirectory())continue; const p=path.join(d,e.name),pj=path.join(p,'package.json');
+              if(fs.existsSync(pj)){ try{const j=JSON.parse(fs.readFileSync(pj,'utf8')); if(j.name&&j.name.startsWith('@deepseek-ai/')) idx.set(j.name,{dir:p,pkg:j});}catch{} }
+              walk(p,depth+1);} })(DSH,0);
+          function cp(src,dst){fs.mkdirSync(dst,{recursive:true});for(const e of fs.readdirSync(src,{withFileTypes:true})){if(['node_modules','src','tests'].includes(e.name))continue;const s=path.join(src,e.name),d=path.join(dst,e.name);if(e.isDirectory())cp(s,d);else fs.copyFileSync(s,d);}}
+          const seeds=['@deepseek-ai/cordis','@deepseek-ai/schemastery','@deepseek-ai/dsh-agent','@deepseek-ai/dsh-session'];
+          const seen=new Set(),q=[...seeds];
+          while(q.length){ const n=q.shift(); if(seen.has(n))continue; seen.add(n); const e=idx.get(n); if(!e){console.log('WARN 未找到 workspace 包:',n);continue;}
+            for(const dep of Object.keys(Object.assign({},e.pkg.dependencies,e.pkg.peerDependencies))) if(dep.startsWith('@deepseek-ai/')&&idx.has(dep)&&!seen.has(dep)) q.push(dep); }
+          let n=0;
+          for(const name of seen){ const e=idx.get(name); if(!e)continue; cp(e.dir,path.join('node_modules','@deepseek-ai',name.slice('@deepseek-ai/'.length))); n++; }
+          console.log('materialized',n,'dsh modules（依赖闭包，含运行期依赖）');
           "
 
       # lib/ 被 gitignore，CI 必须自建 9 个插件产物（vendor-dsh 只搬运不编译）。
