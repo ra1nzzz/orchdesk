@@ -82,10 +82,25 @@ jobs:
         shell: bash
         run: pnpm install --frozen-lockfile
 
-      # 插件 tsc 需要解析 @deepseek-ai/{cordis,schemastery,dsh-agent,dsh-session}。
-      # 这一步已不需要：上面的根 install 通过 workspace 软链提供全部 4 个包及其依赖，
-      # 比拷贝更接近本地形态。原实现是「拷贝且跳过 node_modules」——typecheck 够用，
-      # 但 Verify 真要执行 cordis 时就缺 cosmokit（ERR_MODULE_NOT_FOUND）。
+      # 插件 tsc 需要解析 @deepseek-ai/{cordis,schemastery,dsh-agent,dsh-session}；
+      # Verify 还要真正执行 cordis → 必须连它的运行期依赖 cosmokit 一起物化
+      # （cordis/lib/index.js 只 import cosmokit，cosmokit 自身无外部 import，
+      # 所以这 5 个包就够了）。这些包在插件 package.json 里是 peerDependencies，
+      # 而 pnpm-workspace.yaml 设了 autoInstallPeers: false —— 根 install 不会链接它们，
+      # 本地根 node_modules 里那份是历史上物化/安装留下的，CI 必须自建。
+      - name: Materialize dsh modules (typecheck + runtime)
+        shell: bash
+        run: |
+          node -e "
+          const fs=require('fs'),path=require('path');
+          function cp(src,dst){fs.mkdirSync(dst,{recursive:true});for(const e of fs.readdirSync(src,{withFileTypes:true})){if(['node_modules','src','tests'].includes(e.name))continue;const s=path.join(src,e.name),d=path.join(dst,e.name);if(e.isDirectory())cp(s,d);else fs.copyFileSync(s,d);}}
+          const DSH='references/deepseek-harness';
+          const map={'vendor/cordis':'cordis','vendor/cosmokit':'cosmokit','vendor/schemastery':'schemastery','packages/core/agent':'dsh-agent','packages/core/session':'dsh-session'};
+          for(const [src,dst] of Object.entries(map))cp(path.join(DSH,src),path.join('node_modules','@deepseek-ai',dst));
+          console.log('materialized',Object.keys(map).length,'dsh modules (含 cosmokit 运行期依赖)');
+          "
+
+      # lib/ 被 gitignore，CI 必须自建 9 个插件产物（vendor-dsh 只搬运不编译）。
       - name: Build plugin libraries
         shell: bash
         run: |
