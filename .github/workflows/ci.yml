@@ -53,8 +53,19 @@ jobs:
           git init references/deepseek-harness
           cd references/deepseek-harness
           git remote add origin https://github.com/deepseek-ai/deepseek-harness.git
-          git fetch --depth 1 origin "$COMMIT"
+          # GitHub 不允许 want 一个不是 ref tip 的 SHA（uploadpack.allowAnySHA1InWant 未开），
+          # 所以 `git fetch origin $COMMIT` 恒报 couldn't find remote ref——main 上连续 11 次
+          # CI 红在这一步，与任何业务改动无关。改为按 tag 取（该 commit 正是 tag
+          # dsh-v0.1.0-rc.7 的 tip），取完必须校验等于 dsh.lock：上游若移动 tag 或 lock 变更，
+          # 要立刻失败，而不是静默构建另一套基线。
+          git fetch --depth 1 origin refs/tags/dsh-v0.1.0-rc.7
           git checkout --force FETCH_HEAD
+          # dsh.lock 存的是短 SHA，rev-parse 给全量 → 用前缀匹配（真实漂移仍会失败）
+          GOT=$(git rev-parse HEAD)
+          case "$GOT" in
+            "$COMMIT"*) echo "dsh 基线一致：$GOT" ;;
+            *) echo "::error::dsh 基线漂移：dsh.lock=$COMMIT，tag dsh-v0.1.0-rc.7=$GOT。请更新 dsh.lock 或改成本次真正要用的 ref。"; exit 1 ;;
+          esac
           cd ../..
 
       - name: Build dsh libs
