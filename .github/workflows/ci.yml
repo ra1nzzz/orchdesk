@@ -37,11 +37,12 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
 
-      - name: Install dependencies
-        shell: bash
-        # --frozen-lockfile：OrchDesk 自己的 pnpm-lock.yaml 是源，禁止 CI 解析漂移。
-        run: pnpm install --frozen-lockfile
-
+      # 顺序很关键：dsh 底座必须先 clone + build，根 install 才能看到完整 workspace。
+      # pnpm-workspace.yaml 的 globs 含 references/deepseek-harness/{vendor,packages}/*/*
+      # ——clone 之前根 install，这些 globs 匹配不到任何包，根 node_modules 里就没有
+      # @deepseek-ai/cordis 及其依赖（cosmokit 等），后面 Verify 一执行就
+      # ERR_MODULE_NOT_FOUND。本地从不在这一步翻车，是因为本地根 node_modules 是一次
+      # 完整 install 的产物（cordis / cosmokit 都是真目录），物化步骤在本地从未跑过。
       # dsh 底座（references/deepseek-harness）是 gitignore 的本地 clone：
       # vendor-dsh 的 7 个 @deepseek-ai 包与插件类型解析都源自它，CI 必须自取上游并构建。
       # commit 来自仓库根 dsh.lock，与 cordis.patch.yml 基线一致。禁止 clone 默认分支 tip。
@@ -75,21 +76,16 @@ jobs:
           pnpm install --no-frozen-lockfile
           npm run build:lib
 
-      # 插件 tsc 需要解析 @deepseek-ai/{cordis,schemastery,dsh-agent,dsh-session}；
-      # 与 vendor-dsh 同源（上游 vendor/ + 构建产物）物化到根 node_modules。
-      - name: Materialize dsh modules for typecheck
+      # --frozen-lockfile：OrchDesk 自己的 pnpm-lock.yaml 是源，禁止 CI 解析漂移。
+      # 此时 dsh 已在位，workspace globs 能匹配到它的包，锁文件与之同步（本地已验证）。
+      - name: Install dependencies
         shell: bash
-        run: |
-          node -e "
-          const fs=require('fs'),path=require('path');
-          function cp(src,dst){fs.mkdirSync(dst,{recursive:true});for(const e of fs.readdirSync(src,{withFileTypes:true})){if(['node_modules','src','tests'].includes(e.name))continue;const s=path.join(src,e.name),d=path.join(dst,e.name);if(e.isDirectory())cp(s,d);else fs.copyFileSync(s,d);}}
-          const DSH='references/deepseek-harness';
-          const map={'vendor/cordis':'cordis','vendor/schemastery':'schemastery','packages/core/agent':'dsh-agent','packages/core/session':'dsh-session'};
-          for(const [src,dst] of Object.entries(map))cp(path.join(DSH,src),path.join('node_modules','@deepseek-ai',dst));
-          console.log('materialized',Object.keys(map).length,'dsh modules');
-          "
+        run: pnpm install --frozen-lockfile
 
-      # lib/ 被 gitignore，CI 必须自建 9 个插件产物（vendor-dsh 只搬运不编译）。
+      # 插件 tsc 需要解析 @deepseek-ai/{cordis,schemastery,dsh-agent,dsh-session}。
+      # 这一步已不需要：上面的根 install 通过 workspace 软链提供全部 4 个包及其依赖，
+      # 比拷贝更接近本地形态。原实现是「拷贝且跳过 node_modules」——typecheck 够用，
+      # 但 Verify 真要执行 cordis 时就缺 cosmokit（ERR_MODULE_NOT_FOUND）。
       - name: Build plugin libraries
         shell: bash
         run: |
