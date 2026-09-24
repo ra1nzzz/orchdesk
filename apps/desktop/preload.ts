@@ -604,6 +604,18 @@ const orchdesk = {
   /** 测试模型连通性。 */
   testModel: (providerId: string, model: string): Promise<{ ok: boolean; latencyMs?: number; error?: string }> =>
     ipcRenderer.invoke('orchdesk:models-test', providerId, model),
+  /** models.dev 目录预设（添加提供商表单的“预设”可搜索下拉数据源；缓存 TTL 24h）。 */
+  getModelCatalog: (): Promise<{ ok: boolean; providers: Array<{ id: string; name: string; api?: string; modelCount: number }>; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:models-catalog'),
+  /** 拉取提供商可用模型（live 优先：提供商 /models + KEY；失败回退 models.dev 目录）。 */
+  listModels: (input: { type: string; baseUrl: string; apiKey?: string; presetId?: string }): Promise<
+    | { ok: true; source: 'live' | 'catalog' | 'mixed'; models: Array<{ id: string; name?: string; ctx?: number; priceIn?: number; priceOut?: number; caps?: string[]; enriched?: boolean }>; matched?: { id: string; name: string; api?: string } }
+    | { ok: false; reason: string }
+  > =>
+    ipcRenderer.invoke('orchdesk:models-list', input),
+  /** P2：本机 Ollama 自发现（composer 模型 chip 零配置入口；主进程代查 127.0.0.1:11434）。 */
+  probeOllama: (): Promise<{ ok: boolean; models: string[]; reason?: string }> =>
+    ipcRenderer.invoke('orchdesk:ollama-probe'),
 };
 
 contextBridge.exposeInMainWorld('orchdesk', orchdesk);

@@ -69,6 +69,7 @@ import {
 } from './agent-runtime';
 import { isAbsoluteLike } from './common-tools';
 import { callModel as callModelHttp, initModelClient } from './model-client';
+import { initModelCatalog, refreshCatalogInBackground, getCatalogPresets, listAvailableModels } from './model-catalog';
 import { abortAgentTurn, clearToolRejectMemo, hasActiveTurn, initAgentTurn, runAgentTurn } from './agent-turn';
 import { executeTool, initToolExec, sessionCwd, setSessionCwd } from './tool-exec';
 import { registerBrowserIpc } from './ipc-browser';
@@ -104,6 +105,10 @@ bootDesktop.initBootDesktop({
   checkForUpdates: () => checkForUpdates({ dataDir, logFilePath }),
 });
 initModelClient({ decryptKey });
+// models.dev 目录缓存落 userData/cache（live 优先拉取失败时的回退源 + 预设下拉数据）。
+// 启动即后台刷新一次：失败静默（缓存/TTL 内下次再说），不阻塞窗口。
+initModelCatalog({ cacheDir: path.join(app.getPath('userData'), 'cache') });
+refreshCatalogInBackground();
 
 // ---------------------------------------------------------------------------
 // IPC sender 校验（遗留项①，纵深防御）：全仓唯一带 preload 的窗口是 mainWindow
@@ -737,6 +742,37 @@ ipcMain.handle('orchdesk:models-test', async (_e, providerId: string, model: str
   }
 });
 
+// ---- models.dev 目录预设 + 可用模型拉取（方案 A：live 优先，目录增强/回退） ----
+ipcMain.handle('orchdesk:models-catalog', async () => {
+  return getCatalogPresets();
+});
+
+ipcMain.handle('orchdesk:models-list', async (_e, input: unknown) => {
+  const req = (input && typeof input === 'object' ? input : {}) as { type?: unknown; baseUrl?: unknown; apiKey?: unknown; presetId?: unknown };
+  if (typeof req.baseUrl !== 'string' || !req.baseUrl.trim()) return { ok: false as const, reason: '缺少 Base URL' };
+  return listAvailableModels({
+    type: typeof req.type === 'string' && req.type ? req.type : 'openai-compatible',
+    baseUrl: req.baseUrl.trim(),
+    apiKey: typeof req.apiKey === 'string' && req.apiKey ? req.apiKey : undefined,
+    presetId: typeof req.presetId === 'string' && req.presetId ? req.presetId : undefined,
+  });
+});
+
+// ---- P2 模型内嵌：本机 Ollama 自发现 ----
+// composer 模型 chip 的零配置入口：启动时探一次 127.0.0.1:11434，探到就把
+// 「发现 Ollama · 一键接入」摆到 chip 上。复用 listAvailableModels（已含
+// /api/tags → /v1/models 老版本回退），不另造探测轮子。失败必须带回 reason——
+// 渲染层要区分「没装 Ollama」与「探到但拉取失败」，不许把两者都显示成未配置。
+ipcMain.handle('orchdesk:ollama-probe', async () => {
+  try {
+    const r = await listAvailableModels({ type: 'ollama', baseUrl: 'http://127.0.0.1:11434' });
+    if (r && r.ok) return { ok: true as const, models: (r.models || []).map((m) => m.id) };
+    return { ok: false as const, models: [] as string[], reason: (r && r.reason) || '未探测到本机 Ollama' };
+  } catch (err) {
+    return { ok: false as const, models: [] as string[], reason: (err as Error).message };
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 授权桥（T-P3-2 + BUG-014 接线）：authz 插件由 dsh-runtime 真实装载后，
 // 经 ctx.get('authz') 取得 AuthzService。主进程把 GUI 应答回调注入该服务：
@@ -756,7 +792,8 @@ let authzService: AuthzServiceLike | null = null;
  */
 async function bootRuntime(): Promise<void> {
   try {
-    const runtime = await startRuntime();
+    // 插件审计出口：Cordis logger → 应用文件日志（无 exporter 时只进缓冲，查不到）。
+    const runtime = await startRuntime({ log: (level, scope, msg) => log(level as 'INFO' | 'WARN' | 'ERROR', scope, msg) });
 
     // 1) 授权服务
     const authz = getService<AuthzServiceLike>('authz');
