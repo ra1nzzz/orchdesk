@@ -44,21 +44,21 @@ export const AUTHZ_MODES: readonly AuthzModeSpec[] = [
     label: '默认安全',
     sandboxMode: 'workspace-write',
     approvalPolicy: 'ask',
-    blurb: '工作区可写；L3/L4 操作弹窗确认（ask）。平衡日常使用与安全。',
+    blurb: '意图门仅拦截「不可逆 + 系统/外部」真危险模式，提到命令词不再误伤；L3/L4 操作弹窗确认（ask）。',
   },
   {
     id: 'trusted',
     label: '信任模式',
     sandboxMode: 'workspace-write',
     approvalPolicy: 'ask',
-    blurb: '同默认沙箱，但放宽命令/网络白名单（仍受 SandboxMode 约束）。高危操作仍弹窗。',
+    blurb: '意图门退为纯审计（prompt 级不拦截）；网络白名单自动合并开发常用域名（github/npm/pypi/models.dev 等，可增删）。L3/L4 与补偿层仍生效。',
   },
   {
     id: 'paranoid',
     label: '偏执模式',
     sandboxMode: 'read-only',
     approvalPolicy: 'never',
-    blurb: '只读沙箱 + 任何 ask 自动拒绝（never）。最严；不可逆/越界操作一律不开门。',
+    blurb: '只读沙箱 + 任何 ask 自动拒绝（never）+ 意图门无本地模型时保守 BLOCK。最严；不可逆/越界操作一律不开门。',
   },
 ] as const;
 
@@ -329,14 +329,21 @@ export function apply(ctx: Context, config: AuthzConfig): void {
   const sandboxPolicy = (ctx as unknown as { sandboxPolicy?: {
     resolve(req?: { session?: { id: string } }): { mode: string };
     setSandboxMode(session: { id: string }, mode: string): void;
+    getAuthMode?(): string;
+    setAuthMode?(mode: string): void;
   } }).sandboxPolicy;
   const approval = (ctx as unknown as { approval?: {
     setPolicy(agent: unknown, policy: 'ask' | 'never'): void;
   } }).approval;
 
   async function getMode(sessionId?: string): Promise<AuthzMode> {
-    // 解析当前生效的 SandboxMode → 反查 AuthzMode（default/trusted 同映射 workspace-write+ask，
-    // 视作 default；paranoid 映射 read-only+never）。失败/不可用 → default（保守，不误报 paranoid）。
+    // C1：mode id 经 sandboxPolicy.getAuthMode 持久化读取（default/trusted 在
+    // (sandboxMode, approvalPolicy) 上同参，历史反推法永远分不出两者——「信任模式」
+    // 曾是空操作）。老宿主无 getAuthMode（verify 桩/旧注入）→ 回落反推法。
+    try {
+      const stored = sandboxPolicy?.getAuthMode?.();
+      if (stored === 'trusted' || stored === 'paranoid' || stored === 'default') return stored;
+    } catch { /* 回落反推 */ }
     try {
       const resolved = sandboxPolicy?.resolve(sessionId ? { session: { id: sessionId } } : {});
       const mode = resolved?.mode;
@@ -360,12 +367,17 @@ export function apply(ctx: Context, config: AuthzConfig): void {
       pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId, note: `持久化失败: ${(err as Error).message}` });
       return { ok: false, reason: `沙箱模式持久化失败：${(err as Error).message}` };
     }
-    // 2) approval/policy：paranoid 对应 'never'（逐项确认），其余为 'ask'。
+    // 2) C1：风控档位 id 持久化（重启后仍分辨 default/trusted/paranoid；
+    //    老宿主无 setAuthMode 时静默跳过——档位功能不可用但沙箱切换仍生效）。
+    try {
+      sandboxPolicy.setAuthMode?.(mode);
+    } catch { /* 档位持久化失败不阻断沙箱切换，已落审计 */ }
+    // 3) approval/policy：paranoid 对应 'never'（逐项确认），其余为 'ask'。
     try {
       approval?.setPolicy(undefined, spec.approvalPolicy);
     } catch { /* 策略同步失败不阻断模式切换，已落审计 */ }
 
-    pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId });
+    pushAudit({ kind: 'sandbox-mode', ts: Date.now(), mode: spec.sandboxMode, policy: spec.approvalPolicy, sessionId, note: `authMode=${mode}` });
     return { ok: true };
   }
 

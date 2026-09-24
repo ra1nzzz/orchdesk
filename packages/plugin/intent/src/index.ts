@@ -10,9 +10,11 @@
 // - F1–F4 Funnel：廉价、常驻的规则风险漏斗（表层扫描 / 意图分类 / 爆炸半径 / 可逆性）。
 // - M1–M3：M1 本地模型（qwen3:14b / Ollama）风险初筛；M2 结构化解析模型输出；
 //   M3 确定性编译层——把模型裁决编译成「可验证动作描述」，**绝不直接执行 LLM 输出**（ADR-0003）。
-// - 4-gate（fail-closed）：JSON 解析 / Schema / Stage allowlist / 参数范围；任一失败一律 BLOCK。
+// - 4-gate：JSON 解析 / Schema / Stage allowlist / 参数范围。A1（风控简化）后门失败
+//   一律降级 CONFIRM（prompt 级只标记不枪毙）；BLOCK 仅保留给漏斗判定的真危险模式
+//   （不可逆 + 系统/外部半径）。强制点在下游 authz L3/L4 + 补偿层 + 沙箱。
 // - 决策：ACT 放行 / CONFIRM 软信号（放行但标记，真实交互确认在下游 approval seam，
-//   即 T-P3-2）/ BLOCK 硬拒绝（入审计日志）。
+//   即 T-P3-2）/ BLOCK 硬拒绝（仅真危险模式，入审计日志）。
 //
 // 注意：本地模型（Ollama）在本机不可用，属运行时 seam。模型不可用时跳过 M1–M3，
 // 仅用 Funnel + defaultFallback（保守 CONFIRM，不静默放行）。所有注册走 ctx.on，
@@ -51,7 +53,7 @@ export interface IntentConfig {
   ollamaBaseUrl: string;
   /** 是否将 BLOCK/CONFIRM 决策写入审计日志。 */
   auditLog: boolean;
-  /** Stage 白名单；编译出的动作阶段若不在此列表一律 BLOCK（fail-closed）。 */
+  /** Stage 白名单；编译出的动作阶段若不在此列表 → CONFIRM 需确认（A1 起不再 BLOCK）。 */
   allowedStages: Stage[];
   /** 外发域名白名单；network-send 的目标域名不在列表一律 BLOCK。 */
   externalAllowlist: string[];
@@ -307,26 +309,38 @@ interface IntentResult {
 function deriveDecision(funnel: FunnelResult, gates: GateResults, config: IntentConfig, modelUsed: boolean): IntentResult {
   const action = compileAction(funnel.f2.stage, '', funnel.f4.reversible, {});
   const destructive = funnel.f4.reversible === 'irreversible' && (funnel.f3.radius === 'system' || funnel.f3.radius === 'external');
-  // fail-closed：任一硬门失败一律 BLOCK
-  const failedGate = (['g1', 'g2', 'g3', 'g4'] as const).find((k) => gates[k].pass === false);
-  if (failedGate) {
+  // 1) 唯一保留的 prompt 级硬拦截：漏斗判定的真危险模式（不可逆 + 系统/外部半径，
+  //    如「删除所有文件」「格式化磁盘」）。必须先于门失败判定——否则这类 prompt
+  //    会因 stage 不在 allowlist 从门失败分支漏成 CONFIRM。
+  if (funnel.score >= config.riskThreshold && destructive) {
     return {
       decision: 'BLOCK',
       modelUsed,
       funnel,
       gates,
       action,
-      reason: `gate ${failedGate} failed (${gates[failedGate].detail})`,
+      reason: 'irreversible system/external intent',
     };
   }
-  // 高风险：不可逆 + 系统/外部级 → Funnel 直接拦截；否则 CONFIRM
+  // 2) A1（风控简化）：门失败从 BLOCK 降级 CONFIRM。prompt 级只标记不枪毙——
+  //    「提到命令/域名/密钥」≠「真要执行」；强制点在下游 authz L3/L4 弹窗、
+  //    补偿层二次确认与沙箱。allowedStages 语义随之变为「名单外需确认」。
+  const failedGate = (['g1', 'g2', 'g3', 'g4'] as const).find((k) => gates[k].pass === false);
+  if (failedGate) {
+    return {
+      decision: 'CONFIRM',
+      modelUsed,
+      funnel,
+      gates,
+      action,
+      reason: `gate ${failedGate} failed (${gates[failedGate].detail})，降级确认：执行层仍按 L3/L4 授权`,
+    };
+  }
+  // 3) 高风险非 destructive：CONFIRM（软信号，真实交互确认在下游 approval seam）
   if (funnel.score >= config.riskThreshold) {
-    if (destructive) {
-      return { decision: 'BLOCK', modelUsed, funnel, gates, action, reason: 'irreversible system/external intent' };
-    }
     return { decision: 'CONFIRM', modelUsed, funnel, gates, action, reason: `funnel score ${funnel.score.toFixed(2)} >= threshold` };
   }
-  // 低风险：模型可用则 ACT；模型不可用走保守回退（不静默放行）
+  // 4) 低风险：模型可用则 ACT；模型不可用走保守回退（不静默放行）
   if (!modelUsed) {
     return {
       decision: config.defaultFallback,
@@ -344,6 +358,9 @@ function deriveDecision(funnel: FunnelResult, gates: GateResults, config: Intent
 
 function audit(ctx: Context, result: IntentResult, config: IntentConfig): void {
   if (!config.auditLog) return;
+  // 命名 logger（Cordis：ctx.logger(name) → 带 name 的 Logger；无 exporter 时消息
+  // 只进缓冲——runtime 启动时注册的 exporter 负责转发到应用文件日志）。
+  const logger = ctx.logger?.('orchdesk-intent');
   const summary = {
     plugin: 'orchdesk-intent',
     decision: result.decision,
@@ -354,10 +371,12 @@ function audit(ctx: Context, result: IntentResult, config: IntentConfig): void {
     action: result.action,
   };
   const line = `[orchdesk-intent] ${result.decision} (${result.reason}) gates=${JSON.stringify(result.gates)}`;
-  if (result.decision === 'BLOCK') ctx.logger?.warn?.(line);
-  else ctx.logger?.info?.(line);
+  // 级别注意：Cordis 默认级别下 warn/debug 被 exporter 过滤（enum WARN=2 > INFO=1），
+  // 只有 info/error 可见——BLOCK 决策行走 error（安全事件语义 + 保证可见）。
+  if (result.decision === 'BLOCK') logger?.error?.(line);
+  else logger?.info?.(line);
   // 结构化可查询审计（供将来 bridge / 设置页「审计日志」入口消费）
-  ctx.logger?.info?.(`[orchdesk-intent:audit] ${JSON.stringify(summary)}`);
+  logger?.info?.(`[orchdesk-intent:audit] ${JSON.stringify(summary)}`);
 }
 
 // ───────────────────────────── 插件入口 ─────────────────────────────
@@ -402,10 +421,25 @@ export function apply(ctx: Context, config: IntentConfig): void {
       compiled = compileAction(funnelRes.f2.stage, '', funnelRes.f4.reversible, {});
     }
 
-    const gates = runGates(compiled, config, modelUsed);
-    const result = deriveDecision(funnelRes, gates, config, modelUsed);
+    // C1 风控档位：读 authz 当前 mode（不可知时按 default 的 A1 形态执行，不误升信任）。
+    let authMode = 'default';
+    try {
+      const authz = (ctx as unknown as { get?(k: string): { getMode?(sid?: string): Promise<string> } | undefined }).get?.('authz');
+      if (authz && typeof authz.getMode === 'function') {
+        authMode = (await authz.getMode(payload.agent?.session?.id)) || 'default';
+      }
+    } catch { /* 档位服务不可用 → default */ }
+    // paranoid：无本地模型时的保守回退从 CONFIRM 升为 BLOCK（其余决策不变）。
+    const effectiveConfig = authMode === 'paranoid' ? { ...config, defaultFallback: 'BLOCK' as const } : config;
+
+    const gates = runGates(compiled, effectiveConfig, modelUsed);
+    const result = deriveDecision(funnelRes, gates, effectiveConfig, modelUsed);
     audit(ctx, result, config);
 
+    // trusted → 纯审计：BLOCK 也退化为放行（执行层 L3/L4 + 补偿层仍强制）。
+    if (authMode === 'trusted') {
+      return { kind: 'enter', messages: base.kind === 'enter' ? base.messages : payload.messages };
+    }
     if (result.decision === 'BLOCK') {
       // 硬拒绝（ADR-0003：reject 也关闭持久化轮次并入日志，必经性保证）
       return { kind: 'reject' };

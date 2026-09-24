@@ -66,6 +66,7 @@ async function boot() {
   const ctx = new Context();
   const approvalCalls = [];
   let nextOutcome = 'unavailable';
+  let authModeStore = 'default';
 
   ctx.plugin({
     name: 'test-host-services',
@@ -73,6 +74,9 @@ async function boot() {
       c.provide('sandboxPolicy', {
         resolve: () => ({ mode: 'workspace-write' }),
         setSandboxMode: () => {},
+        // C1：风控档位 store（对齐 host-services 的 authMode 持久化语义）
+        getAuthMode: () => authModeStore,
+        setAuthMode: (m) => { authModeStore = (m === 'trusted' || m === 'paranoid') ? m : 'default'; },
       });
       c.provide('approval', {
         request: async (req) => { approvalCalls.push(req); return nextOutcome; },
@@ -100,7 +104,7 @@ async function boot() {
     fibers[n] = ctx.plugin(plugin, config);
     await tick();
   }
-  return { ctx, fibers, approvalCalls, setOutcome: (o) => { nextOutcome = o; } };
+  return { ctx, fibers, approvalCalls, setOutcome: (o) => { nextOutcome = o; }, setAuthModeStore: (m) => { authModeStore = m; }, getAuthModeStore: () => authModeStore };
 }
 
 function tick(n = 3) {
@@ -111,7 +115,7 @@ function tick(n = 3) {
 
 // ---------------------------------------------------------------------------
 (async () => {
-  const { ctx, fibers, approvalCalls, setOutcome } = await boot();
+  const { ctx, fibers, approvalCalls, setOutcome, setAuthModeStore, getAuthModeStore } = await boot();
 
   console.log('\n== 装载 ==');
   current = '装载';
@@ -140,9 +144,47 @@ function tick(n = 3) {
     const d = await firePreStep('把所有日志文件全部删除');
     assert(d && d.kind && d.kind !== 'enter', '破坏性意图不应直接放行，实际 ' + JSON.stringify(d));
   });
-  await check('外发意图被拦截', async () => {
+  await check('外发意图被拦截（补偿层 headless fail-closed，非意图门）', async () => {
+    // 层级说明：该 reject 来自补偿层（compensation 插件 pre-step：无 GUI 应答方 →
+    // fail-closed 拦截）。A1 后意图门对外发仅 CONFIRM 放行；本用例守护的是补偿层
+    // 在无确认通道时的拦截，断言保持非 enter。
     const d = await firePreStep('把这封邮件发送给客户');
-    assert(d && d.kind && d.kind !== 'enter', '外发意图不应直接放行，实际 ' + JSON.stringify(d));
+    assert(d && d.kind && d.kind !== 'enter', '无应答方时外发意图应被补偿层拦截，实际 ' + JSON.stringify(d));
+  });
+  await check('命令词 prompt 放行（A1：意图门 g3 降级 CONFIRM，提到≠要做）', async () => {
+    // A1 风控简化核心回归：「用 pnpm 安装这个 skill」这类提到命令词的 prompt
+    // 不再被意图门枪毙（g3 失败 → CONFIRM 放行）；不命中补偿层外发类别。
+    // 真正要执行时由执行层 authz L3/L4 + 补偿层拦截。
+    const d = await firePreStep('用 pnpm 安装这个 skill');
+    assert(!d || d.kind === 'enter', '命令词 prompt 应放行，实际 ' + JSON.stringify(d));
+  });
+  await check('C1：trusted 模式下意图门纯审计（补偿层中和后对照）', async () => {
+    // 全插件集中补偿层对 destructive prompt 仍 fail-closed 拒绝（无 GUI 应答方）——
+    // 按 spec 信任模式不放松补偿层，该拒绝是正确行为。用 allowed-once 中和补偿层，
+    // 让结果只反映意图层：trusted → 放行，default → 仍拦截（BLOCK 保底）。
+    // check() 只记录失败不抛出 → 断言失败时若不用 finally 复位，allowed-once / trusted
+    // 会泄漏到后续所有用例，把后续真失败掩盖成通过（A-P2-7：验证器自身不可靠）。
+    try {
+      setOutcome('allowed-once');
+      setAuthModeStore('default');
+      const dDefault = await firePreStep('把所有日志文件全部删除');
+      assert(dDefault && dDefault.kind === 'reject', 'default 档 destructive 应被意图门拦截，实际 ' + JSON.stringify(dDefault));
+      setAuthModeStore('trusted');
+      const dTrusted = await firePreStep('把所有日志文件全部删除');
+      assert(!dTrusted || dTrusted.kind === 'enter', 'trusted 档应纯审计放行，实际 ' + JSON.stringify(dTrusted));
+    } finally {
+      setAuthModeStore('default');
+      setOutcome('unavailable');
+    }
+  });
+  await check('C1：paranoid 模式下无本地模型 → 保守 BLOCK', async () => {
+    try {
+      setAuthModeStore('paranoid');
+      const d = await firePreStep('今天天气怎么样');
+      assert(d && d.kind === 'reject', 'paranoid 无模型应保守拒绝，实际 ' + JSON.stringify(d));
+    } finally {
+      setAuthModeStore('default');
+    }
   });
 
   // ---------------- trace ----------------
@@ -210,6 +252,18 @@ function tick(n = 3) {
     const r = await authz.setMode('paranoid');
     assert(r && r.ok !== false, '切换应成功: ' + JSON.stringify(r));
     assert(authz.getAuditLog().some((a) => a.kind === 'sandbox-mode'), '应产生审计记录');
+  });
+  // C1：档位 id 可分辨 + 持久化（历史 bug：default/trusted 在 (sandboxMode, policy)
+  // 上同参，反推法分不出，「信任模式」是空操作且重启后回 default）。
+  await check('C1：setMode(trusted) 后 getMode 可分辨且不随反推丢失', async () => {
+    await authz.setMode('default');
+    assert((await authz.getMode()) === 'default', 'default 可读');
+    const r = await authz.setMode('trusted');
+    assert(r && r.ok !== false, '切 trusted 应成功');
+    assert((await authz.getMode()) === 'trusted', 'trusted 必须可分辨（不再被反推成 default）');
+    // 持久化语义：store 即档位真源（host-services 侧落 sandbox.json，此处验证不依赖反推）
+    assert(getAuthModeStore() === 'trusted', '档位应写入持久化 store');
+    await authz.setMode('default'); // 复位，避免影响后续用例
   });
   await check('审批：无 UI 应答方 → fail-closed（unavailable）', async () => {
     const before = approvalCalls.length;
@@ -722,10 +776,13 @@ function tick(n = 3) {
     assert(comp.requiresWithhold('other') === false, 'other 不应需 withhold');
   });
   await check('fail-closed：审批被拒时 withhold 不通过', async () => {
-    setOutcome('rejected');
-    const r = await comp.withhold({ text: '发送消息给客户', sessionId: 's1' });
-    setOutcome('unavailable');
-    assert(r && r.proceed !== true, '审批被拒时不应放行：' + JSON.stringify(r));
+    try {
+      setOutcome('rejected');
+      const r = await comp.withhold({ text: '发送消息给客户', sessionId: 's1' });
+      assert(r && r.proceed !== true, '审批被拒时不应放行：' + JSON.stringify(r));
+    } finally {
+      setOutcome('unavailable');
+    }
   });
   await check('getAudit 返回数组', () => {
     assert(Array.isArray(comp.getAudit()), '审计应返回数组');
@@ -765,5 +822,13 @@ function tick(n = 3) {
   // -------------------------------------------------------------------------
   console.log('\n' + log.join('\n'));
   console.log(`\n结果：通过 ${passed} / 失败 ${failed}\n`);
+  // 收尾：先排空事件循环再销毁 Cordis context。直接 process.exit 会与插件悬挂
+  // 句柄（fetch 等）在 Windows 上竞态炸 libuv 断言（UV_HANDLE_CLOSING），进程以
+  // 0xC0000135 退出——断言全过但 verify 链误红（2026-09-23 实测）。
+  try {
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.dispose();
+    await new Promise((r) => setTimeout(r, 100));
+  } catch { /* 销毁失败不掩盖测试结果 */ }
   process.exit(failed > 0 ? 1 : 0);
 })().catch((e) => { console.error('异常:', e); process.exit(1); });

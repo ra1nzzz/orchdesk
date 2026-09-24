@@ -36,6 +36,9 @@ export interface SandboxPolicyLike {
   setNetworkAllow?(list: string[]): boolean;
   /** PRD FR-8：域名准入判定（供 web_fetch 等外发工具调用）。 */
   isDomainAllowed?(url: string): boolean;
+  /** C1：风控档位（authz 插件经此持久化 mode id，重启后仍可分辨）。 */
+  getAuthMode?(): AuthzModeId;
+  setAuthMode?(mode: AuthzModeId): void;
 }
 
 interface SandboxState {
@@ -43,7 +46,28 @@ interface SandboxState {
   sessionModes: Record<string, SandboxMode>;
   /** 网络域名白名单：'*' 表示不限制；支持后缀匹配（如 'github.com'）。 */
   networkAllow: string[];
+  /** 风控档位（C1：三模式总开关）。default=修好后的意图门形态；trusted=意图门纯审计
+      + 网络白名单合并预置种子；paranoid=最严（意图门无模型回退 BLOCK）。 */
+  authMode: AuthzModeId;
   audit: Array<{ ts: number; kind: 'sandbox-mode'; mode: string; sessionId?: string }>;
+}
+
+export type AuthzModeId = 'default' | 'trusted' | 'paranoid';
+
+/** 信任模式预置的开发常用域名（C1）：与用户自填合并（并集），不替代、可增删。
+ * 不做「一键全放行」——种子是常用开发域名，不是 '*';
+ * SSRF 防护（BLOCKED_HOSTNAME_*）独立生效，种子不削弱它。 */
+export const TRUSTED_NETWORK_SEED: readonly string[] = [
+  'github.com', 'raw.githubusercontent.com', 'registry.npmjs.org',
+  'pypi.org', 'files.pythonhosted.org', 'models.dev',
+  'api.deepseek.com', 'api.moonshot.cn', 'open.bigmodel.cn', 'dashscope.aliyuncs.com',
+];
+
+/** 有效白名单 = 用户自填 ∪（trusted 模式时的种子）。存储态永远是用户自填。 */
+function effectiveNetworkAllow(state: SandboxState): string[] {
+  const own = normalizeNetworkAllow(state.networkAllow);
+  if (state.authMode !== 'trusted') return own;
+  return normalizeNetworkAllow([...own, ...TRUSTED_NETWORK_SEED]);
 }
 
 function sandboxFile(): string {
@@ -54,7 +78,7 @@ function sandboxFile(): string {
 }
 
 function loadSandbox(): SandboxState {
-  const base: SandboxState = { mode: 'workspace-write', sessionModes: {}, networkAllow: [], audit: [] };
+  const base: SandboxState = { mode: 'workspace-write', sessionModes: {}, networkAllow: [], authMode: 'default', audit: [] };
   try {
     const f = sandboxFile();
     if (!fs.existsSync(f)) return base;
@@ -63,6 +87,7 @@ function loadSandbox(): SandboxState {
       mode: SANDBOX_MODES.includes(raw.mode as SandboxMode) ? (raw.mode as SandboxMode) : 'workspace-write',
       sessionModes: raw.sessionModes && typeof raw.sessionModes === 'object' ? raw.sessionModes : {},
       networkAllow: normalizeNetworkAllow(raw.networkAllow),
+      authMode: raw.authMode === 'trusted' || raw.authMode === 'paranoid' ? raw.authMode : 'default',
       audit: Array.isArray(raw.audit) ? raw.audit.slice(-200) : [],
     };
   } catch {
@@ -268,7 +293,7 @@ export const hostServices = {
     let agentRunner: AgentRunner | null = null;
 
     /** 已创建的 SubAgent：sessionId → { fiber, handle } */
-    const agents = new Map<string, { fiber: { state: number; dispose: () => Promise<void> } }>();
+    const agents = new Map<string, { fiber: { state: number; dispose?: () => Promise<void> | void } }>();
     let agentSeq = 0;
 
     // ---- sandboxPolicy ----
@@ -289,8 +314,10 @@ export const hostServices = {
       // PRD FR-8：网络请求域名白名单（设置页可配；空 = 全拒 fail-closed）。
       // setNetworkAllow 返回落盘结果——收紧白名单是安全相关变更，写盘失败必须让
       // 调用方（IPC）感知，否则「删了域名但没落盘」= 内存收紧/磁盘仍旧宽名单。
+      // C1：getNetworkAllow 返回有效名单（trusted 模式合并预置种子）；存储与设置
+      // 始终是用户自填那份，种子只在生效层合并（UI 与执行层同一口径）。
       getNetworkAllow() {
-        return normalizeNetworkAllow(sandbox.networkAllow);
+        return effectiveNetworkAllow(sandbox);
       },
       setNetworkAllow(list) {
         sandbox.networkAllow = normalizeNetworkAllow(list);
@@ -299,7 +326,17 @@ export const hostServices = {
       // 域名判定读闭包内内存态（单源）：历史实现走 loadSandbox() 每次全量读盘，
       // web_fetch 重定向循环里 per-hop 调用把同步 IO 放大了 6 倍，且与内存态双源。
       isDomainAllowed(url) {
-        return checkDomainAllowed(url, sandbox.networkAllow);
+        return checkDomainAllowed(url, effectiveNetworkAllow(sandbox));
+      },
+      // C1 风控档位（三模式总开关）：authz 插件经此持久化 mode id——
+      // 历史实现只存 (sandboxMode, approvalPolicy)，default 与 trusted 同参、
+      // 重启后被解析回 default，「信任模式」实际上是空操作。
+      getAuthMode() {
+        return sandbox.authMode;
+      },
+      setAuthMode(mode) {
+        sandbox.authMode = mode === 'trusted' || mode === 'paranoid' ? mode : 'default';
+        saveSandbox(sandbox);
       },
     };
 
@@ -373,7 +410,9 @@ export const hostServices = {
         const handle: AgentHandleLike = {
           agent: { id: sessionId, meta: opts?.meta },
           async dispose() {
-            await Promise.resolve(fiber.dispose());
+            // cordis 类型 shim 中 Fiber.dispose 为可选：缺失时视为无逆回滚需要，
+            // 本地 agents 表仍要清理（与 apply() 返回的 disposer 语义一致）。
+            if (fiber.dispose) await Promise.resolve(fiber.dispose());
             agents.delete(sessionId);
           },
         };
@@ -406,7 +445,7 @@ export const hostServices = {
       if (currentHandle && currentHandle.approval === approval) currentHandle = null;
       uiAnswerer = null;
       agentRunner = null;
-      for (const [, rec] of agents) void Promise.resolve(rec.fiber.dispose()).catch(() => undefined);
+      for (const [, rec] of agents) { if (rec.fiber.dispose) void Promise.resolve(rec.fiber.dispose()).catch(() => undefined); }
       agents.clear();
     }, 'orchdesk-host-services.lifecycle()');
   },

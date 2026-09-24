@@ -76,8 +76,9 @@ CONFIRM 已是纯放行（不篡改 prompt、不弹窗、不阻断），BLOCK �
 ### 5.1 实现要点
 
 - 意图门档位：不新增独立配置项。intent 插件订阅 authz 的 mode 事件（与 `setMode` 同一真源）推导档位——默认安全/偏执 = enforce，信任 = audit-only（pre-step 只跑漏斗 + 审计，永不返回 reject）；偏执模式额外将 `defaultFallback` 置为 `'BLOCK'`
-- 模式切换走既有 `sandbox/mode` + `approval/policy` 事件持久化通道（authz 插件 `setMode` 已实现持久化与审计），intent 插件订阅同一 mode 事件对齐档位——单一 mode 真源，不引入第二套开关
-- 设置页授权模式卡片文案同步三档风控语义（当前 blurb 只描述 sandbox，需补意图门/白名单维度）
+- **mode id 持久化（实施中发现并解决）**：历史实现只存 `(sandboxMode, approvalPolicy)`，而 default 与 trusted 在这两个值上同参——反推法永远分不出两者，“信任模式”实际是空操作且重启后回 default。现改为在 sandbox 磁盘态（`host-services.ts` 的 `SandboxState`）新增 `authMode` 字段，`sandboxPolicy` 服务暴露 `getAuthMode/setAuthMode`；authz 的 `getMode` 优先读存储 id，老宿主无该方法时回落反推法（兼容 verify 桩）
+- 网络种子：`effectiveNetworkAllow(state)` = 用户自填 ∪（trusted 时的 `TRUSTED_NETWORK_SEED` 10 域名）；`getNetworkAllow`/`isDomainAllowed` 都走生效口径（UI 与执行层同一视图），存储态永远是用户自填；SSRF 防护独立生效不受种子影响
+- 模式切换走既有 `sandbox/mode` + `approval/policy` 事件持久化通道；设置页授权模式卡片文案同步三档风控语义（当前 blurb 只描述 sandbox，需补意图门/白名单维度）
 
 ### 5.2 预置开发常用域名（信任模式白名单种子）
 
@@ -102,15 +103,33 @@ CONFIRM 已是纯放行（不篡改 prompt、不弹窗、不阻断），BLOCK �
 
 ## 7. 测试策略
 
-- **新增 `intent-gate-verify.cjs`（或并入 verify-plugins）覆盖决策矩阵**（当前 intent 零门测试）：
-  - g3 失败（exec-command 不在 allowlist）→ CONFIRM 且放行（不再 reject）
-  - g4 失败（network-send 主机不在 externalAllowlist / 系统路径）→ CONFIRM
-  - destructive（删除所有文件类，score ≥ 0.7 + 不可逆 + system 半径）→ BLOCK
-  - 低分 query → ACT；无本地模型 → defaultFallback=CONFIRM
-  - 审计记录每种决策
-- 信任模式：pre-step 对 destructive 输入也只审计不 reject
-- e2e 增组：默认模式下"用 pnpm 安装这个 skill"类 prompt 不再被拦截，回合正常到达模型桩并返回
-- 既有断言不受影响（verify-plugins 的 intent 段无 BLOCK 断言；agent-loop-verify 的 intent 字段为桩返回值）
+- **新建 `scripts/intent-gate-verify.cjs` 覆盖决策矩阵**（当前 intent 零门测试；真实 Cordis waterfall + 真实插件，接 verify 链）：
+  - g3 失败（"用 pnpm 安装这个 skill"）→ CONFIRM 放行（A1 核心回归）
+  - g4 失败（外发主机不在 allowlist）→ CONFIRM 放行
+  - destructive（"把所有日志文件全部删除"）→ BLOCK；destructive 且门失败 → 仍 BLOCK（顺序防线）
+  - 低风险 query → enter；无本地模型 → defaultFallback=CONFIRM 放行
+  - C1 档位：trusted → destructive 纯审计放行；paranoid → 无模型回退 BLOCK；档位不可知 → default 形态
+  - 审计出口（修复 1）：root ctx 注册捕获型 exporter，断言 BLOCK 决策行（error 级）+ 结构化审计行到达 sink
+- **`agent-loop-verify.cjs` C0 段：意图门端到端**（修复 2；真实 IPC handler + 真实 9 插件 runtime，模型走 fetch 桩——UI e2e 的桥桩在渲染层即返回，到不了主进程，门在 UI 层零覆盖）：
+  - "用 pnpm 安装这个 skill" → 模型被调用 1 次且拿到回复
+  - "把所有日志文件全部删除" → 模型零调用 + 回复含「意图网关拦截」
+  - 前置就绪等待（`getRuntime()` 非空；runtime 未就绪时 firePreStep 返回 null = 门静默放行）
+- **`verify-plugins.mjs` intent 段同步**：新增"命令词 prompt 放行"用例；原"外发意图被拦截"用例保留但更正注释——该 reject 实际来自补偿层 headless fail-closed（无 GUI 应答方），非意图门
+- **`dsh-runtime-verify.cjs`**：authMode 可分辨 + trusted 种子合并/default 不合并
+
+## 7.1 审计出口（修复 1：从「不可见」到落文件日志）
+
+此前后续核查更正一个误判：审计路径**不是死代码**——探针证实 `ctx.logger?.info?.()` 在插件 fiber 上有效、消息进入 logger buffer；真正缺口是 **Cordis 没有注册 exporter**，消息只进缓冲、任何地方不可见（应用日志亦无）。另发现 Cordis 默认级别会**过滤 warn/debug**（enum WARN=2 > INFO=1，只有 info/error 可见）。修复：
+
+- intent 审计改命名 logger `ctx.logger('orchdesk-intent')`，BLOCK 决策行走 **error** 级（安全事件语义 + 保证可见）
+- `dsh-runtime.ts` `buildRuntime` 注册 exporter，把插件日志转发到应用文件日志（`startRuntime({ log })`，main.ts 传入）；verify 桩可不传
+- `intent-gate-verify.cjs` 以捕获型 exporter 直接验证该链路
+
+## 7.2 实施中顺带修复的三个问题
+
+1. **`firePreStep` 不下穿 abort signal**（预存潜在 bug）：意图门本地模型探测等 pre-step 长耗时 fetch 不可被 abort——端点挂起会楔死整个回合（abort 也救不回）。现 `firePreStep` 接受并下穿 `signal`（补偿层的审批请求也因此可中止）
+2. **agent-loop-verify 的 fetch 桩污染**：意图门探测请求被模型网关桩记录并消费 scenario 应答，runtime 就绪时序不定必炸——桩现对 `/api/generate` 探测请求不记录、不消费场景
+3. **memo 测试意外通过**：原计数式桩让 attempts 第二档（tools 无 tool_choice）成功——提供方支持 tools 只是不支持 tool_choice，**不写 memo 是正确行为**，旧测试实际断言在探测请求上（碰巧无 tools）。桩改 body 感知（任何带 tools 的请求都拒），memo 测试第一次真正验证 intended 行为
 
 ## 8. 风险与回滚
 
