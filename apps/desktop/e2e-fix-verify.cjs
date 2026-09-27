@@ -612,9 +612,8 @@ async function run() {
   };
 
   const ensureCtxOpen = async () => {
-    const tab = page.locator('[data-action="ctx-tab"]').first();
-    if (await tab.count() === 0) return;
-    if (await tab.isVisible()) return;
+    const grid = page.locator('#appGrid');
+    if ((await grid.getAttribute('class') || '').includes('has-ctx')) return;
     const tg = page.locator('[data-action="toggle-ctx"]').first();
     if (await tg.count() > 0) { await tg.click(); await page.waitForTimeout(300); }
   };
@@ -651,33 +650,16 @@ async function run() {
   const themeInNav = page.locator('[data-action="toggle-theme"]');
   await assert(await themeInNav.count() > 0, '主题切换仍有入口（左下角导航底部）');
 
-  // P1.2 轻模式导航收拢：☰ 入口可见、rail 隐藏、抽屉可唤出且能导航
-  const navDrawerBtn = page.locator('#navDrawerBtn');
-  await assert(await navDrawerBtn.count() > 0 && await navDrawerBtn.isVisible(), '轻模式标题栏 ☰ 导航入口可见');
-  await assert(!(await page.locator('#rail').first().isVisible().catch(() => false)), '轻模式 rail 已隐藏');
-  await navDrawerBtn.click();
-  await page.waitForTimeout(250);
-  await assert(await page.locator('#navDrawer').count() > 0, '☰ 点击后导航抽屉展开');
-  await assert(await page.locator('#navDrawer [data-action="nav"]').count() === 3, '抽屉含 会话/插件/设置 三项');
-  await page.keyboard.press('Escape');
-  await page.waitForTimeout(150);
-  // A-P2-1 回归：抽屉内点「切换主题」（不关抽屉）后，外点仍必须能关掉抽屉。
-  // 旧实现用 {once:true} 挂外点监听，该次点击把监听消耗掉 → 永久失去外点关闭。
-  await navDrawerBtn.click();
-  await page.waitForTimeout(200);
-  await page.locator('#navDrawer [data-action="toggle-theme"]').first().click();
-  await page.waitForTimeout(150);
-  await assert(await page.locator('#navDrawer').count() > 0, '抽屉内切换主题后抽屉保持展开');
-  await page.locator('#navDrawer [data-action="toggle-theme"]').first().click();
-  await page.waitForTimeout(150);
-  await page.evaluate(() => document.body.click());
-  await page.waitForTimeout(200);
-  await assert(await page.locator('#navDrawer').count() === 0, '抽屉内操作后外点仍可关闭抽屉');
+  // 三入口轨常驻，不再用汉堡菜单替代。
+  await assert(await page.locator('#navDrawerBtn').count() === 0, '标题栏不再放汉堡菜单');
+  await assert(await page.locator('#rail').first().isVisible(), '三入口轨默认可见');
+  await assert(await page.locator('#rail [data-action="nav"]').count() === 3, '轨上有会话/插件/设置三项');
+  await assert(!(await page.locator('#appGrid').evaluate((el) => el.classList.contains('has-ctx'))), '右栏默认不占 300px');
 
   // 需求3：浏览器 / 终端 的文字按钮已从标题栏下移为状态栏右下角图标。
   await waitForVisible('#sbActions .sb-icon'); // 等 init 的 Promise.allSettled 建完图标区
   const sbIcons = page.locator('#sbActions .sb-icon');
-  await assert(await sbIcons.count() === 2, '状态栏右下角有浏览器 / 终端两个图标');
+  await assert(await sbIcons.count() === 3, '状态栏右下角有文件 / 浏览器 / 终端三个图标');
 
   // ================================================================
   // 测试组 2：主区渲染 — 欢迎页/新对话（home-screen）
@@ -697,12 +679,9 @@ async function run() {
   const homeSendBtn = page.locator('[data-action="home-send"]');
   await assert(await homeSendBtn.count() > 0, 'home-send 按钮存在');
 
-  // 下拉菜单：项目 + 任务模式
-  const projDropdown = page.locator('#projDropdown');
-  await assert(await projDropdown.count() > 0, '项目下拉菜单 #projDropdown 存在');
-
-  const taskModeItem = page.locator('[data-action="composer-proj-task"]');
-  await assert(await taskModeItem.count() > 0, '任务模式选项存在');
+  // 输入栏只留工作目录 / 授权 / 模型，不再用「选择项目或进入任务模式」占一行。
+  await assert(await page.locator('#projDropdown').count() === 0, '输入栏不再放项目下拉 #projDropdown');
+  await assert(await page.locator('[data-action="composer-proj-task"]').count() === 0, '输入栏不再放任务模式选项');
 
   // ================================================================
   // 测试组 3：home-send 发送消息（核心修复）
@@ -913,48 +892,14 @@ async function run() {
     await allSessItems.first().click();
     await page.waitForTimeout(400);
 
-    // P1.1 轻模式：右栏默认收起——进入会话后展开一次，恢复后续 ctx-tab 等
-    // 用例的面板可见前置条件（已展开则跳过，避免再点成收起）。
-    await ensureCtxOpen();
+    await assert(await page.locator('.ctx-tab').count() === 0, '检查器不再放产物/文件/能力页签');
+    await navTo('plugins');
+    await page.waitForTimeout(400);
+    const mcpHost = page.locator('#psec-mcp').locator('xpath=following-sibling::*[1]');
+    const mcpText = await mcpHost.innerText();
+    await assert(/已连接/.test(mcpText) && /连接失败/.test(mcpText), '插件页 MCP 显示真实连接态（实际 ' + JSON.stringify(mcpText.slice(0, 80)) + '）');
+    await assert(/已连接 1/.test(mcpText), '插件页 MCP 显示已连接计数');
 
-    // Verify right panel exists and has tabs
-    const ctxPanel = page.locator('.context');
-    await assert(await ctxPanel.count() > 0, '右侧面板 .context 存在 (count=' + await ctxPanel.count() + ')');
-
-    const ctxTabs = page.locator('.ctx-tab');
-    const tabCount = await ctxTabs.count();
-    await assert(tabCount >= 3, '右侧面板有 3 个 tab（count=' + tabCount + ')');
-
-    // Check tab labels (strip badge numbers for comparison)
-    const tabLabels = await ctxTabs.allTextContents();
-    const tabText = tabLabels.map(t => t.replace(/[\d]+/g, '').trim()).join(' ');
-    console.log('    Tab labels:', tabLabels.join(', '));
-    await assert(tabText.includes('待办'), 'Tab 有"待办"');
-    await assert(tabText.includes('产物'), 'Tab 有"产物"');
-    await assert(tabText.includes('文件'), 'Tab 有"文件"');
-    await assert(tabText.includes('能力'), 'Tab 有"能力"（原「技能与MCP」改名并扩为插件+技能+MCP）');
-
-    // Switch to 产物 tab and verify
-    // 需求3 之后 TAB 变成 4 个（插入「文件」）—— 用 data-id 定位而不是 nth 索引，
-    // 否则插入/重排 TAB 就会静默切错页。
-    await page.locator('[data-action="ctx-tab"][data-id="products"]').first().click();
-    await page.waitForTimeout(200);
-
-    // Switch to 能力 tab
-    await page.locator('[data-action="ctx-tab"][data-id="caps"]').first().click();
-    await page.waitForTimeout(200);
-    // MCP 真接入：两条真实 server（1 已连接 + 1 连接失败），不再用写死的插件名冒充连接。
-    const mcpDots = page.locator('.mcp-dot');
-    await assert(await mcpDots.count() === 2, 'MCP 有 2 条真实 server 指示器 (count=' + await mcpDots.count() + ')');
-    const mcpConnected = page.locator('.mcp-dot.connected');
-    await assert(await mcpConnected.count() === 1, 'MCP 有 1 条已连接 (count=' + await mcpConnected.count() + ')');
-    // 「能力」= 插件 + 技能 + MCP 三组，缺一组就是名不副实
-    const capTitles = await page.locator('.ctx-section-title').allTextContents();
-    const capText = capTitles.join(' | ');
-    await assert(/插件/.test(capText), '能力 TAB 有「插件」分组');
-    await assert(/技能/.test(capText), '能力 TAB 有「技能」分组');
-    await assert(/MCP/.test(capText), '能力 TAB 有「MCP 连接」分组');
-    await assert(/MCP 连接 · 1\/2/.test(capText), 'MCP 标题显示真实连接数 1/2');
   }
 
   // 验证 renderMsg 兼容两种消息格式（m.r/m.x 旧版 + m.role/m.text 新版）
@@ -1734,9 +1679,7 @@ async function run() {
     //    需求3 之后入口从标题栏按钮改为：右栏「文件」TAB → 头部「全屏」按钮。
     await ensureCtxOpen();
     const openFileFull = async () => {
-      await page.locator('[data-action="ctx-tab"][data-id="files"]').first().click();
-      await page.waitForTimeout(250);
-      await page.locator('[data-action="file-panel"]').first().click();
+      await page.locator('#fileBtn').first().click();
       await page.waitForTimeout(250);
     };
     await openFileFull();
@@ -1993,17 +1936,14 @@ async function run() {
 
   // ---- ④ 任务监控「能力」：插件状态按运行时真实装载标注 + 技能取磁盘真实扫描 ----
   try {
-    await ensureCtxOpen();
-    const skillTab = page.locator('.ctx-tab[data-action="ctx-tab"][data-id="caps"]');
-    await assert(await skillTab.count() > 0, '右侧面板有「能力」tab');
-    await skillTab.first().click();
+    await navTo('plugins');
     await page.waitForTimeout(350);
     const pluginStates = await page.evaluate(() => {
       const out = {};
-      document.querySelectorAll('.ctx-skill').forEach((row) => {
-        const nm = row.querySelector('.sk-name');
-        const st = row.querySelector('.sk-status');
-        if (nm && st) out[nm.textContent.trim()] = st.textContent.trim();
+      document.querySelectorAll('.plug[data-pid]').forEach((row) => {
+        const id = row.getAttribute('data-pid');
+        const st = row.querySelector('.ptitle .badge');
+        if (id && st) out[id] = st.textContent.trim();
       });
       return out;
     });
@@ -2012,8 +1952,8 @@ async function run() {
     await assert(pluginStates.trace === '已停用', `trace 主动停用（error 前缀「已停用」）→ 已停用而非异常（实际=${pluginStates.trace}）`);
     await assert(pluginStates.brain === '异常', `brain 装载失败（非停用前缀 error）→ 异常（实际=${pluginStates.brain}）`);
     // 技能分组：slug + 真实体积来自 listInstalledSkills（不是渲染层内存数组）
-    const capBody = await page.locator('.ctx-body').innerText();
-    await assert(/技能 · 使用中 2\/2/.test(capBody), `技能分组显示真实计数 2/2（实际=${capBody.split('\n').filter((l) => /技能/.test(l)).join(' / ')}）`);
+    const capBody = await page.locator('#main').innerText();
+    await assert(/已安装（2）/.test(capBody), `插件页已安装技能显示真实计数 2（实际=${capBody.split('\n').filter((l) => /已安装|技能/.test(l)).join(' / ')}）`);
     await assert(/20\.0KB/.test(capBody), '技能行显示磁盘真实体积（20480B → 20.0KB）');
     await assert(!/技能目录未接入/.test(capBody), '桥已接入时技能分组不显示「未接入」占位');
   } catch (e) {
@@ -2077,10 +2017,7 @@ async function run() {
     // 前一用例停在插件页（右栏不是会话的任务监控，没有 ctx-tab）→ 先回会话页
     await navTo('session');
     await page.waitForTimeout(500);
-    await ensureCtxOpen();
-    await page.locator('[data-action="ctx-tab"][data-id="files"]').first().click();
-    await page.waitForTimeout(250);
-    await page.locator('[data-action="file-panel"]').first().click();
+    await page.locator('#fileBtn').first().click();
     await page.waitForTimeout(350);
     const openState = await page.evaluate(() => {
       const r = document.querySelector('#fileRoot');
@@ -2101,30 +2038,24 @@ async function run() {
     await assert(false, `死挂点 ⑥ 文件面板开关完成 (error: ${e.message.slice(0, 80)})`);
   }
 
-  // ================================================================
-  // 审查回归锁死（yt-dev-review P0）：ACTIONS 共体 case 的 `a` 引用崩溃
-  // 首页 8 个 quick-* 模板按钮与 confirm-yes/no 确认按钮曾一点就抛
-  // ReferenceError（async listener 吞异常 → 用户侧「点了没反应」）。
-  // 放在尾部：这两个入口会改变页面状态（quick-* 会发送消息）。
-  // ================================================================
+  // 欢迎空态不编造任务。原先用 quick-* 模板按钮锁 ACTIONS 共体 case 的 `a`
+  // 引用崩溃；那些按钮已从欢迎页撤下，共体崩溃改由下面的 confirm-yes 路径锁住。
   try {
-    // 确保回到 home-screen（quick 模板按钮只在欢迎页上；此前测试已导航到设置/插件页）
     const newConv = page.locator('[data-action="newconv"]').first();
     if (await newConv.count() > 0) await newConv.click({ force: true });
     await waitForVisible('.home-screen');
-    const quickBtn = page.locator('[data-action="quick-weekly"]');
-    await assert(await quickBtn.count() > 0, 'quick-weekly 模板按钮存在');
-    if (await quickBtn.count() > 0) {
-      await quickBtn.click({ force: true });
-      // P4-S1-07：快捷操作只把模板填进输入框，不再代点发送。原实现无条件覆盖用户已在
-      // 欢迎页打好的文字并立即发送，toast 却说「已加载模板」——用户根本来不及编辑。
-      // 修复前这里抛 ReferenceError（pageerror fail-fast 会以退出码 1 抓住）。
-      const filled = await page.locator('#homeComposer').inputValue();
-      await assert(filled.includes('周报'), 'quick-weekly 点击后模板填入输入框（实际 ' + JSON.stringify(filled.slice(0, 40)) + '）');
-      await assert(await page.locator('.msg.user').count() === 0, '快捷操作不代点发送（发不发由用户按发送决定）');
-    }
+    const invented = await page.evaluate(() => {
+      const home = document.querySelector('.home-screen');
+      const text = home ? home.textContent : '';
+      return {
+        ppt: /PPT\s*制作/.test(text),
+        idle: text.includes('闲时任务'),
+        weekly: !!document.querySelector('[data-action="quick-weekly"]'),
+      };
+    });
+    await assert(!invented.ppt && !invented.idle && !invented.weekly, '欢迎空态不编造 PPT 制作 / 闲时任务 / 周报模板');
   } catch (e) {
-    await assert(false, `审查回归 quick-weekly (error: ${e.message.slice(0, 80)})`);
+    await assert(false, `欢迎空态不编造任务 (error: ${e.message.slice(0, 80)})`);
   }
 
   try {
@@ -2251,8 +2182,8 @@ async function run() {
       const body = document.querySelector('#context .ctx-body');
       return body ? body.innerText : '';
     });
-    await assert(/执行明细/.test(ctxMid) && ctxMid.includes('orch-plan'),
-      '回合进行中实时工具步骤即进入右栏执行明细（实际 ' + JSON.stringify(ctxMid.slice(0, 100)) + '）');
+    await assert(ctxMid.includes('orch-plan'),
+      '回合进行中实时工具步骤即进入检查器（实际 ' + JSON.stringify(ctxMid.slice(0, 100)) + '）');
     await page.waitForTimeout(2100);
     await assert((await chip.innerText()).includes('演示模式'),
       '演示回合后 chip 标注「演示模式」（实际 ' + await chip.innerText() + '）');
@@ -2274,8 +2205,8 @@ async function run() {
     await assert(ctxLive.hasCtx, '演示回合触发右栏任务监控浮出（has-ctx）');
     // 必须断言「执行明细」段 + 一个只可能来自工具步骤的名字：空态提示文案里也含
     // 「orch-plan」（```orch-plan 围栏说明），只查它会假阳性（本轮就这么错过一次）。
-    await assert(/执行明细/.test(ctxLive.ctxText) && ctxLive.ctxText.includes('workspace-scan'),
-      '演示工具步骤落入右栏执行明细（实际 ' + JSON.stringify(ctxLive.ctxText.slice(0, 120)) + '）');
+    await assert(ctxLive.ctxText.includes('workspace-scan'),
+      '演示工具步骤落入检查器（实际 ' + JSON.stringify(ctxLive.ctxText.slice(0, 120)) + '）');
   } catch (e) {
     await assert(false, `P2 模型内嵌回归 (error: ${e.message.slice(0, 120)})`);
   }
@@ -2307,15 +2238,8 @@ async function run() {
   const drawerBtnVisible = async () => (await page.locator('#navDrawerBtn').first().isVisible().catch(() => false));
   const ctxVisible = async () => (await page.locator('[data-action="ctx-tab"]').first().isVisible().catch(() => false));
   const p3CreateProj = async (name) => {
-    // 走 composer 的项目下拉 →「创建项目」，不用欢迎页的智能推荐快捷入口：
-    // 有会话历史时推荐位是主题相关项，「创建项目」不一定在其中（e2e 种子有会话）。
-    if (await page.locator('#homeComposer').count() === 0) {
-      const newConv = page.locator('[data-action="newconv"]');
-      if (await newConv.count() > 0) { await newConv.first().click(); await page.waitForTimeout(400); }
-    }
-    await page.locator('[data-action="proj-select-toggle"]').first().click();
-    await page.waitForTimeout(250);
-    await page.locator('#projDropdown [data-action="home-create-proj"]').first().click();
+    await navTo('session');
+    await page.locator('[data-action="home-create-proj"]').first().click();
     await page.waitForTimeout(300);
     await page.locator('#newProjName').fill(name);
     await page.locator('[data-action="do-create-proj-home"]').click();
@@ -2323,49 +2247,25 @@ async function run() {
   };
 
   try {
-    // 18.1 轻态默认：rail 隐藏、☰ 可见、右栏收起
+    // 双壳层已取消：旧 viewMode 偏好不再藏轨，也不再把右栏钉成常驻。
     await p3Boot('light', false);
-    await assert(!(await railVisible()), '轻态 rail 隐藏');
-    await assert(await drawerBtnVisible(), '轻态 ☰ 导航入口可见');
-    await assert(!(await ctxVisible()), '轻态右栏默认收起');
+    await assert(await railVisible(), '旧轻模式偏好不再隐藏三入口轨');
+    await assert(!(await drawerBtnVisible()), '不再用汉堡菜单替代轨');
+    await assert(!(await page.locator('#appGrid').evaluate((el) => el.classList.contains('has-ctx'))), '右栏默认不占位');
 
-    // 18.2 抽屉切换到项目模式：rail 恢复、右栏常驻、☰ 隐藏
-    await page.locator('#navDrawerBtn').first().click();
-    await page.waitForTimeout(250);
-    await page.locator('#navDrawer [data-action="view-mode-toggle"]').first().click();
-    await page.waitForTimeout(500);
-    await assert(await railVisible(), '切到项目态后 rail 恢复可见');
-    await assert(!(await drawerBtnVisible()), '项目态 ☰ 隐藏（导航走 rail）');
-    await assert(await ctxVisible(), '项目态右栏任务监控常驻');
+    await p3Boot('project', true);
+    await assert(await railVisible(), '旧项目模式偏好不再改壳层');
+    await assert(!(await page.locator('#appGrid').evaluate((el) => el.classList.contains('has-ctx'))), '旧项目模式不再把右栏钉成常驻');
 
-    // 18.3 模式记忆：reload 后仍在项目态
-    await p3Boot('project', false);
-    await assert(await railVisible(), 'reload 后仍在项目态（模式选择记忆）');
-    await assert(await ctxVisible(), 'reload 后右栏仍常驻');
-
-    // 18.4 project 态导航走 rail（C-F5 修的路径：此前 project 态 navTo 必超时）
     await navTo('settings');
     await page.waitForTimeout(400);
-    await assert(await page.locator('#settings-section-model').count() > 0, 'project 态下导航到设置页成功（走 rail）');
+    await assert(await page.locator('#settings-section-model').count() > 0, '轨上可进入设置页');
     await navTo('session');
     await page.waitForTimeout(400);
 
-    // 18.5 手动回落轻模式 → pinned；reload 后仍是轻态
-    await page.locator('#rail [data-action="view-mode-toggle"]').first().click();
-    await page.waitForTimeout(500);
-    await assert(!(await railVisible()), 'rail 上的模式切换可回落轻模式');
-    await p3Boot('light', true);
-    await assert(!(await railVisible()), '手动切回轻模式后 reload 仍是轻态（偏好被记住）');
-
-    // 18.6 pinned 后建项目不再自动升级（自动升级是「按需」，不是替用户决定）
-    await p3CreateProj('P3 pinned 项目');
-    await assert(!(await railVisible()), '用户手动切过模式后，建项目不再自动升级（viewModePinned）');
-
-    // 18.7 未 pinned 的轻态下建项目 → 自动升级项目模式（spec §6 触发①）
-    await p3Boot('light', false);
-    await p3CreateProj('P3 自动升级项目');
-    await assert(await railVisible(), '轻态下建项目自动升级到项目模式（spec §6 触发①）');
-    await assert(await ctxVisible(), '自动升级后右栏任务监控常驻');
+    await p3CreateProj('P3 不再自动升级');
+    await assert(await railVisible(), '建项目后轨仍在');
+    await assert(!(await page.locator('#appGrid').evaluate((el) => el.classList.contains('has-ctx'))), '建项目不再自动撑开检查器');
   } catch (e) {
     await assert(false, `P3 项目模式回归 (error: ${e.message.slice(0, 120)})`);
   }
@@ -2401,8 +2301,8 @@ async function run() {
     if (await ncBtn.count() > 0) { await ncBtn.first().click(); await page.waitForTimeout(400); }
     await ensureCtxOpen();
     const ctxSub = await page.locator('#context .ctx-subtitle').first().innerText();
-    await assert(/未接入/.test(ctxSub),
-      '运行时未就绪时右栏副标题显示未接入而非写死「已启用」（实际 ' + JSON.stringify(ctxSub) + '）');
+    await assert(/还没有进行中的回合/.test(ctxSub),
+      '无会话时检查器不写死插件状态（实际 ' + JSON.stringify(ctxSub) + '）');
 
     // 19.6 S5-3：terminalStatus 有返回时，终端图标不再置灰显示「未接入主进程」
     const termBtn = page.locator('#terminalBtn');
@@ -2480,12 +2380,11 @@ async function run() {
     await page.locator('#homeComposer').fill('P4 文件 TAB 隐式 cwd 回归');
     await page.locator('[data-action="home-send"]').first().click();
     await page.waitForTimeout(900);
-    await ensureCtxOpen();
-    await page.locator('[data-action="ctx-tab"][data-id="files"]').first().click();
+    await page.locator('#fileBtn').first().click();
     await page.waitForTimeout(900);
-    const ftabText = await page.locator('#context .ctx-body').first().innerText();
+    const ftabText = await page.locator('.file-root').first().innerText();
     await assert(/OrchDesk/.test(ftabText) && !/尚未设置工作目录/.test(ftabText),
-      '文件 TAB 用隐式 cwd 作根目录（实际 ' + JSON.stringify(ftabText.slice(0, 80)) + '）');
+      '文件面板用隐式 cwd 作根目录（实际 ' + JSON.stringify(ftabText.slice(0, 80)) + '）');
   } catch (e) {
     await assert(false, `P4 修复回归 (error: ${e.message.slice(0, 140)})`);
   }

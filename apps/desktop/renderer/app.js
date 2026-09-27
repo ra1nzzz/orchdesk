@@ -255,7 +255,7 @@
 
   /* ---------- 状态 ---------- */
   const state = {
-    page: 'session', theme: 'dark', sel: null, ctxOpen: 0, ctxTab: 'todo', wz: 0, wzExpert: 0,
+    page: 'session', theme: 'dark', sel: null, ctxOpen: 0, ctxTab: 'todo', pendingConfirm: false, pendingConfirmHtml: '', wz: 0, wzExpert: 0,
     // P4-S3-04/S3-06：授权服务是否真的加载过（区分「拉到了但空」与「没拉到」）。
     // 未加载时风控区必须显式标注，不能拿兜底文案冒充活着。
     authzLoaded: false,
@@ -291,7 +291,7 @@
     selectedModels: [], thinkLevel: 'standard', modelProviders: [], mpEditing: null, defaultProvider: undefined,
     // 简化方案（2026-09-23）：视图双态。light=默认轻模式（列表+主区，右栏收起，
     // rail 收拢在 P1.2）；project=编排模式（右栏任务监控常驻）。持久化在 P3。
-    viewMode: 'light',
+    viewMode: 'session',
     // models.dev 预设 + KEY 触发拉取（方案 A）：预设目录/选中项、拉取结果与勾选态
     mpPreset: null, mpPresetOpen: false, mpCatalog: null, mpCatalogLoading: false,
     mpModels: [], mpModelsChecked: new Set(), mpModelsSource: '', mpModelsLoading: false, mpModelsNote: '', mpModelsExpanded: false,
@@ -368,7 +368,7 @@
     // 右栏「文件」TAB（本轮 UI 重构）：与「产物」不同——产物是本会话 Agent 生成的内容，
     // 文件是当前工作目录的全部文件。root 自动跟随会话所绑定项目的本地目录。
     fileTab: { root: '', inited: false, loading: false, expanded: new Set(), children: new Map(), error: '', lastDir: '' },
-    filePanel: { loaded: false, bridgeMissing: false, root: '', truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false,
+    filePanel: { loaded: false, bridgeMissing: false, root: '', userPicked: false, truncated: false, expanded: new Set(), children: new Map(), preview: null, previewPath: '', previewLoading: false, shikiReady: false,
       // P3 编辑/diff：view = preview | edit | diff；diffRows/diffTooLarge 是最近一次计算结果
       view: 'preview', editBuf: '', editBase: '', eol: 'lf', dirty: false, saving: false, discardArmed: false,
       diffRows: null, diffTooLarge: false, diffLineDelta: 0, diffStat: '', saveError: '' },
@@ -401,10 +401,9 @@
       localStorage.setItem(VIEWMODE_PINNED_KEY, state.viewModePinned ? '1' : '0');
     } catch { /* 隐私模式等忽略：记忆是增强，不是正确性依赖 */ }
   }
-  // 启动即恢复：project 态右栏任务监控常驻（可收起），轻态默认收起。
-  state.viewMode = loadViewMode();
-  state.viewModePinned = loadViewModePinned();
-  if (state.viewMode === 'project') state.ctxOpen = 1;
+  // 双壳层已取消。旧 orchdesk.viewMode 不再改布局，避免历史偏好把右栏钉成 300px。
+  state.viewMode = 'session';
+  state.viewModePinned = false;
 
   const $ = (s) => document.querySelector(s);
   const PAGES = [
@@ -452,8 +451,10 @@
       const live = rt.plugins.find((x) => x.name === id);
       if (live) {
         if (live.active) return '<span class="badge ok">已启用</span>';
-        if (!live.available) return `<span class="badge">未接入</span>`;
-        return `<span class="badge warn" title="${(live.error || '').replace(/"/g, '')}">已停用</span>`;
+        // 停用逆回滚会把 error 写成「已停用…」。见 error 就标异常，会把主动停用误标。
+        if (live.error && !/^已停用/.test(live.error)) return `<span class="badge warn" title="${esc(live.error)}">异常</span>`;
+        if (!live.available) return '<span class="badge">未接入</span>';
+        return `<span class="badge warn" title="${esc(live.error || '')}">已停用</span>`;
       }
       // 运行时不认识这个插件（如 hub 走独立实现）→ 回落常量
     }
@@ -485,11 +486,8 @@
   /* ---------- 渲染：导航 ---------- */
   function renderRail() {
     // P3：project 态 rail 恢复，底部给模式切换（轻态 rail 隐藏，抽屉里已有同一入口）
-    const modeBtn = state.viewMode === 'project'
-      ? `<button class="navbtn" data-action="view-mode-toggle" title="切换回轻模式（单栏 + 按需面板）">${ic('zap')}<span class="nl">轻模式</span></button>`
-      : '';
     $('#rail').innerHTML = PAGES.map((p) => `<button class="navbtn ${state.page === p.id ? 'active' : ''}" data-action="nav" data-id="${p.id}" title="${p.n}">${ic(p.icon)}<span class="nl">${p.n}</span></button>`).join('') +
-      `<div class="sp"></div>${modeBtn}<button class="navbtn" data-action="toggle-theme" title="切换主题">${ic('sun')}<span class="nl">主题</span></button>`;
+      `<div class="sp"></div><button class="navbtn" data-action="toggle-theme" title="切换主题">${ic('sun')}<span class="nl">主题</span></button>`;
   }
 
   /* ---------- 渲染：消息（外部/用户可控内容统一转义，防 XSS） ---------- */
@@ -504,7 +502,7 @@
   function refreshCtxLive() {
     const ctxEl = $('#context');
     if (!ctxEl || !state.ctxOpen || state.page !== 'session') return;
-    if (state.ctxTab !== 'todo') return;
+    // 检查器只剩这一回合的步骤，不再按旧 TAB 跳过刷新。
     const body = ctxEl.querySelector('.ctx-body');
     const keep = body ? body.scrollTop : 0;
     ctxEl.innerHTML = VIEWS.session.ctx();
@@ -1053,7 +1051,7 @@
     return `<div class="sess ${state.sel === s.id ? 'active' : ''}" data-action="sel" data-id="${s.id}">
           <span class="sn" title="${esc(s.title)} ${esc(s.expert)}">${esc(s.title)}</span>
           ${s.updated !== '刚刚' ? `<span class="st">${esc(s.updated)}</span>` : ''}
-          <button class="opbtn" data-action="sess-menu" data-id="${s.id}" title="会话操作">···</button>
+          <button class="opbtn" data-action="sess-menu" data-id="${s.id}" title="会话操作" aria-label="会话操作">···</button>
         </div>`;
   }
 
@@ -1093,7 +1091,7 @@
     const allProjectIds = new Set(state.projects.map(p => p.id));
     const taskSessions = Object.values(state.sessions).filter(s => s.pid === '__task__' || !allProjectIds.has(s.pid));
     let taskBlock = '';
-    if (state.viewMode !== 'project' && taskSessions.length) {
+    if (taskSessions.length) {
       // P1.4 轻模式：轻会话按工作目录分组（无 cwd 的归「任务」组，行为与旧版一致）
       const wsMap = new Map();
       const noWs = [];
@@ -1150,9 +1148,10 @@
         <span class="seg-tab active" title="项目与其下会话；轻会话按工作目录分组">项目</span>
       </div>
     </div>
-    <div style="display:align-items:center;gap:4px;padding:4px 10px 8px">
-      <span style="font-size:12px;font-weight:600;color:var(--fg)"></span>
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--fg-faint);cursor:pointer;margin-left:auto" data-action="newconv" title="新建会话"><path d="M12 5v14M5 12h14"/></svg>
+    <div class="row" style="gap:6px;padding:4px 10px 8px">
+      <button class="btn sm ghost" data-action="home-create-proj" title="新建项目并绑定本地文件夹">新建项目</button>
+      <span style="flex:1"></span>
+      <button class="iconbtn" data-action="newconv" title="新建会话" aria-label="新建会话">${ic('plus', 14)}</button>
     </div>` + activeBlocks + taskBlock + archToggle + `<div class="fab-wrap"><button class="fab" data-action="newconv" title="新建会话">${ic('plus', 22)}</button></div>`;
   }
 
@@ -1261,72 +1260,63 @@
     return { label: '运行时未接入 · 按拒绝处理', color: 'var(--warn)', placeholderSuffix: '', tip: '插件运行时未接入，无法确认意图门状态：fail-closed 按拒绝处理' };
   }
 
-  function renderComposer(s) {
+  function workdirChipHTML() {
+    const s = state.sessions[state.sel];
+    const bound = s ? (projectPathOf(s.id) || String(s.cwd || '').trim()) : '';
+    const dir = bound || String(state.workspaceDir || '').trim();
+    const label = dir ? dirBase(dir) : '设置工作目录';
+    return `<button type="button" class="ws-chip" data-action="ws-pick" title="${esc(dir || '设置工作目录')}">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <span>${esc(label)}</span>
+      <span class="ws-change">更改</span>
+    </button>`;
+  }
+
+  function composerBarHTML(sendAction) {
     const thinkIdx = ({ off: 0, standard: 1, deep: 2, max: 3 })[state.thinkLevel] || 1;
     const intentCtl = intentCtlState();
-    renderTrayHint();
-    // 当前选中项目
-    const activeProjects = state.projects.filter(p => !p.archived);
-    const curProj = state.selProjForComposer ? activeProjects.find(p => p.id === state.selProjForComposer) : null;
-    const projName = curProj ? curProj.n : '选择项目（或进入任务模式）';
-    const projSelector = `<div style="position:relative">
-      <div class="proj-select ${state.projDropdownOpen ? 'open' : ''}" data-action="proj-select-toggle" title="选择项目">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        <span class="ps-name">${esc(projName)}</span>
-        <svg class="ps-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
-      </div>
-      <div class="proj-dropdown ${state.projDropdownOpen ? 'open' : ''}" id="projDropdown">
-        <div class="pd-label">项目</div>
-        ${activeProjects.length ? activeProjects.map(p => `<div class="pd-item ${curProj && curProj.id === p.id ? 'active' : ''}" data-action="composer-proj-pick" data-pid="${p.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-          <div><div>${esc(p.n)}</div>${p.d ? `<div class="pd-meta">${esc(p.d)}</div>` : ''}</div>
-          ${curProj && curProj.id === p.id ? '<span class="badge ok" style="margin-left:auto;font-size:11px">当前</span>' : ''}
-        </div>`).join('') : '<div class="pd-item" style="color:var(--fg-faint);cursor:default">暂无项目</div>'}
-        <div class="pd-sep"></div>
-        <div class="pd-item ${!curProj ? 'active' : ''}" data-action="composer-proj-task" title="不关联项目，直接对话">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 12l2 2 4-4"/></svg>
-          <div><div>任务模式</div><div class="pd-meta">不关联项目，直接对话</div></div>
-        </div>
-      </div>
-    </div>`;
-    return `<div class="composer"><div class="box">
-      ${projSelector}
-      <textarea id="composer" placeholder="向 ${s.expert} 发消息…${intentCtl.placeholderSuffix}"></textarea>
-      <div id="outboundWarn" class="outbound-warn" hidden></div>
-      <div class="bar">
-        <div class="composer-more">
-          <button class="t-btn" data-action="composer-more-toggle" data-tip="更多选项">${ic('more')}</button>
-          <div class="composer-more-dropdown ${state.composerMoreOpen ? 'open' : ''}" id="composerMore">
-            <div class="composer-more-item" data-action="skill-add">
-              <span class="cm-icon">${ic('plus', 16)}</span>
-              <span class="cm-label">加载技能</span>
-            </div>
-            <div class="composer-more-item" data-action="expert-add">
-              <span class="cm-icon">${ic('at', 16)}</span>
-              <span class="cm-label">引用专家或专家团</span>
-            </div>
-            <div class="composer-more-item" data-action="auth-open">
-              <span class="cm-icon">${ic('shield', 16)}</span>
-              <span class="cm-label">授权模式</span>
-              <span class="cm-val">${authModeLabel(state.authMode)}</span>
-            </div>
-            <div class="composer-more-sep"></div>
-            <div class="composer-more-item think-item">
-              <div class="think-row"><span class="cm-label">思维深度</span><span class="tl">${thinkLabel(state.thinkLevel)}</span></div>
-              <input type="range" min="0" max="3" step="1" value="${thinkIdx}" data-action="think-slider" aria-label="思维深度" aria-valuetext="${thinkLabel(state.thinkLevel)}">
-            </div>
-            <div class="composer-more-item" style="cursor:default" title="${esc(intentCtl.tip)}">
-              <span class="cm-icon"><span class="dot" style="background:${intentCtl.color};width:7px;height:7px;border-radius:50%"></span></span>
-              <span class="cm-label">意图识别</span>
-              <span class="cm-val">${esc(intentCtl.label)}</span>
+    return `<div class="bar">
+        <div class="composer-chips">
+          ${workdirChipHTML()}
+          <button type="button" class="auth" data-action="auth-open" title="授权模式：${authModeLabel(state.authMode)}">${ic('shield', 14)}<span>${authModeLabel(state.authMode)}</span></button>
+          <div class="composer-more">
+            <button class="t-btn" data-action="composer-more-toggle" data-tip="更多选项">${ic('more')}</button>
+            <div class="composer-more-dropdown ${state.composerMoreOpen ? 'open' : ''}" id="composerMore">
+              <div class="composer-more-item" data-action="skill-add">
+                <span class="cm-icon">${ic('plus', 16)}</span>
+                <span class="cm-label">加载技能</span>
+              </div>
+              <div class="composer-more-item" data-action="expert-add">
+                <span class="cm-icon">${ic('at', 16)}</span>
+                <span class="cm-label">引用专家或专家团</span>
+              </div>
+              <div class="composer-more-sep"></div>
+              <div class="composer-more-item think-item">
+                <div class="think-row"><span class="cm-label">思维深度</span><span class="tl">${thinkLabel(state.thinkLevel)}</span></div>
+                <input type="range" min="0" max="3" step="1" value="${thinkIdx}" data-action="think-slider" aria-label="思维深度" aria-valuetext="${thinkLabel(state.thinkLevel)}">
+              </div>
+              <div class="composer-more-item" style="cursor:default" title="${esc(intentCtl.tip)}">
+                <span class="cm-icon"><span class="dot" style="background:${intentCtl.color};width:7px;height:7px;border-radius:50%"></span></span>
+                <span class="cm-label">意图识别</span>
+                <span class="cm-val">${esc(intentCtl.label)}</span>
+              </div>
             </div>
           </div>
         </div>
         <div class="right">
           ${modelChipHTML()}
-          <button class="btn sm primary" data-action="send">发送</button>
+          <button class="btn sm primary" data-action="${sendAction}">发送</button>
         </div>
-      </div>
+      </div>`;
+  }
+
+  function renderComposer(s) {
+    const intentCtl = intentCtlState();
+    renderTrayHint();
+    return `<div class="composer"><div class="box">
+      <textarea id="composer" placeholder="向 ${s.expert} 发消息…${intentCtl.placeholderSuffix}"></textarea>
+      <div id="outboundWarn" class="outbound-warn" hidden></div>
+      ${composerBarHTML('send')}
     </div></div>`;
   }
 
@@ -1458,87 +1448,15 @@
 
   /* ---------- 渲染：会话主区（ZCode 风格：新对话/欢迎页 + 快捷入口） ---------- */
   function renderHomeScreen() {
-    const activeProjects = state.projects.filter(p => !p.archived);
-    const curProj = state.selProjForComposer && state.selProjForComposer !== '__task__' ? activeProjects.find(p => p.id === state.selProjForComposer) : null;
-    // P1.4：项目选择降级为可选（留空即用隐式工作目录）；标签同步改口径
-    const projLabel = curProj ? curProj.n : '选择项目（可选）';
-    // P1.4：隐式工作目录 chip——轻会话的默认 cwd，一键更改
-    const wsName = state.workspaceDir ? dirBase(state.workspaceDir) : '';
-    const wsChip = `<button type="button" class="ws-chip" data-action="ws-pick" title="设置轻会话的默认工作目录">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-      <span>${wsName ? esc(wsName) : '设置工作目录'}</span>
-      ${state.workspaceDir ? '<span class="ws-change">更改</span>' : ''}
-    </button>`;
-
-    // 项目选择下拉
-    const projSelector = `<div style="position:relative">
-      <div class="proj-select ${state.projDropdownOpen ? 'open' : ''}" data-action="proj-select-toggle" title="选择项目">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        <span class="ps-name">${esc(projLabel)}</span>
-        <svg class="ps-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
-      </div>
-      <div class="proj-dropdown ${state.projDropdownOpen ? 'open' : ''}" id="projDropdown">
-        <div class="pd-label">项目</div>
-        ${activeProjects.length ? activeProjects.map(p => `<div class="pd-item ${curProj && curProj.id === p.id ? 'active' : ''}" data-action="composer-proj-pick" data-pid="${p.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-          <div><div>${esc(p.n)}</div>${p.d ? `<div class="pd-meta">${esc(p.d)}</div>` : ''}</div>
-          ${curProj && curProj.id === p.id ? '<span class="badge ok" style="margin-left:auto;font-size:11px">当前</span>' : ''}
-        </div>`).join('') : '<div class="pd-item" style="color:var(--fg-faint);cursor:default">暂无项目</div>'}
-        <div class="pd-sep"></div>
-        <div class="pd-item" data-action="home-create-proj" title="创建新项目">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-          <div><div>创建项目</div><div class="pd-meta">新建项目并绑定本地文件夹</div></div>
-        </div>
-        <div class="pd-item ${!curProj ? 'active' : ''}" data-action="composer-proj-task" title="不关联项目，直接对话">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 12l2 2 4-4"/></svg>
-          <div><div>任务模式</div><div class="pd-meta">不关联项目，直接对话</div></div>
-        </div>
-      </div>
-    </div>`;
-
-    // 智能推荐快捷操作（基于对话历史主题 + 技能使用频率 + 空闲检测）
-    const recs = getSmartRecommendations();
-    const recHtml = recs.map(q =>
-      `<button class="quick-action-btn" data-action="${q.action}" title="${q.label}">
-        <span class="qa-icon">${ic(q.icon, 16)}</span><span>${q.label}</span>
-      </button>`
-    ).join('');
-
     return `<div class="home-screen">
       <div class="home-greeting">${esc(getGreeting())}</div>
       <div class="home-input-wrap">
-        <div class="home-ws-row">${wsChip}</div>
         <div class="composer"><div class="box">
-          ${projSelector}
           <textarea id="homeComposer" placeholder="向 OrchDesk 提问…" rows="1"></textarea>
           <div id="outboundWarn" class="outbound-warn" hidden></div>
-          <div class="bar">
-            <div class="composer-more">
-              <button class="t-btn" data-action="composer-more-toggle" data-tip="更多选项">${ic('more')}</button>
-              <div class="composer-more-dropdown ${state.composerMoreOpen ? 'open' : ''}" id="composerMore">
-                <div class="composer-more-item" data-action="skill-add">
-                  <span class="cm-icon">${ic('plus', 16)}</span>
-                  <span class="cm-label">加载技能</span>
-                </div>
-                <div class="composer-more-item" data-action="expert-add">
-                  <span class="cm-icon">${ic('at', 16)}</span>
-                  <span class="cm-label">引用专家或专家团</span>
-                </div>
-                <div class="composer-more-item think-item">
-                  <div class="think-row"><span class="cm-label">思维深度</span><span class="tl">${thinkLabel(state.thinkLevel)}</span></div>
-                  <input type="range" min="0" max="3" step="1" value="${({off:0,standard:1,deep:2,max:3}[state.thinkLevel]||1)}" data-action="think-slider" aria-label="思维深度" aria-valuetext="${thinkLabel(state.thinkLevel)}">
-                </div>
-              </div>
-            </div>
-            <div class="right">
-              ${modelChipHTML()}
-              <button class="btn sm primary" data-action="home-send">发送</button>
-            </div>
-          </div>
+          ${composerBarHTML('home-send')}
         </div></div>
-        <div class="home-quick-actions">
-          ${recHtml}
-        </div>
+        <p class="home-note">从一句话开始。不会替你编任务。</p>
       </div>
     </div>`;
   }
@@ -1642,240 +1560,54 @@
             <div class="row" style="gap:4px">
               ${FORK ? `<button class="btn sm ghost" data-action="fork" data-sid="${esc(s.id)}" title="从此会话创建分支（可选分叉点）">${ic('fork', 13)} 分叉</button>` : ''}
               ${FORK ? `<button class="btn sm ghost" data-action="replay-open" data-sid="${esc(s.id)}" title="只读回放本会话">${ic('clock', 13)} 回放</button>` : ''}
-              <button class="iconbtn" data-action="toggle-ctx" title="切换右侧面板" style="transform:rotate(${state.ctxOpen ? 0 : 180}deg);transition:.15s">${ic('chev', 14)}</button></div>
+              <button class="btn sm ghost" data-action="file-panel" title="当前工作目录的文件">文件</button>
+              <button class="iconbtn" data-action="toggle-ctx" title="这一回合的步骤" aria-label="打开或收起本回合检查器" style="transform:rotate(${state.ctxOpen ? 0 : 180}deg);transition:.15s">${ic('chev', 14)}</button></div>
           </div>
           ${fork ? `<div class="fork-origin">${ic('fork', 13)} 分支自 <span class="mono">#${esc(fork.from)}</span>${fork.fromTitle ? `「${esc(fork.fromTitle)}」` : ''} · 继承前 ${fork.atIndex} 条 · ${esc(new Date(fork.at).toLocaleString('zh-CN'))}</div>` : ''}
-          <div id="confirmZone"></div>
+          
           <div id="msgList">${msgHtml}</div>
         </div></div>
       ${renderComposer(s)}`;
     },
     ctx() {
       const s = state.sel && state.sessions[state.sel] ? state.sessions[state.sel] : null;
-      const tabId = state.ctxTab || 'todo';
-      const tabs = [
-        { id: 'todo', label: '待办', badge: '' },
-        { id: 'products', label: '产物', badge: '' },
-        // 需求3：文件从标题栏按钮 + 全屏面板，改为右栏 TAB。
-        // 与「产物」不同源：产物是本会话 Agent 生成的内容，文件是工作目录的全部文件。
-        { id: 'files', label: '文件', badge: '' },
-        // 「能力」= 插件 + 技能 + MCP（原「技能与MCP」名不副实：里面列的是插件）
-        { id: 'caps', label: '能力', badge: '' },
-      ];
-      const tabsHTML = tabs.map(t => `<button class="ctx-tab ${tabId === t.id ? 'active' : ''}" data-action="ctx-tab" data-id="${t.id}">${t.label}</button>`).join('');
-
+      const sub = !s
+        ? '还没有进行中的回合'
+        : (state.turnBusy === s.id ? '这一回合进行中' : (state.pendingConfirm ? '有待确认的动作' : s.title));
+      const plan = s ? extractPlanSteps(s.msgs || []) : { steps: [] };
+      const live = s && Array.isArray(state.toolSteps[s.id]) ? state.toolSteps[s.id] : [];
+      const showLive = !!(s && state.turnBusy === s.id && live.length);
+      const lastAgent = s ? [...(s.msgs || [])].reverse().find((m) => (m.r === 'agent' || m.role === 'assistant' || m.role === 'agent') && !m.typing) : null;
+      const settled = !showLive && lastAgent && Array.isArray(lastAgent.tools) ? lastAgent.tools : [];
+      let stepsHTML = '';
       if (!s) {
-        // P4：副标题不再写死「DSH 插件 · 已启用」——同一个面板的「能力」TAB 在运行时
-        // 未接入时显示「未接入」，两处对自己依赖的后端给出互相矛盾的状态。与设置页
-        // statbar 的运行时文案共用同一判定（Nielsen ④一致性 + 铁律三态）。
-        const rtOk = !!(state.pluginRuntime && state.pluginRuntime.ready);
-        const sub = rtOk
-          ? `插件运行时就绪 · ${state.pluginRuntime.activeCount}/${state.pluginRuntime.total}`
-          : '插件运行时未接入';
-        return `<div class="ctx-header">
-            <div class="ctx-title">${ic('clipboard', 16)} 任务监控</div>
-            <div class="ctx-subtitle">${esc(sub)}</div>
-          </div>
-          <div class="ctx-tabs">${tabsHTML}</div>
-          <div class="ctx-body">
-            <div class="ctx-empty"><div class="empty-icon">${ic('clipboard', 28)}</div>选择会话后查看任务跟踪<br><span style="font-size:11px">发送消息后 Agent 步骤、产物、技能将在此显示</span></div>
-          </div>
-          <div id="previewRoot"></div>`;
-      }
-
-      const msgs = s.msgs || [];
-      // ---- 需求1：语义化的大任务步骤 ----
-      // 主列表来自 Agent 对请求的任务分拆（结构化 plan 块 → markdown 列表回退），
-      // 工具调用降为下面的「执行明细」——file_read / shell_command 是手段不是任务。
-      const plan = extractPlanSteps(msgs);
-      const steps = plan.steps.map((p) => ({ text: p.text, status: p.done ? 'done' : 'pending', time: '' }));
-      // 完成度只用显式标记（[x] / ✅）判定，不拿工具数去猜进度；
-      // 唯一例外：Agent 正在跑（typing 中）时把第一条未完成的标为进行中。
-      const runningNow = msgs.some((m) => m.typing);
-      if (runningNow) {
-        const first = steps.find((st) => st.status !== 'done');
-        if (first) first.status = 'running';
-      }
-      const doneSteps = steps.filter(st => st.status === 'done').length;
-      const runningSteps = steps.filter(st => st.status === 'running').length;
-      // ---- 执行明细（工具调用 / SubAgent）：折叠在待办下方，不占主列表 ----
-      const toolActions = [];
-      msgs.forEach((m) => {
-        if (m.tools && m.tools.length) {
-          m.tools.forEach((t) => {
-            toolActions.push({ text: t.n, status: t.ph === 'done' ? 'done' : t.ph === 'running' ? 'running' : 'pending', time: m.t || '' });
+        stepsHTML = '<div class="faint" style="font-size:12px;padding:8px 2px">发送一条消息后，这一回合的步骤会出现在这里。</div>';
+      } else if (plan.steps.length || showLive || settled.length) {
+        const rows = [];
+        if (showLive) {
+          live.forEach((t) => {
+            const ph = t.ph === 'done' ? 'done' : (t.ph === 'error' ? 'error' : 'running');
+            const mark = ph === 'done' ? '✓' : (ph === 'error' ? '!' : '…');
+            rows.push('<div class="ctx-step"><span class="step-dot ' + ph + '">' + mark + '</span><span class="step-text">' + esc(t.n || '工具') + '</span></div>');
           });
         }
-        if (m.sub) {
-          toolActions.push({ text: 'SubAgent: ' + (m.sub.name || ''), status: m.sub.state === 'disposed' ? 'done' : 'running', time: m.t || '' });
+        if (!showLive) {
+          settled.forEach((t) => {
+            const ph = t.ph === 'error' ? 'error' : 'done';
+            rows.push('<div class="ctx-step"><span class="step-dot ' + ph + '">' + (ph === 'error' ? '!' : '✓') + '</span><span class="step-text">' + esc(t.n || '工具') + '</span></div>');
+          });
         }
-      });
-      // 回合进行中：把实时工具步骤（主进程 orchdesk:tool-step 推送；renderMsg 的
-      // typing 分支也在读同一份 state.toolSteps）并进执行明细。此前右栏只从已落库的
-      // m.tools 取，回合中永远只有计划、看不到正在执行什么——与 P1.3「工具步骤时
-      // 从右侧滑出」的承诺不符。
-      // 两个坑都踩过：① 合并必须放在 msgs.forEach 之外——放里面会按历史消息数重复
-      // 追加（10 条历史的会话 3 个工具显示成 30 行、计数「30 个动作」）；
-      // ② 用 turnBusy===本会话 门控，回合一结束就停合并，否则与 m.tools 重复一遍。
-      if (state.turnBusy === s.id && Array.isArray(state.toolSteps[s.id])) {
-        state.toolSteps[s.id].forEach((t) => {
-          toolActions.push({ text: t.n, status: t.ph === 'done' ? 'done' : t.ph === 'running' ? 'running' : 'pending', time: '' });
+        plan.steps.forEach((st) => {
+          rows.push('<div class="ctx-step"><span class="step-dot ' + (st.done ? 'done' : 'pending') + '">' + (st.done ? '✓' : '') + '</span><span class="step-text">' + esc(st.text) + '</span></div>');
         });
+        stepsHTML = '<div class="ctx-section"><div class="ctx-section-title">这一回合</div>' + rows.join('') + '</div>';
+      } else {
+        stepsHTML = '<div class="faint" style="font-size:12px;padding:8px 2px">这一回合还没有步骤。文件在主区，能力在插件页。</div>';
       }
-
-      // ---- 提取产物 ----
-      const products = [];
-      const codeBlockRe = /```(\w+)?\n([\s\S]*?)```/g;
-      msgs.forEach((m, i) => {
-        if ((m.r === 'agent' || m.role === 'assistant') && (m.x || m.text)) {
-          const content = m.x || m.text || '';
-          let match;
-          while ((match = codeBlockRe.exec(content)) !== null) {
-            const lang = match[1] || 'text';
-            const code = match[2].trim();
-            const extMap = { python:'py', javascript:'js', typescript:'ts', html:'html', css:'css', json:'json', markdown:'md', bash:'sh', shell:'sh', rust:'rs', go:'go' };
-            const ext = extMap[lang.toLowerCase()] || lang;
-            const type = ext === 'md' ? 'md' : ['py','js','ts','html','css','json','sh','rs','go'].includes(ext) ? 'code' : 'md';
-            products.push({ id: 'p' + i + '_' + products.length, name: (lang || 'text') + '_output' + (ext !== 'text' ? '.' + ext : ''), lang, content: code, size: code.length, type });
-          }
-        }
-      });
-
-      // ---- 能力（插件 / 技能 / MCP）----
-      // 旧代码从 Agent 消息里正则抓 {skill:xxx} 当「已用技能」，再 unshift 四个内置
-      // 插件名当「插件」——两处都不是真数据源：
-      //   · {skill:xxx} 是**提示词模板**的引用语法（prompt 插件消费），Agent 回复里
-      //     根本不会原样出现，解析结果恒为空（死挂点）；
-      //   · 内置插件名写死成常量数组，与运行时真实装载无关。
-      // 改为：插件取 pluginRuntime 真实装载，技能取本地磁盘真实扫描。
-
-      // 插件运行时真实装载（「插件」分组用）。
-      const rt = state.pluginRuntime;
-      const rtReady = !!(rt && rt.ready);
-      const rtOf = (n) => (rt && Array.isArray(rt.plugins) ? rt.plugins.find((x) => x.name === n) : null);
-
-      // ---- Tab 内容 ----
-      let bodyHTML = '';
-      if (tabId === 'todo') {
-        const stepRow = (st, mini) => {
-          const dot = st.status === 'done' ? ic('check', mini ? 11 : 12) : st.status === 'running' ? ic('refresh', mini ? 11 : 12) : ic('circle', mini ? 11 : 12);
-          return '<div class="ctx-step' + (mini ? ' mini' : '') + '"><span class="step-dot ' + st.status + '">' + dot + '</span>'
-            + '<span class="step-text">' + esc(st.text) + '</span>'
-            + (mini ? '<span class="step-time">' + esc(st.time) + '</span>' : '') + '</div>';
-        };
-        if (steps.length === 0) {
-          // 没有语义步骤时，至少把执行明细摆出来（旧版就是从这里取的），并说明待办的语义来源
-          bodyHTML = toolActions.length
-            ? '<div class="ctx-empty" style="padding-top:14px"><div class="empty-icon">' + ic('clipboard', 24) + '</div>'
-              // P4-S4-6：原文案把内部协议语法（```orch-plan 围栏）直接暴露给终端用户。
-              // 用户不需要知道 Agent 用什么格式表达计划，只需要知道「复杂任务会自动拆步骤」。
-              + 'Agent 还没有给出可跟踪的步骤<br><span style="font-size:11px">复杂任务会自动拆成待办；下面「执行明细」是本回合真实执行过的每个动作</span></div>'
-              + '<div class="ctx-section"><div class="ctx-section-title">执行明细 · ' + toolActions.length + ' 个动作</div>' + toolActions.map((st) => stepRow(st, true)).join('') + '</div>'
-            : '<div class="ctx-empty"><div class="empty-icon">' + ic('check', 28) + '</div>暂无任务步骤<br><span style="font-size:11px">发送消息后将跟踪 Agent 的任务分拆与操作</span></div>';
-        } else {
-          const srcLabel = plan.source === 'plan' ? '任务分拆' : '任务分拆（解析自回复列表）';
-          bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">' + srcLabel
-            + ' · ' + doneSteps + '/' + steps.length + '</div>'
-            + steps.map((st) => stepRow(st, false)).join('') + '</div>';
-          if (toolActions.length) {
-            bodyHTML += '<details class="ctx-fold"><summary>' + ic('chev', 12) + ' 执行明细 · ' + toolActions.length + ' 个动作</summary>'
-              + toolActions.map((st) => stepRow(st, true)).join('') + '</details>';
-          }
-        }
-      } else if (tabId === 'products') {
-        if (products.length === 0) {
-          bodyHTML = '<div class="ctx-empty"><div class="empty-icon">' + ic('fileText', 28) + '</div>暂无产物<br><span style="font-size:11px">Agent 生成代码时将在此显示</span></div>';
-        } else {
-          bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">会话产物 (' + products.length + ')</div>' + products.map(p => {
-            const iconCls = p.type === 'md' ? 'md' : p.type === 'code' ? 'code' : 'img';
-            const iconChar = p.type === 'md' ? ic('fileText', 16) : ic('code', 16);
-            return '<div class="ctx-product" data-action="preview-product" data-pid="' + p.id + '" data-content="' + esc(p.content).replace(/"/g, '&quot;') + '" data-name="' + esc(p.name) + '" data-lang="' + esc(p.lang || '') + '"><span class="prod-icon ' + iconCls + '">' + iconChar + '</span><span class="prod-name">' + esc(p.name) + '</span><span class="prod-size">' + (p.size > 1024 ? (p.size/1024).toFixed(1) + 'KB' : p.size + 'B') + '</span></div>';
-          }).join('') + '</div>';
-        }
-      } else if (tabId === 'files') {
-        // 需求3：工作目录的全部文件（不是会话产物）。首次进入时按项目目录自动装载。
-        if (!state.fileTab.inited) ensureFileTabRoot();
-        bodyHTML = '<div class="ctx-section">' + fileTabBodyHTML() + '</div>';
-      } else if (tabId === 'caps') {
-        // 「能力」= 使用中的插件 + 技能 + MCP 三类（原「技能与MCP」只列了后两类，
-        // 且「插件」一项取的是写死的常量数组，与运行时无关）。
-        // ① 插件：pluginRuntime 真实装载；运行时未接入时回落声明清单并标注「未接入」，
-        //    不用空列表冒充「没有插件」（「未接入」≠「为空」是本项目踩过三次的坑）。
-        const rtList = rtReady && Array.isArray(rt.plugins) && rt.plugins.length ? rt.plugins : null;
-        const declaredList = rtList ? null : PLUGINS.map((p) => ({ name: p.id }));
-        const plugRows = (rtList || declaredList || []).map((p) => {
-          const name = String(p.name);
-          const rec = rtList ? p : null;
-          const active = rtReady && !!rec && rec.active === true;
-          // 停用逆回滚（主进程 setPluginEnabled）会把 error 置为「已停用（逆回滚完成）」——
-          // 若见 error 就标「异常」，主动停用的插件会被误标；按前缀区分停用与真异常。
-          const broken = !!rec && !!rec.error && !/^已停用/.test(rec.error);
-          const label = !rtReady ? '未接入'
-            : (rec ? (active ? '已启用' : (broken ? '异常' : '已停用')) : '未接入');
-          const title = rec && rec.error ? esc(rec.error) : '';
-          return '<div class="ctx-skill"><span class="sk-icon builtin">' + esc(name[0].toUpperCase()) + '</span>'
-            + '<span class="sk-name">' + esc(name) + '</span>'
-            + '<span class="sk-status ' + (active ? 'on' : 'idle') + '"' + (title ? ' title="' + title + '"' : '') + '>' + esc(label) + '</span></div>';
-        }).join('');
-        const plugActive = rtList ? rtList.filter((p) => p.active === true).length : 0;
-        bodyHTML = '<div class="ctx-section"><div class="ctx-section-title">插件'
-          + (rtList ? ' · 使用中 ' + plugActive + '/' + rtList.length : ' · 运行时未接入')
-          + '</div>'
-          + (rtList ? '' : '<div class="faint" style="font-size:11px;padding:2px 0 6px">插件运行时未接入 · 以下为声明清单，非实时装载状态</div>')
-          + plugRows + '</div>';
-        // ② 技能：本地磁盘真实扫描（数据目录/skills/*.skill）。
-        //    未接入（扫描失败）与「已扫描但没装」分别标注，不混为一谈。
-        const skills = state.installedSkills || [];
-        const skRows = skills.map((sk) => {
-          const on = sk.enabled !== false;
-          const size = sk.bytes ? (sk.bytes > 1024 ? (sk.bytes / 1024).toFixed(1) + 'KB' : sk.bytes + 'B') : '';
-          return '<div class="ctx-skill"><span class="sk-icon skill">' + esc(String(sk.slug)[0].toUpperCase()) + '</span>'
-            + '<span class="sk-name mono">' + esc(sk.slug) + '</span>'
-            + (size ? '<span class="sk-meta">' + size + '</span>' : '')
-            + '<span class="sk-status ' + (on ? 'on' : 'idle') + '">' + (on ? '已启用' : '已停用') + '</span></div>';
-        }).join('');
-        bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">技能'
-          // 未接入时不显示「0/0」——那是把「没读到」说成了「读到了 0 个」。
-          + (state.installedSkillsLoaded
-            ? ' · 使用中 ' + skills.filter((sk) => sk.enabled !== false).length + '/' + skills.length
-            : ' · 未接入')
-          + '</div>'
-          + (state.installedSkillsLoaded
-            ? (skills.length ? skRows : '<div class="faint" style="font-size:11px;padding:2px 0 6px">暂无已安装技能 · 插件页 → 技能市场（观雅集）可安装</div>')
-            : '<div class="faint" style="font-size:11px;padding:2px 0 6px">技能目录未接入（主进程桥不可用）· 非「没有技能」</div>')
-          + '</div>';
-        // ③ MCP 连接（真接入）：真实 server 配置 + 连接状态 + 工具清单。
-        //    此前这里写死 4 个「filesystem/intent/memory/orchestration」并拿插件装载状态
-        //    冒充连接态（全仓无真实 MCP 实现）——已换成 mcp-client.ts 的真实数据。
-        const mcps = state.mcp.servers || [];
-        const mcpLoaded = state.mcp.loaded;
-        const mcpStats = state.mcp.stats || { total: 0, configured: 0, connected: 0, tools: 0 };
-        const mcpRows = mcps.map((m) => {
-          const connected = m.lastConnectOk === true;
-          const label = connected
-            ? '已连接'
-            : (m.enabled === false ? '已停用' : (m.lastConnectOk === false ? '连接失败' : '待连接'));
-          const toolN = Array.isArray(m.tools) ? m.tools.length : 0;
-          const toolTitle = connected ? (toolN ? ` · ${toolN} 个工具` : ' · 无工具') : '';
-          const msg = m.lastMessage ? esc(m.lastMessage) : '';
-          return '<div class="ctx-mcp"><span class="mcp-dot ' + (connected ? 'connected' : 'disconnected') + '"></span>'
-            + '<span style="flex:1">' + esc(m.name || m.id) + '</span>'
-            + '<span style="font-size:11px;color:var(--fg-dim)">' + esc(label) + toolTitle + '</span></div>'
-            + (msg ? '<div class="faint" style="font-size:11px;padding:0 0 4px 26px">' + msg + '</div>' : '');
-        }).join('');
-        bodyHTML += '<div class="ctx-section"><div class="ctx-section-title">MCP 连接'
-          + (mcpLoaded ? ' · ' + mcpStats.connected + '/' + mcpStats.total : ' · 未接入')
-          + '</div>'
-          + (!mcpLoaded
-            ? '<div class="faint" style="font-size:11px;padding:2px 0 6px">MCP 桥未接入（主进程不可用）· 非「没有配置」</div>'
-            : (mcps.length
-              ? mcpRows
-              : '<div class="faint" style="font-size:11px;padding:2px 0 6px">暂无 MCP server · 插件页 → MCP 可添加（命令/参数/env）</div>'))
-          + '</div>';
-      }
-
-      return '<div class="ctx-header"><div class="ctx-title">' + ic('clipboard', 16) + ' 任务监控</div><div class="ctx-subtitle">' + esc(s.title) + ' · ' + esc(s.expert) + '</div></div><div class="ctx-tabs">' + tabsHTML + '</div><div class="ctx-body">' + bodyHTML + '</div><div id="previewRoot"></div>';
+      return '<div class="ctx-header"><div class="ctx-title">' + ic('clipboard', 16) + ' 这一回合</div><div class="ctx-subtitle">' + esc(sub) + '</div></div>'
+        + '<div class="ctx-body"><div id="confirmZone">' + (state.pendingConfirmHtml || '') + '</div>' + stepsHTML + '</div>';
     }
+
   };
 
   /* ---------- 渲染：插件视图 ---------- */
@@ -2779,12 +2511,9 @@
       $('#side').innerHTML = v.side();
       $('#main').innerHTML = v.main();
       $('#context').innerHTML = v.ctx();
-      $('#appGrid').classList.toggle('has-ctx', state.ctxOpen);
-      // P1.1 布局双态：light（默认）= 列表+主区、右栏收起；project = 完整体验
-      $('#appGrid').classList.toggle('light', state.viewMode !== 'project');
-      $('#appGrid').classList.toggle('project', state.viewMode === 'project');
-      // P1.2：body 级轻模式标记（标题栏 ☰ 显隐 / rail 隐藏的 CSS 钩子）
-      document.body.classList.toggle('light-mode', state.viewMode !== 'project');
+      $('#appGrid').classList.toggle('has-ctx', !!state.ctxOpen);
+      $('#appGrid').classList.remove('light', 'project');
+      document.body.classList.remove('light-mode');
       $('#winTitle').textContent = (PAGES.find((x) => x.id === state.page)?.n || '会话') + ' — 本地 Agent 工作台';
       // P1 键盘可达（/harden）：渲染后给所有非原生可交互的 [data-action] 补
       // role/tabindex —— 项目惯用 div+data-action，靠逐个补必漏（焦点样式有了，
@@ -3014,35 +2743,49 @@
     return `<div class="nav-drawer" id="navDrawer" role="menu" aria-label="导航菜单">
       ${PAGES.map((p) => `<button class="nd-item ${state.page === p.id ? 'active' : ''}" role="menuitem" data-action="nav" data-id="${p.id}">${ic(p.icon, 16)}<span>${p.n}</span></button>`).join('')}
       <div class="nd-sep"></div>
-      <button class="nd-item" role="menuitem" data-action="view-mode-toggle">${ic(proj ? 'zap' : 'grid', 16)}<span>${proj ? '切换到轻模式' : '切换到项目模式'}</span></button>
       <button class="nd-item" role="menuitem" data-action="toggle-theme">${ic('sun', 16)}<span>切换主题</span></button>
     </div>`;
   }
   /* P3：模式切换。手动切 = 用户偏好，之后不再被编排触发自动升级（viewModePinned）。 */
   function toggleViewMode() {
-    state.viewMode = state.viewMode === 'project' ? 'light' : 'project';
-    state.viewModePinned = true;
-    // 项目模式 = 今天的完整体验：右栏任务监控常驻（仍可手动收起）
-    if (state.viewMode === 'project' && !state.ctxOpen) state.ctxOpen = 1;
-    saveViewMode();
-    render();
-    toast(state.viewMode === 'project'
-      ? '已进入项目模式：右栏任务监控常驻，编排入口就位'
-      : '已回到轻模式：单栏 + 按需面板', 'ok');
+    // 双壳层已取消。保留函数名，避免旧动作抛错。
+  }
+  function openInspectorForTurn() {
+    if (state.ctxOpen) return;
+    state.ctxOpen = true;
+    state.ctxAutoOpened = true;
+    $('#appGrid')?.classList.add('has-ctx');
+    const ctxEl = $('#context');
+    if (ctxEl && state.page === 'session') {
+      ctxEl.innerHTML = VIEWS.session.ctx();
+      hardenActions(ctxEl);
+    }
+  }
+  function scheduleCtxAutoClose() {
+    if (!state.ctxAutoOpened || state.ctxAutoToggled) return;
+    setTimeout(() => {
+      if (state.turnBusy || state.ctxAutoToggled || !state.ctxOpen || state.pendingConfirm) return;
+      state.ctxOpen = false;
+      state.ctxAutoOpened = false;
+      $('#appGrid')?.classList.remove('has-ctx');
+    }, 5000);
+  }
+  function revealInspector() {
+    state.ctxOpen = true;
+    $('#appGrid')?.classList.add('has-ctx');
+    const ctxEl = $('#context');
+    if (ctxEl && state.page === 'session') {
+      ctxEl.innerHTML = VIEWS.session.ctx();
+      hardenActions(ctxEl);
+    }
   }
   /**
    * P3：编排触发 → 自动升级到项目模式（spec §6 触发条件）。
    * 两条克制：已在项目态不重复动作；用户手动切过（viewModePinned）绝不打扰——
    * 自动升级是「按需」，不是「替用户决定」。
    */
-  function escalateToProject(reason) {
-    if (state.viewMode === 'project' || state.viewModePinned) return false;
-    state.viewMode = 'project';
-    if (!state.ctxOpen) state.ctxOpen = 1;
-    saveViewMode();
-    render();
-    toast(`已切换到项目模式（${reason}）· Ctrl+K 抽屉可切回轻模式`, 'ok');
-    return true;
+  function escalateToProject() {
+    return false;
   }
   function toggleNavDrawer(anchor) {
     const root = $('#navDrawerRoot');
@@ -3100,6 +2843,11 @@
       const r = await bridge.pickFolder();
       if (r && r.ok && r.path) {
         saveWorkspaceDir(r.path);
+        const cur = state.sessions[state.sel];
+        if (cur && (!cur.pid || cur.pid === '__task__' || !projectPathOf(cur.id))) {
+          cur.cwd = r.path;
+          applySessionCwd(cur.id);
+        }
         render();
         toast(`工作目录已设置：${r.path}`, 'ok');
       }
@@ -3219,7 +2967,7 @@
       const echo = String(text || '').slice(0, 60);
       s.msgs[typingIdx] = {
         r: 'agent', t: nowTime(),
-        x: `【演示模式 · 本地回显，未调用任何模型】\n\n收到你的输入：「${echo}」\n\n这一步是为了让你在配置模型之前就把 OrchDesk 全部界面逛完：\n· 右栏「任务监控」随回合浮出，上面的步骤条就是模拟的工具执行\n· 侧栏按工作目录分组；欢迎页可设默认工作目录（隐式 cwd）\n· 分叉 / 回放 / 技能 / 终端 / 文件面板都可以直接点开看\n\n配置任意 OpenAI 兼容 API（或本机 Ollama）后，同样的输入会得到真实模型回复。点 composer 里的模型 chip 即可配置。`,
+        x: `【演示模式 · 本地回显，未调用任何模型】\n\n收到你的输入：「${echo}」\n\n这一步是为了让你在配置模型之前就把 OrchDesk 全部界面逛完：\n· 右栏检查器随回合浮出，上面是这一回合的步骤\n· 侧栏按工作目录分组；输入栏可设默认工作目录\n· 分叉 / 回放 / 技能 / 终端 / 文件面板都可以直接点开看\n\n配置任意 OpenAI 兼容 API（或本机 Ollama）后，同样的输入会得到真实模型回复。点 composer 里的模型 chip 即可配置。`,
         // intent 用 'ACT'：renderMsg 只对 intent !== 'ACT' 挂徽标，且非 CONFIRM
         // 一律渲染成「意图 · 已拦截」——演示回复挂个拦截徽标是彻底的误告。
         intent: 'ACT', feedback: 1,
@@ -3240,14 +2988,7 @@
       render();
       // P1.3 收梢：与真回合一致——仅自动浮出过的面板等 5s 自动收，用户手动调过则不关。
       // 放在这里而不是 doSend 的 finally：演示分支提前 return，那边的 finally 不会跑。
-      if (state.viewMode !== 'project' && state.ctxAutoOpened && !state.ctxAutoToggled) {
-        setTimeout(() => {
-          if (state.turnBusy || state.ctxAutoToggled || !state.ctxOpen) return;
-          state.ctxOpen = false;
-          state.ctxAutoOpened = false;
-          $('#appGrid')?.classList.remove('has-ctx');
-        }, 5000);
-      }
+      scheduleCtxAutoClose();
     }
   }
 
@@ -3286,13 +3027,7 @@
     state.ctxAutoToggled = false;
     // 演示回合与真回合同一套浮出/收梢语义：ctxAutoOpened 在此置位，收梢在
     // runDemoTurn 的 finally 里统一安排（否则演示回合的面板永远不收）。
-    if (state.viewMode !== 'project' && !state.ctxOpen) {
-      state.ctxOpen = true;
-      state.ctxAutoOpened = true;
-      $('#appGrid')?.classList.add('has-ctx');
-      const ctxEl = $('#context');
-      if (ctxEl && state.page === 'session') ctxEl.innerHTML = VIEWS.session.ctx();
-    }
+    openInspectorForTurn();
     c.value = '';
     updateMsgList();
     patchComposerSend(true);
@@ -3321,14 +3056,7 @@
       if (state.turnBusy === s.id) state.turnBusy = null;
       patchComposerSend(false);
       // P1.3：回合结束 5s 后自动收起任务监控（仅自动开过的面板；用户手动调过则不关）
-      if (state.viewMode !== 'project' && state.ctxAutoOpened && !state.ctxAutoToggled) {
-        setTimeout(() => {
-          if (state.turnBusy || state.ctxAutoToggled || !state.ctxOpen) return;
-          state.ctxOpen = false;
-          state.ctxAutoOpened = false;
-          $('#appGrid')?.classList.remove('has-ctx');
-        }, 5000);
-      }
+      scheduleCtxAutoClose();
       // P3 触发④：Agent 产出多步计划 → 自动升级项目模式（任务监控/编排可视化就位）。
       // 单步不算——一步就能干完的活不值得把用户搬去重形态。
       if (extractPlanSteps(s.msgs).steps.length >= 2) escalateToProject('Agent 产出多步计划');
@@ -3551,10 +3279,18 @@
     if (!host) return;
     const b = state.browser;
     const t = state.terminal;
-    if (host.childElementCount !== 2) {
-      host.innerHTML = `<button class="sb-icon" data-action="browser-panel" id="browserBtn"></button>`
+    if (host.childElementCount !== 3) {
+      host.innerHTML = `<button class="sb-icon" data-action="file-panel" id="fileBtn" title="文件"></button>`
+        + `<button class="sb-icon" data-action="browser-panel" id="browserBtn"></button>`
         + `<button class="sb-icon" data-action="terminal-panel" id="terminalBtn"></button>`;
     }
+    const fBtn = $('#fileBtn');
+    if (fBtn) {
+      fBtn.innerHTML = ic('fileText', 15);
+      fBtn.classList.toggle('on', !!state.filePanelOpen);
+      fBtn.title = state.filePanelOpen ? '收起文件' : '文件（当前工作目录）';
+    }
+
     const bBtn = $('#browserBtn');
     const tBtn = $('#terminalBtn');
     if (bBtn) {
@@ -3853,12 +3589,17 @@
     state.filePanelOpen = true;
     $('#fileRoot').classList.remove('hidden');
     ensureFileSkeleton();
-    // BUG-023：会话所属项目绑定了目录时，文件面板缺省根 = 项目目录（不再空白待选）。
-    if (!state.filePanel.root) {
-      const projPath = projectPathOf(state.sel);
-      if (projPath) {
-        state.filePanel.root = projPath;
-        loadFileDir(projPath);
+    const fp = state.filePanel;
+    if (!fp.userPicked) {
+      const bound = fileTabRootDir() || String(state.workspaceDir || '').trim();
+      if (bound && fp.root !== bound) {
+        fp.root = bound;
+        fp.expanded = new Set();
+        fp.children = new Map();
+        fp.loaded = false;
+        fp.preview = null;
+        fp.previewPath = '';
+        loadFileDir(bound);
       }
     }
     renderFilePanel();
@@ -3872,6 +3613,7 @@
   async function pickFileRoot() {
     const r = await bridge.pickFolder();
     if (r && r.ok && r.path) {
+      state.filePanel.userPicked = true;
       state.filePanel.root = r.path;
       state.filePanel.expanded = new Set();
       state.filePanel.children = new Map();
@@ -4629,7 +4371,8 @@
       const inTerm = e.target && e.target.closest && e.target.closest('#terminalRoot .term-container');
       if (inTerm) return;
       e.preventDefault();
-      toggleNavDrawer($('#navDrawerBtn'));
+      const railBtn = document.querySelector('#rail [data-action="nav"]');
+      if (railBtn) railBtn.focus();
       return;
     }
     // P1.2：Esc 关导航抽屉
@@ -4688,7 +4431,7 @@
      ctx 注入本 IIFE 私有面；模块内一律 ctx.X 引用，不直连 app.js 作用域。 */
   const ACTIONS = {};
   {
-    const ctx = { $, MODEL_SELECTION_KEY, MODE_RANK, SKILLS_MARKET, adoptOllama, applyBrowserState, applySessionCwd, askInput, autoSelectModels, bridge, browserAct, cancelFileEdit, checkOutbound, closeFilePanel, closeModal, closeNavDrawer, closeTerminalPanel, confirmArchiveProject, confirmDestructive, confirmNewBranch, confirmRename, confirmSwitchAuth, confirmOutboundIfNeeded, createSessionInProject, desktopAutostartDesc, doAbortSend, doArchiveProject, doArchiveSession, doDeletePrompt, doDeleteSession, doFork, doInstallGuanjiSkill, doNewConv, doRename, doSavePrompt, doSend, doSwitchAuth, dynamicModels, escalateToProject, esc, expertList, fileTabLoadDir, getModelPool, ic, importSuspend, loadFileDir, memReasonText, mpApplyPreset, mpEnsureCatalog, mpFetchModels, mpRefreshPool, mpRefreshPreset, mpRefreshPresetList, newTerminalSession, nowTime, openAuthPicker, openBrowserPanel, openExpertPicker, openFilePanel, openFilePreview, openMenu, openModal, openModelPicker, openModelSetupModal, openProductPreview, openPromptEditor, openSkillPicker, openTerminalPanel, persist, pickFileRoot, pickWorkspace, pushFloatingContext, refreshConnectorAudit, refreshConnectors, refreshDataDirInventory, refreshCtxLive, refreshMarket, refreshMcp, refreshMemoryDomain, refreshMemorySummarize, refreshSandboxLog, refreshSessionEvents, refreshTerminal, refreshUsage, reloadFilePreview, render, renderBrowserSide, renderFilePanel, renderModelProviders, renderSettingsMain, renderStatusBarActions, renderTerminalPanel, renderWizard, saveFileEdit, saveModelSelection, saveWorkspaceDir, startFileEdit, state, toast, toggleFileDiff, toggleNavDrawer, toggleTermFull, toggleViewMode, updateProtocolRow, updateTraceUi };
+    const ctx = { $, MODEL_SELECTION_KEY, MODE_RANK, SKILLS_MARKET, adoptOllama, applyBrowserState, applySessionCwd, askInput, autoSelectModels, bridge, browserAct, cancelFileEdit, checkOutbound, closeFilePanel, closeModal, closeNavDrawer, closeTerminalPanel, confirmArchiveProject, confirmDestructive, confirmNewBranch, confirmRename, confirmSwitchAuth, confirmOutboundIfNeeded, createSessionInProject, desktopAutostartDesc, doAbortSend, doArchiveProject, doArchiveSession, doDeletePrompt, doDeleteSession, doFork, doInstallGuanjiSkill, doNewConv, doRename, doSavePrompt, doSend, doSwitchAuth, dynamicModels, escalateToProject, revealInspector, esc, expertList, fileTabLoadDir, getModelPool, ic, importSuspend, loadFileDir, memReasonText, mpApplyPreset, mpEnsureCatalog, mpFetchModels, mpRefreshPool, mpRefreshPreset, mpRefreshPresetList, newTerminalSession, nowTime, openAuthPicker, openBrowserPanel, openExpertPicker, openFilePanel, openFilePreview, openMenu, openModal, openModelPicker, openModelSetupModal, openProductPreview, openPromptEditor, openSkillPicker, openTerminalPanel, persist, pickFileRoot, pickWorkspace, pushFloatingContext, refreshConnectorAudit, refreshConnectors, refreshDataDirInventory, refreshCtxLive, refreshMarket, refreshMcp, refreshMemoryDomain, refreshMemorySummarize, refreshSandboxLog, refreshSessionEvents, refreshTerminal, refreshUsage, reloadFilePreview, render, renderBrowserSide, renderFilePanel, renderModelProviders, renderSettingsMain, renderStatusBarActions, renderTerminalPanel, renderWizard, saveFileEdit, saveModelSelection, saveWorkspaceDir, startFileEdit, state, toast, toggleFileDiff, toggleNavDrawer, toggleTermFull, toggleViewMode, updateProtocolRow, updateTraceUi };
     for (const install of (window.__orchdeskActionModules || [])) install(ACTIONS, ctx);
   }
 
@@ -4943,13 +4686,28 @@ let outboundTimer = null;
         // 渲染节流：文本兜底模式可一次解析多个工具连发 running/done，若每事件都刷新
         // 消息列表，毫秒窗口内会触发 2N 次 DOM 替换。合并到 ≤150ms 一次——只增量
         // 更新 #msgList，不整页 render（避免重建 composer / 侧栏）。
-        let liveRenderTimer = null;
+        function patchTypingMessage() {
+          const list = $('#msgList');
+          const s = (state.page === 'session' && state.sel) ? state.sessions[state.sel] : null;
+          if (!list || !s) { updateMsgList(); return; }
+          const typing = [...(s.msgs || [])].reverse().find((m) => (m.r === 'agent' || m.role === 'agent' || m.role === 'assistant') && m.typing);
+          const node = list.querySelector('.msg.typing .md-body');
+          if (!typing || !node) { updateMsgList(); return; }
+          const wrap = document.createElement('div');
+          wrap.innerHTML = renderMsg(typing, s.id);
+          const next = wrap.querySelector('.md-body');
+          if (!next) { updateMsgList(); return; }
+          node.innerHTML = next.innerHTML;
+          hardenActions(node);
+          const sc = $('#msgScroll');
+          if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80) sc.scrollTop = sc.scrollHeight;
+        }
+                let liveRenderTimer = null;
         const scheduleLiveRender = () => {
           if (liveRenderTimer) return;
           liveRenderTimer = setTimeout(() => {
             liveRenderTimer = null;
-            updateMsgList();
-            // P1.3：任务监控浮出期间，右栏待办随工具步骤实时刷新（门控见 refreshCtxLive）
+            patchTypingMessage();
             refreshCtxLive();
           }, 150);
         };

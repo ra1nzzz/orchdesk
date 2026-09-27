@@ -74,13 +74,13 @@ button:focus-visible,.navbtn:focus-visible,.t-btn:focus-visible,.iconbtn:focus-v
    （任务监控）回合中自动浮出在 P1.3 增强。project 态=完整体验不变。
    P1.2 导航收拢：轻模式 rail 隐藏（60px 列一并去掉），导航走标题栏 ☰ /
    Ctrl+K 抽屉；project 态 rail 照常。 */
-.app.light{grid-template-columns:240px 1fr}
-.app.light.has-ctx{grid-template-columns:240px 1fr 300px}
+.app.light{grid-template-columns:60px 270px 1fr}
+.app.light.has-ctx{grid-template-columns:60px 270px 1fr 300px}
 /* body.light-mode 只承担「rail 隐藏 / ☰ 显隐」两类 .app.light 表达不了的规则；
    网格列规则曾在此重复一遍（与上面两行等价）——双钩子改一处漏一处即布局漂移（C-F4）。 */
-body.light-mode .rail{display:none}
+body.light-mode .rail{display:flex}
 #navDrawerBtn{display:none;width:30px;height:30px;border:1px solid var(--border);border-radius:7px;background:var(--bg);color:var(--fg-dim);cursor:pointer;font-size:14px;line-height:1;place-items:center}
-body.light-mode #navDrawerBtn{display:grid}
+body.light-mode #navDrawerBtn{display:none}
 #navDrawerBtn:hover{background:var(--bg-hover);color:var(--fg)}
 .nav-drawer{position:fixed;z-index:400;min-width:180px;background:var(--bg);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);padding:6px;display:flex;flex-direction:column;gap:2px}
 .nav-drawer .nd-item{display:flex;align-items:center;gap:9px;width:100%;padding:8px 10px;border:none;border-radius:7px;background:none;color:var(--fg-dim);font:inherit;font-size:13px;cursor:pointer;text-align:left}
@@ -93,18 +93,18 @@ body.light-mode #navDrawerBtn{display:grid}
 .ws-chip{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border:1px solid var(--border);border-radius:999px;background:var(--bg-panel);color:var(--fg-dim);font:inherit;font-size:12px;cursor:pointer;transition:.15s}
 .ws-chip:hover{background:var(--bg-hover);color:var(--fg);border-color:var(--border-strong)}
 .ws-chip:focus-visible{outline:2px solid var(--accent-fg);outline-offset:2px}
-.ws-chip .ws-change{font-size:11px;color:var(--accent-fg);padding-left:2px;border-left:1px solid var(--border);margin-left:2px;padding-left:8px}
+.ws-chip .ws-change{font-size:12px;color:var(--accent-fg);padding-left:2px;border-left:1px solid var(--border);margin-left:2px;padding-left:8px}
 /* P1.3 任务监控浮出动画（轻模式回合中自动开面板时的入场） */
 .app.has-ctx .context{animation:ctx-in .18s ease}
 @keyframes ctx-in{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
 .rail{background:var(--bg-panel);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px}
 .rail .sp{flex:1}
-.navbtn{position:relative;width:46px;height:46px;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--fg-dim)}
+.navbtn{position:relative;width:46px;height:50px;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--fg-dim)}
 .navbtn svg{width:20px;height:20px}
-.navbtn .nl{font-size:9.5px;transform:scale(.94)}
+.navbtn .nl{font-size:12px;letter-spacing:0}
 .navbtn:hover{background:var(--bg-hover);color:var(--fg)}
 .navbtn.active{background:var(--accent-soft);color:var(--accent-fg)}
-.navbtn .badge{position:absolute;top:3px;right:3px;min-width:15px;height:15px;border-radius:8px;background:var(--danger);color:#fff;font-size:9px;display:grid;place-items:center;padding:0 4px;font-weight:600}
+.navbtn .badge{position:absolute;top:3px;right:3px;min-width:15px;height:15px;border-radius:8px;background:var(--danger);color:#fff;font-size:12px;display:grid;place-items:center;padding:0 3px;font-weight:600}
 
 /* ZCode 风格操作点 */
 .opbtn{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--fg-faint);cursor:pointer;font:inherit;font-size:12px;transition:all .12s;border:none;background:none}
@@ -127,8 +127,8 @@ body.light-mode #navDrawerBtn{display:grid}
 .ctx-tab .tab-badge.warn{background:var(--warn-soft);color:var(--warn)}
 .ctx-body{flex:1;overflow-y:auto;padding:10px 12px 20px;min-height:0}
 .ctx-section{margin-bottom:14px}
-.ctx-section-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-faint);margin-bottom:6px;display:flex;align-items:center;gap:5px}
-.ctx-step{display:flex;align-items:flex-start;gap:7px;padding:5px 6px;border-radius:6px;font-size:11.5px;color:var(--fg-dim);transition:background .12s;cursor:default}
+.ctx-section-title{font-size:12px;font-weight:700;letter-spacing:0;text-transform:none;color:var(--fg-faint);margin-bottom:6px;display:flex;align-items:center;gap:5px}
+.ctx-step{display:flex;align-items:flex-start;gap:7px;padding:5px 6px;border-radius:6px;font-size:12px;color:var(--fg-dim);transition:background .12s;cursor:default}
 .ctx-step:hover{background:var(--bg-hover)}
 .ctx-step .step-dot{width:14px;height:14px;border-radius:3px;margin-top:3px;flex:none;display:grid;place-items:center}
 .ctx-step .step-dot svg{width:10px;height:10px}
@@ -187,7 +187,7 @@ body.light-mode #navDrawerBtn{display:grid}
 .proj{padding:2px 2px 4px}
 .proj+.proj{margin-top:4px}
 .proj-seg{display:flex;align-items:center;gap:8px;padding:8px 8px 6px;border-bottom:1px solid var(--border);margin-bottom:6px}
-.proj-seg .seg-label{font-size:11px;font-weight:700;color:var(--fg-faint);letter-spacing:.06em;text-transform:uppercase}
+.proj-seg .seg-label{font-size:12px;font-weight:700;color:var(--fg-faint);letter-spacing:0;text-transform:none}
 .proj-seg .seg-tabs{display:flex;gap:2px;margin-left:auto}
 .seg-tab{padding:3px 10px;border-radius:6px;font-size:11px;cursor:pointer;color:var(--fg-dim);transition:all .12s;border:none;background:none;font:inherit}
 /* P4-S1-10：侧栏「项目/任务」分段只有「项目」一项且不可切换——不给它可点光标与
@@ -215,10 +215,12 @@ body.light-mode #navDrawerBtn{display:grid}
 .sess .st{font-size:11px;color:var(--fg-faint);flex:none}
 .sess.active .st{color:var(--accent-fg)}
 .sess .sm{color:var(--fg-faint);opacity:0;width:22px;height:22px;border-radius:5px;display:grid;place-items:center;flex:none}
-.sess:hover .sm,.sess.active .sm{opacity:1}
+.sess:hover .sm,.sess:focus-within .sm,.sess.active .sm,.sess .sm:focus-visible{opacity:1}
 .sess .sm:hover{background:var(--bg);color:var(--fg)}
 .sbtn{color:var(--fg-faint);opacity:0;width:22px;height:22px;border-radius:5px;display:grid;place-items:center;flex:none;border:none;background:none;cursor:pointer;transition:all .12s}
-.sess:hover .sbtn,.sess.active .sbtn{opacity:1}
+.sess:hover .sbtn,.sess:focus-within .sbtn,.sess.active .sbtn,.sess .sbtn:focus-visible{opacity:1}
+.sess .opbtn{opacity:1}
+.sess:focus-within .opbtn{color:var(--fg);border-color:var(--border-strong)}
 .sbtn:hover{background:var(--bg);color:var(--fg)}
 
 /* 悬浮 + 新建按钮（气泡包裹的 + 号） */
@@ -240,7 +242,7 @@ body.light-mode #navDrawerBtn{display:grid}
 .pop .mi.sep{border-top:1px solid var(--border);margin-top:4px;padding-top:7px}
 
 /* ========== 主区通用 ========== */
-.sec-title{font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--fg-faint);text-transform:uppercase;margin:14px 0 8px;display:flex;align-items:center;gap:6px}
+.sec-title{font-size:12px;font-weight:700;letter-spacing:0;color:var(--fg-faint);text-transform:none;margin:14px 0 8px;display:flex;align-items:center;gap:6px}
 .sec-title:first-child{margin-top:0}
 .sec-title .ico{width:14px;height:14px;display:grid;place-items:center;color:var(--fg-dim)}
 h1.pg{font-size:17px;font-weight:700;margin-bottom:2px}
@@ -255,8 +257,8 @@ h1.pg{font-size:17px;font-weight:700;margin-bottom:2px}
 .btn.primary:hover{filter:brightness(1.08)}
 .btn.danger{background:var(--danger-solid);border-color:var(--danger-solid);color:#fff}
 .btn.ghost{border-color:transparent;color:var(--accent-fg)}
-.btn.sm{padding:3px 9px;font-size:11px}
-.badge{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:var(--bg-hover);color:var(--fg-dim)}
+.btn.sm{padding:3px 9px;font-size:12px}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;background:var(--bg-hover);color:var(--fg-dim)}
 .badge.ok{background:var(--ok-soft);color:var(--ok)} .badge.warn{background:var(--warn-soft);color:var(--warn)}
 .badge.danger{background:var(--danger-soft);color:var(--danger)} .badge.info{background:var(--accent-soft);color:var(--accent-fg)}
 .badge.ceo{background:var(--ceo-soft);color:var(--ceo)}
@@ -418,7 +420,10 @@ input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;ut
 .composer .t-btn::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);font-size:11px;padding:3px 7px;border-radius:5px;white-space:nowrap;opacity:0;pointer-events:none;transition:.15s}
 .composer .t-btn::before{content:"";position:absolute;bottom:calc(100% + 2px);left:50%;transform:translateX(-50%);border:4px solid transparent;border-top-color:var(--fg);opacity:0;pointer-events:none;transition:.15s}
 .composer .t-btn:hover::after,.composer .t-btn:hover::before{opacity:1}
-.composer .auth{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid var(--border-strong);border-radius:7px;font-size:11.5px;background:var(--bg);color:var(--fg-dim);cursor:pointer;transition:.15s}
+.composer-chips{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
+.composer .bar .ws-chip{max-width:220px}
+.composer .bar .ws-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px}
+.composer .auth{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid var(--border-strong);border-radius:7px;font-size:12px;background:var(--bg);color:var(--fg-dim);cursor:pointer;transition:.15s}
 .composer .auth:hover{border-color:var(--accent);color:var(--accent-fg)}
 .composer .auth .dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
 .composer .auth.full{border-color:var(--warn);background:var(--warn-soft);color:var(--warn)}
@@ -437,7 +442,7 @@ input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;ut
 .composer-more-item.think-item .think-row{display:flex;align-items:center;gap:6px}
 .composer-more-item.think-item input[type=range]{flex:1}
 .composer .intent-hint{font-size:11px;color:var(--fg-faint);display:flex;align-items:center;gap:5px}
-.composer .c-mp{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid var(--border-strong);border-radius:7px;font-size:11.5px;background:var(--bg);color:var(--fg-dim);cursor:pointer;transition:.15s;max-width:220px}
+.composer .c-mp{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid var(--border-strong);border-radius:7px;font-size:12px;background:var(--bg);color:var(--fg-dim);cursor:pointer;transition:.15s;max-width:220px}
 .composer .c-mp:hover{border-color:var(--accent);color:var(--accent-fg)}
 .composer .c-mp .md{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
 .composer .c-mp .mn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -503,7 +508,7 @@ input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;ut
 .statbar{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
 .stat{background:var(--bg-panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px;transition:border-color .12s}
 .stat:hover{border-color:var(--border-strong)}
-.stat .sk{font-size:11px;color:var(--fg-faint);text-transform:uppercase;letter-spacing:.06em}
+.stat .sk{font-size:12px;color:var(--fg-faint);text-transform:none;letter-spacing:0}
 .stat .sv{font-size:14px;font-weight:600;margin-top:2px;display:flex;align-items:center;gap:6px}
 
 /* 设置左侧导航（2026-09-06）：纵向项统一为一行 icon+label，active 高亮收敛 */
@@ -629,7 +634,7 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 .ssec .ss-h:hover{background:var(--bg-hover)}
 .ssec .ss-c{width:14px;height:14px;display:grid;place-items:center;color:var(--fg-faint);transition:.15s;flex:none}
 .ssec .ss-c.open{transform:rotate(90deg)}
-.ssec .ss-t{font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--fg-dim);text-transform:uppercase;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ssec .ss-t{font-size:12px;font-weight:700;letter-spacing:0;color:var(--fg-dim);text-transform:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssec .ss-n{font-size:11px;color:var(--fg-faint);background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:0 5px;min-width:18px;text-align:center;flex:none}
 .ssec .ss-l{padding:3px 0 2px 16px}
 /* 侧栏文字留白（2026-09-07）：原 5px 8px 对 12px 字号偏挤，尤其带 badge 的行
@@ -648,7 +653,7 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 .ssec .ss-i .id{width:6px;height:6px;border-radius:50%;background:var(--fg-faint);flex:none}
 .ssec .ss-i.on .id{background:var(--ok)}
 .ssec .ss-i .in{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
-.ssec .ss-i .ib{font-size:9.5px;flex:none}
+.ssec .ss-i .ib{font-size:12px;flex:none}
 /* 委派树节点的执行摘要（task/产出/失败原因）—— 与 .ss-i 文本起点对齐，弱化不抢主行 */
 .ssec .del-note{padding:0 8px 5px 27px;font-size:11px;line-height:1.5;color:var(--fg-faint);word-break:break-all}
 .ssec .del-note+.ss-i{margin-top:0}
@@ -683,7 +688,7 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
 
 /* 模型选择 modal */
 .mg-grp{margin-bottom:14px}
-.mg-grp .mg-h{font-size:11px;font-weight:700;color:var(--fg-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.mg-grp .mg-h{font-size:12px;font-weight:700;color:var(--fg-dim);text-transform:none;letter-spacing:0;margin-bottom:6px;display:flex;align-items:center;gap:6px}
 .mg-grp .mg-h .mg-all{font-size:11px;color:var(--accent-fg);cursor:pointer;font-weight:500;text-transform:none;letter-spacing:0;margin-left:auto}
 .m-opt{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:7px;margin-bottom:5px;cursor:pointer;transition:.15s}
 .m-opt:hover{border-color:var(--accent)}
@@ -872,7 +877,8 @@ table.tb td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align
    四列（60px rail 列），而轻模式 rail 被 display:none——会话侧栏被压成 60px、
    主区缩到 270px、浏览器侧栏反而吃掉 1fr。触发路径全是主流路径：回合中访问网页
    → 任务监控 5s 后自动收起 → 浏览器侧栏仍在 → 布局错乱。 */
-.app.light.browser-mode{grid-template-columns:240px 1fr 300px}
+.app.light.browser-mode{grid-template-columns:60px 270px 1fr 300px}
+.home-note{margin-top:14px;color:var(--fg-dim);font-size:12px;text-align:center}
 .app.browser-mode .context{display:none}
 .app.browser-mode .browser-side{display:flex}
 .bw-head{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);

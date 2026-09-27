@@ -372,14 +372,14 @@ function installSessionActions(ACTIONS, ctx) {
 
   async function act_expert_attach(el, id, e) {
  // P3 触发③：引用专家/专家团 → 自动升级项目模式
- ctx.escalateToProject('引用专家团');
+ /* 引用专家不再切换壳层 */
  ctx.toast(`已 @引用「${el.dataset.n}」参与本次回复（SubAgent）`, 'ok'); ctx.closeModal();
   
   }
 
   async function act_sim_highrisk(el, id, e) {
  { const z = ctx.$('#confirmZone'); z.innerHTML = `<div class="confirm-banner"><span class="badge warn">意图 · 待确认</span> 该请求含「删除文件」高风险动作，本地模型判定需人工确认。
-        <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="confirm-yes">确认执行</button><button class="btn sm" data-action="confirm-no">拒绝</button></div></div>`; z.scrollIntoView();}
+        <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="confirm-yes">确认执行</button><button class="btn sm" data-action="confirm-no">拒绝</button></div></div>`; ctx.state.pendingConfirm = true; ctx.state.pendingConfirmHtml = z ? z.innerHTML : ''; if (typeof ctx.revealInspector === 'function') ctx.revealInspector();}
   
   }
 
@@ -395,7 +395,7 @@ function installSessionActions(ACTIONS, ctx) {
   }
 
   async function act_confirm_yes(el, id, e) {
- { const z = ctx.$('#confirmZone'); if (z) z.innerHTML = ''; const yes = el?.dataset?.action === 'confirm-yes'; ctx.toast(yes ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', yes ? 'ok' : 'danger'); return; }
+ { const z = ctx.$('#confirmZone'); ctx.state.pendingConfirm = false; ctx.state.pendingConfirmHtml = ''; if (z) z.innerHTML = ''; const yes = el?.dataset?.action === 'confirm-yes'; ctx.toast(yes ? '已确认 · 入审计日志' : '已拒绝 · 入审计日志', yes ? 'ok' : 'danger'); return; }
 
       /* 补偿层（T-P5-1） */
       /* 沙箱日志（PRD FR-8 可检索）：检索条件变更由 input/change 监听驱动，
