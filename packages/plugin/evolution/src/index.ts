@@ -20,7 +20,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import z from '@deepseek-ai/schemastery';
 
 export const name = 'orchdesk-evolution';
-export const inject = ['approval'];
+// paranoid 铁律收口：需读风控档位（sandboxPolicy.getAuthMode）才能在执行前判「全锁」。
+// 与 authz 插件同源同口径（不用各自反推 sandboxMode——default/trusted 在其上同参，
+// 反推法永远分不出两者）。
+export const inject = ['approval', 'sandboxPolicy'];
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -209,8 +212,25 @@ export function apply(ctx: Context, config: EvolutionConfig): void {
 
     // 2) 授权门控（默认 CONFIRM）；fail-closed：无通道 / 未授权 / 缺 agent 句柄 → 不加载。
     //    dsh ApprovalService.request(req) 契约：req 必含 agent（路由+审计），signal 置于 req.signal。
-    let outcome: ApprovalOutcome = 'unavailable';
+    //
+    //    paranoid（全锁）铁律：档位判定早于一切「提问」动作。此前无条件走
+    //    approval.request → 偏执模式下照样弹 GUI 确认框，与主进程 approvalGate 的
+    //    「paranoid 直接拒、不弹窗」相反（同一档位两条路，一套问一套不问）。
+    //    读不到档位按最严（回落 paranoid），fail-closed。
     if (config.requireConfirm) {
+      const authMode = (() => {
+        try {
+          const m = (ctx as unknown as {
+            sandboxPolicy?: { getAuthMode?(): string };
+          }).sandboxPolicy?.getAuthMode?.();
+          if (m === 'trusted' || m === 'paranoid' || m === 'default') return m;
+        } catch { /* 回落最严 */ }
+        return 'paranoid';
+      })();
+      if (authMode === 'paranoid') {
+        return { ok: false, reason: 'paranoid（全锁）模式下禁止自生成插件' };
+      }
+      let outcome: ApprovalOutcome = 'unavailable';
       const approval = (ctx as unknown as {
         approval?: { request?: (req: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }) => Promise<ApprovalOutcome> };
       }).approval;

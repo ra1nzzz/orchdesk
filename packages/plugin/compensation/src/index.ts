@@ -21,7 +21,10 @@ import type { UserMessage } from '@deepseek-ai/dsh-session';
 import z from '@deepseek-ai/schemastery';
 
 export const name = 'orchdesk-compensation';
-export const inject = ['approval'];
+// paranoid 铁律收口：需读风控档位（sandboxPolicy.getAuthMode）才能在执行前判「全锁」。
+// 与 authz 插件同源同口径，不用各自反推 sandboxMode（default/trusted 在
+// (sandboxMode, approvalPolicy) 上同参，历史反推法永远分不出两者）。
+export const inject = ['approval', 'sandboxPolicy'];
 
 // ---------------------------------------------------------------------------
 // 外发操作分类
@@ -202,6 +205,21 @@ export function apply(ctx: Context, config: CompensationConfig): void {
     return config.failClosedUnknown && category === 'other' && UNKNOWN_OUTBOUND_HINT.test(text);
   }
 
+  /** 当前风控档位（与 authz 插件的 getMode 同源：sandboxPolicy.getAuthMode）。
+   *  读不到 / 抛错 → 回落 'paranoid'（最严）。这是**有意的 fail-closed 倾斜**：
+   *  本函数只用于「paranoid 下要不要跳过提问直接拒」，误判为 paranoid 的后果是
+   *  多拒一次（用户可在设置页切档），误判为 default 的后果是偏执模式下仍然弹窗问人
+   *  ——正是要修的不一致。 */
+  function readAuthMode(): 'default' | 'trusted' | 'paranoid' {
+    try {
+      const m = (ctx as unknown as {
+        sandboxPolicy?: { getAuthMode?(): string };
+      }).sandboxPolicy?.getAuthMode?.();
+      if (m === 'trusted' || m === 'paranoid' || m === 'default') return m;
+    } catch { /* 回落最严 */ }
+    return 'paranoid';
+  }
+
   function withhold(text: string): WithholdResult {
     const { category } = classifyOutbound(text);
     const needs = needsWithhold(text);
@@ -271,6 +289,22 @@ export function apply(ctx: Context, config: CompensationConfig): void {
     const sessionId = payload.agent?.session?.id;
 
     if (!needs) return base;
+
+    // paranoid（全锁）铁律：档位判定必须早于一切「提问」动作。此前这里无条件走
+    // approval.request → 偏执模式下照样弹 GUI 确认框，与主进程 approvalGate 的
+    // 「paranoid 直接拒、不弹窗」行为相反（同一档位两条路，一套问一套不问）。
+    // 读不到档位按最严（readAuthMode 回落 paranoid），fail-closed。
+    if (readAuthMode() === 'paranoid') {
+      pushAudit({
+        kind: 'withhold-decided',
+        ts: Date.now(),
+        category,
+        outcome: 'rejected',
+        reason: 'paranoid（全锁）模式自动拒绝，不弹窗',
+        sessionId,
+      });
+      return { kind: 'reject' };
+    }
 
     pushAudit({
       kind: 'withhold-asked',

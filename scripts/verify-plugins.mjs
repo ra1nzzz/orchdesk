@@ -186,6 +186,35 @@ function tick(n = 3) {
       setAuthModeStore('default');
     }
   });
+  await check('paranoid 铁律：补偿层拒绝且零审批请求（不问，直接拒）', async () => {
+    // 主进程 approvalGate 在 paranoid 下是「直接拒、不弹窗」；补偿层此前无条件走
+    // approval.request → 同一档位两条路，一套问一套不问。这里固化：paranoid 下
+    // 补偿层既要 reject，也**一次都不发起审批请求**（弹窗本身就是违约）。
+    try {
+      setAuthModeStore('paranoid');
+      const before = approvalCalls.length;
+      const d = await firePreStep('把这封邮件发送给客户');
+      assert(d && d.kind === 'reject', 'paranoid 档外发应被补偿层拒绝，实际 ' + JSON.stringify(d));
+      assert(approvalCalls.length === before,
+        `paranoid 档不应发起审批请求（不弹窗），实际多发起 ${approvalCalls.length - before} 次`);
+    } finally {
+      setAuthModeStore('default');
+    }
+  });
+  await check('default 档仍走审批请求（paranoid 收口没有把正常路径一起堵死）', async () => {
+    // 反向对照：只断言 paranoid 会拒是不够的——若把档位读成恒 paranoid，
+    // default 档也会被拒且同样零请求，测试仍绿。这里确保 default 照旧提问。
+    try {
+      setAuthModeStore('default');
+      const before = approvalCalls.length;
+      const d = await firePreStep('把这封邮件发送给客户');
+      assert(d && d.kind === 'reject', '无应答方（unavailable）时 default 档仍应 fail-closed 拒绝，实际 ' + JSON.stringify(d));
+      assert(approvalCalls.length === before + 1,
+        `default 档应发起 1 次审批请求，实际 ${approvalCalls.length - before} 次`);
+    } finally {
+      setAuthModeStore('default');
+    }
+  });
 
   // ---------------- trace ----------------
   current = 'trace';
@@ -837,6 +866,26 @@ function tick(n = 3) {
       { sessionId: 's1' },
     );
     assert(r && r.ok === false, '未授权时不应加载：' + JSON.stringify(r));
+  });
+  await check('paranoid 铁律：自生成插件被拒且零审批请求（不问，直接拒）', async () => {
+    // 与补偿层同源：主进程 approvalGate 在 paranoid 下直接拒不弹窗，evolution 此前
+    // 无条件走 approval.request → 偏执模式下照样弹 GUI 确认框。固化：既要 ok=false，
+    // 也一次都不发起审批请求。
+    try {
+      setAuthModeStore('paranoid');
+      const before = approvalCalls.length;
+      const r = await evol.createTempPlugin(
+        { name: 'tmp-paranoid', code: 'export function run(t){ return t; }' },
+        { sessionId: 's1', agent: { id: 'a1' } },
+      );
+      assert(r && r.ok === false, 'paranoid 档应拒绝自生成插件：' + JSON.stringify(r));
+      assert(String(r.reason || '').includes('paranoid'),
+        '拒绝原因应点明 paranoid（用户看得出是档位所致，不是门控故障）：' + String(r.reason));
+      assert(approvalCalls.length === before,
+        `paranoid 档不应发起审批请求（不弹窗），实际多发起 ${approvalCalls.length - before} 次`);
+    } finally {
+      setAuthModeStore('default');
+    }
   });
   await check('list 与 getAudit 返回数组', () => {
     assert(Array.isArray(evol.list()), 'list 应返回数组');

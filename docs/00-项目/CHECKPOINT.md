@@ -337,3 +337,21 @@
 - compensation / evolution 直接调 `ctx.approval.request`，paranoid 模式下仍弹 GUI 确认（不涉白名单，但与「paranoid = 任何 ask 自动拒绝」的产品承诺不一致）。
 - `e2e-fix-verify.cjs` 的 bridge mock 用自己一套简化正则，与真实 `CATEGORY_RULES` 不一致（测试夹具占位实现，是「两处判定可能分叉」的同类隐患）。
 - `main.ts` 里那批 `DEFAULT_MODEL`/`pickModel` 注释行号引用可能随后续改动漂移。
+
+### paranoid 铁律收口（2026-09-29 续二）
+
+上一轮遗留项第一条已修。**规则**：`paranoid`（偏执模式）= `sandboxMode: 'read-only'` + `approvalPolicy: 'never'`——审批策略是 `never` 而非 `ask`，意思是**问题本身不被提出、答案预先定为「不」**。三档对比：`default`/`trusted` 是 `ask`（弹窗问用户），`paranoid` 是 `never`（不问，直接拒）。
+
+**缺口**：主进程 `approvalGate`（`main.ts:458`）把档位判定放在最前面（早于白名单查询、早于弹窗），`if (mode === 'paranoid') return 拒绝`。但 compensation 与 evolution 两个插件是**直接调 `ctx.approval.request`**，绕过了 `approvalGate` → 同样在 paranoid 下，主进程路径不问就拒，插件路径照样弹 GUI 确认框。同一档位两条路、一套问一套不问。不是安全漏洞（用户仍可点拒绝、fail-closed 仍在），但**行为不统一**：偏执模式本该零提问。
+
+**修法**（两个插件同构）：
+- `inject` 补 `'sandboxPolicy'`，用 `sandboxPolicy.getAuthMode()` 读档位——与 authz 插件的 `getMode` **同源**。没有各自反推 `sandboxMode`：`default`/`trusted` 在 `(sandboxMode, approvalPolicy)` 上同参，反推法永远分不出两者。
+- 档位判定前移到 `approval.request` **之前**：paranoid → 直接拒 + 写审计（compensation 走 `withhold-decided` 条目，reason 点明「paranoid（全锁）模式自动拒绝，不弹窗」）。
+- **读不到档位回落 `paranoid`（最严）**。这是有意的 fail-closed 倾斜：误判为 paranoid 的后果是多拒一次（用户可切档），误判为 default 的后果是偏执模式下仍然弹窗问人——正是本条要修的行为。
+
+**测试**（`scripts/verify-plugins.mjs`，94→97）：
+- compensation：paranoid 下外发 prompt → `reject` **且审批请求零新增**（弹窗本身就是违约，光断言 reject 不够）
+- compensation 反向对照：default 档仍发起 1 次审批请求——只断言 paranoid 会拒是不够的，若档位被读成恒 paranoid，default 也会被拒且同样零请求，测试仍绿
+- evolution：paranoid 下 `createTempPlugin` → `ok:false`、reason 点明 paranoid（用户看得出是档位所致而非门控故障）、零审批请求
+
+**验证**：全链 `pnpm run verify` CHAIN_EXIT=0；e2e 300/300；verify-plugins **97/0**。改 plugin src 后已重编译 + 重 vendor。
