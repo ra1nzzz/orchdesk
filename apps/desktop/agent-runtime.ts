@@ -67,6 +67,13 @@ export interface ModelReply {
    */
   emptyReason?: string;
   /**
+   * R1-3：流式响应未收到终止标记（[DONE] / done:true / finish_reason）即结束——
+   * 连接可能被中途切断，content 只是部分内容。上层应在展示时追加
+   * 「（响应可能不完整：流未收到终止标记）」类提示，避免把截断答案当完整答复。
+   * 非流式整包 JSON 响应不置此位（完整文档即完整语义）。
+   */
+  truncated?: boolean;
+  /**
    * 本次调用的 token 用量（FR-5，三家 API 归一化后）。
    * 网关不回 usage 字段时缺省——「没上报」≠「0 token」，上层不得伪造记账。
    */
@@ -144,6 +151,29 @@ export function hasShellMetachars(command: string): boolean {
 /** maxToolIterations 上限与默认值（渲染层滑块 / 保存钳制 / 回合循环三处共用，防漂移）。 */
 export const MAX_TOOL_ITERATIONS_CAP = 500;
 export const MAX_TOOL_ITERATIONS_DEFAULT = 200;
+
+/**
+ * 默认模型（R1-8：六处硬编码 'qwen3:14b' 收敛为单源）。
+ * 命中顺序：provider.models[0] → cfg.defaultModel → 本常量。
+ * 注意：这是「没配任何模型时的兜底」，不是产品推荐位；改它等于改新用户首启行为。
+ */
+export const DEFAULT_MODEL = 'qwen3:14b';
+
+/**
+ * 模型选择单源（R1-8：原 6 处硬编码 'qwen3:14b' 收敛）。
+ * 命中顺序：requested（用户显式选择，须在 provider.models 内）→ provider.models[0]
+ *           → cfg.defaultModel → DEFAULT_MODEL。
+ * 注意 DEFAULT_MODEL 是「一个模型都没配」时的兜底，不是产品推荐位。
+ */
+export function pickModel(
+  provider: { models?: string[] } | undefined | null,
+  cfg: { defaultModel?: string } | undefined | null,
+  requested?: string | undefined | null,
+): string {
+  const available = provider?.models || [];
+  if (requested && available.includes(requested)) return requested;
+  return available[0] || cfg?.defaultModel || DEFAULT_MODEL;
+}
 
 /**
  * 会话历史归一化（B-1：渲染层写 {r:'user',t,x}，主进程写 {role,text}，双轨制会让
@@ -371,7 +401,7 @@ export function normalizeNativeToolCalls(raw: unknown): NativeToolCall[] {
       : (item.arguments !== undefined ? item.arguments : (item as { input?: unknown }).input);
     const rawStr = typeof rawArgs === 'string'
       ? rawArgs
-      : rawArgs == null ? '' : JSON.stringify(rawArgs);
+      : rawArgs === null || rawArgs === undefined ? '' : JSON.stringify(rawArgs);
     const id = typeof item.id === 'string' && item.id ? item.id : nextToolCallId();
     out.push({ id, name, arguments: parseToolArgs(name, rawArgs), rawArguments: rawStr });
   }

@@ -17,6 +17,7 @@ import {
   isKnownTool,
   MAX_TOOL_ITERATIONS_CAP,
   MAX_TOOL_ITERATIONS_DEFAULT,
+  pickModel,
   normalizeHistory,
 } from './agent-runtime';
 import { DATA_FILE_NAMES } from './data-dir';
@@ -121,10 +122,8 @@ export async function runAgentTurn(
   const signal = ac.signal;
   try {
   const provider = modelCfg.providers[0]!;
-  const availableModels = provider.models || [];
   const requested = (opts?.models || [])[0];
-  const modelPick = availableModels.includes(requested || '') ? requested : (availableModels[0] || modelCfg.defaultModel);
-  const model = modelPick || 'qwen3:14b';
+  const model = pickModel(provider, modelCfg, requested);
 
   h.ensureSession(sessionId);
 
@@ -171,6 +170,9 @@ export async function runAgentTurn(
   let finalReply = '';
   let modelFailed = false;
   let stepCount = 0;
+  // R1-3：最近一次模型流是否缺终止标记（model-client 的 truncated）。reply 是循环内
+  // 变量，标志提到循环外才能在收尾处消费。
+  let truncated = false;
   let turnUsage: { p: number; c: number; t: number } | null = null;
   // BUG 修复前 maxToolIterations 上限三处不一致（渲染层滑块 500 / 保存钳制 200 / 回合 200）：
   // 统一收敛到 agent-runtime 单源常量，所见即所得。
@@ -212,6 +214,7 @@ export async function runAgentTurn(
         signal,
         onDelta: (chunk) => h.notifyAgentDelta(sessionId, chunk),
       });
+      if (reply.truncated) truncated = true;
     } catch (err) {
       if (bail()) break;
       // 空闲/绝对超时不是用户「已停止」。break 而不是 return，已完成步骤才会落盘。
@@ -297,6 +300,13 @@ export async function runAgentTurn(
   if (aborted && !finalReply) finalReply = '（已停止）';
 
   if (!finalReply) finalReply = `（已完成 ${stepCount} 个工具步骤，但模型未给出最终总结）`;
+
+  // R1-3 消费侧：model-client 已标出 truncated（流未收到 [DONE]/finish_reason/done:true
+  // 就结束了——典型是连接被 FIN/RST 切断）。不消费的话字段就绪但 UI 仍静默展示半截
+  // 答案，用户会把它当完整答复。这里在 emptyReason 同款位置补一句显式提示。
+  if (truncated && finalReply && !finalReply.startsWith('（')) {
+    finalReply += '\n\n（响应可能不完整：模型流未收到终止标记就被切断，建议重试或换模型）';
+  }
 
   const s = h.getSession(sessionId) as Record<string, unknown> | undefined;
   const turnTs = Date.now();

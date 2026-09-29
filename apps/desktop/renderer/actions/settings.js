@@ -31,7 +31,7 @@ function installSettingsActions(ACTIONS, ctx) {
           ctx.applySessionCwd(ctx.state.sel);
         }
         // P3 触发②：主动选择项目 → 自动升级项目模式（编排入口就位）
-        ctx.escalateToProject('选择项目');
+
         ctx.render();}
   
   }

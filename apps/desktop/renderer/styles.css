@@ -395,22 +395,8 @@ input[type=search]{padding-left:30px;background-image:url("data:image/svg+xml;ut
 .composer{flex:none;border-top:1px solid var(--border);padding:16px 24px 20px;background:var(--bg-panel)}
 .composer .box{border:1px solid var(--border-strong);border-radius:14px;background:var(--bg);overflow:visible;box-shadow:0 2px 12px rgba(0,0,0,.15);transition:border-color .15s,box-shadow .15s}
 .composer .box:focus-within{border-color:var(--accent);box-shadow:0 2px 12px rgba(0,0,0,.15),0 0 0 3px var(--accent-soft)}
-.composer .proj-select{position:relative;display:flex;align-items:center;gap:6px;padding:8px 14px;border-bottom:1px solid var(--border);font-size:12.5px;color:var(--fg-dim);cursor:pointer;transition:background .12s;user-select:none}
-.composer .proj-select:hover{background:var(--bg-hover)}
-.composer .proj-select .ps-name{flex:1;font-weight:500;color:var(--fg);font-size:12.5px}
-.composer .proj-select .ps-chevron{color:var(--fg-dim);transition:transform .15s}
-.composer .proj-select .ps-meta{font-size:11px;color:var(--fg-faint)}
-.composer .proj-select.open .ps-chevron{transform:rotate(180deg)}
-.proj-dropdown .pd-meta{font-size:11px;color:var(--fg-faint);margin-top:1px}
-.proj-dropdown{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:var(--bg);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow);padding:6px;z-index:200;display:none;pointer-events:none}
-.proj-dropdown.open{display:block;pointer-events:auto}
-.proj-dropdown .pd-label{font-size:11px;color:var(--fg-faint);text-transform:uppercase;letter-spacing:.05em;padding:6px 10px 4px;font-weight:600}
-.proj-dropdown .pd-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:7px;font-size:12.5px;cursor:pointer;color:var(--fg);transition:background .12s}
-.proj-dropdown .pd-item:hover{background:var(--bg-hover)}
-.proj-dropdown .pd-item.active{background:var(--accent-soft);color:var(--accent-fg)}
-.proj-dropdown .pd-item.active svg{color:var(--accent-fg)}
-.proj-dropdown .pd-sep{border-top:1px solid var(--border);margin:4px 0}
-.proj-dropdown .pd-item svg{color:var(--fg-dim);flex:none;width:14px;height:14px}
+/* R2-4：composer 旧「项目选择器」一行已被工作目录 chip 取代，.proj-select/ .ps-*/
+   .proj-dropdown/.pd-* 全套随 HTML 一并消失，删除（原 398-413 行）。 */
 .composer textarea{width:100%;border:none;resize:none;background:transparent;outline:none;font:inherit;font-size:14px;min-height:44px;line-height:1.5;padding:14px 16px 6px}
 .composer .bar{display:flex;justify-content:space-between;align-items:center;padding:4px 10px 10px;gap:8px}
 .composer .tools-left{display:flex;align-items:center;gap:2px}

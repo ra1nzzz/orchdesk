@@ -7,9 +7,6 @@ function installSessionActions(ACTIONS, ctx) {
   async function act_nav(el, id, e) {
  {
         ctx.state.page = id;
-        // P1.2：抽屉内点击导航后关抽屉（popover 不自动消失）。
-        // closeNavDrawer 由 ctx 注入面保证存在（app.js 闭包内函数声明），无需守卫。
-        ctx.closeNavDrawer();
         // 进入设置页时重拉记忆域与沙箱日志：SubAgent 执行完会随时往 worker 域落结论，
         // 只靠启动时拉一次，用户看到的就是「空的」，会误判成功能没生效。
         if (id === 'settings') { ctx.refreshMemoryDomain(); ctx.refreshMemorySummarize(); ctx.refreshSandboxLog(); ctx.refreshUsage(); }
@@ -102,10 +99,6 @@ function installSessionActions(ACTIONS, ctx) {
   
   }
 
-  async function act_proj_select_toggle(el, id, e) {
- { ctx.state.projDropdownOpen = !ctx.state.projDropdownOpen; const dd = ctx.$('#projDropdown'); if (dd) dd.classList.toggle('open', ctx.state.projDropdownOpen);}
-  
-  }
 
   async function act_welcome_new_proj(el, id, e) {
  ctx.doNewConv();
@@ -182,36 +175,6 @@ function installSessionActions(ACTIONS, ctx) {
   
   }
 
-  async function act_quick_weekly(el, id, e) {
- {
-        // 审查修复（P0）：共体 case 抽取后作用域里的 `a`（= el.dataset.action）不再可见，
-        // 直接引用会抛 ReferenceError。按约定从 el.dataset.action 取本动作 key。
-        const key = el?.dataset?.action || '';
-        const labels = {
-          'quick-weekly': '周报总结', 'quick-debug': '报错修复', 'quick-ppt': 'PPT 制作',
-          'quick-idle': '闲时任务', 'quick-refactor': '项目重构', 'quick-data': '数据分析',
-          'quick-skills': '浏览技能', 'quick-analyze': '项目分析',
-        };
-        const prompts = {
-          'quick-weekly': '请帮我写一份周报总结，包含本周完成的工作、遇到的问题和下周计划。',
-          'quick-debug': '请帮我诊断并修复以下代码问题：',
-          'quick-ppt': '请帮我制作 PPT，主题是：',
-          'quick-idle': '请帮我处理以下闲时任务：',
-          'quick-refactor': '请帮我分析并重构以下代码：',
-          'quick-data': '请帮我分析以下数据并给出洞察：',
-          'quick-skills': '请帮我推荐适合当前项目的技能：',
-          'quick-analyze': '请帮我分析当前项目的结构和代码质量：',
-        };
-        const text = prompts[key] || '';
-        const inp = ctx.$('#homeComposer');
-        if (inp) { inp.value = text; inp.dispatchEvent(new Event('input', { bubbles: true })); }
-        // P4-S1-07：只填模板，不代点发送。原实现无条件覆盖用户已在输入框里打好的文字并
-        // 立即发送，toast 还说「已加载模板」——用户根本来不及看到或编辑它。模板是起点，
-        // 发不发该由用户按「发送」。
-        inp?.focus();
-        ctx.toast(`已填入「${labels[key] || key}」模板 · 可直接编辑后发送`, 'ok');}
-  
-  }
 
   async function act_home_create_proj(el, id, e) {
  {
@@ -749,11 +712,6 @@ function installSessionActions(ACTIONS, ctx) {
     // P2：composer chip「发现 Ollama · 一键接入」——写真提供商配置（非演示模式）
     await ctx.adoptOllama();
   }
-  async function act_view_mode_toggle(el, id, e) {
-    // P3：抽屉 / rail 的模式切换。手动切 = 用户偏好，此后不再被编排触发自动升级。
-    ctx.toggleViewMode();
-    ctx.closeNavDrawer();
-  }
 
   async function act_model_add_provider(el, id, e) {
     // P4-S3-02：保存期间禁用按钮，防连点重复提交（await saveModelConfig 有真实网络往返）
@@ -1128,7 +1086,7 @@ function installSessionActions(ACTIONS, ctx) {
               if (r && r.error) { ctx.toast(r.error, 'err'); return; }
               ctx.state.delegationLast = r;
               // P3 触发③：专家团派发成功 → 自动升级项目模式（委派树/派发入口常驻）
-              ctx.escalateToProject('派发专家团任务');
+
               ctx.render();
               ctx.toast(`编排完成 · ${r.rootId || ''}`, 'ok');
             }).catch((e) => ctx.toast('编排失败: ' + ((e && e.message) || e), 'err'));
@@ -1139,7 +1097,7 @@ function installSessionActions(ACTIONS, ctx) {
 
   Object.assign(ACTIONS, {
     'nav': act_nav,
-    'nav-drawer': (el) => ctx.toggleNavDrawer(el),
+
     'toggle-theme': act_toggle_theme,
     'toggle-ctx': act_toggle_ctx,
     'ctx-tab': act_ctx_tab,
@@ -1149,20 +1107,11 @@ function installSessionActions(ACTIONS, ctx) {
     'ftab-pick': act_ftab_pick,
     'ftab-refresh': act_ftab_refresh,
     'preview-product': act_preview_product,
-    'proj-select-toggle': act_proj_select_toggle,
     'welcome-new-proj': act_welcome_new_proj,
     'welcome-task': act_welcome_task,
     'sel': act_sel,
     'newconv': act_newconv,
     'home-send': act_home_send,
-    'quick-weekly': act_quick_weekly,
-    'quick-debug': act_quick_weekly,
-    'quick-ppt': act_quick_weekly,
-    'quick-idle': act_quick_weekly,
-    'quick-refactor': act_quick_weekly,
-    'quick-data': act_quick_weekly,
-    'quick-skills': act_quick_weekly,
-    'quick-analyze': act_quick_weekly,
     'home-create-proj': act_home_create_proj,
     'pick-folder': act_pick_folder,
     'ws-pick': () => ctx.pickWorkspace(),
@@ -1218,7 +1167,7 @@ function installSessionActions(ACTIONS, ctx) {
     'mp-models-more': act_mp_models_more,
     'mp-models-refetch': act_mp_models_refetch,
     'ollama-adopt': act_ollama_adopt,
-    'view-mode-toggle': act_view_mode_toggle,
+
     'todo': act_todo,
     'check-updates': act_check_updates,
     'modal-bg': act_modal_bg,

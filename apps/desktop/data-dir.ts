@@ -299,7 +299,7 @@ export function migrateDataFiles(opts: MigrateFilesOptions): MigrateFileResult[]
           }
         } else {
           const source = io.readJson(srcFile);
-          if (source != null) {
+          if (source !== null && source !== undefined) {
             const merge = spec.merge ?? mergeJsonIfAbsent;
             const outcome = merge(readTarget(), source);
             // 只看 changed：added>0 会把「已存在且合并后无变化」也判成需要写盘。
@@ -396,7 +396,7 @@ function copyTree(io: DataDirIo, srcRoot: string, targetRoot: string, rel: strin
 
 /** 目标不存在才写入来源（JSON 层面的「只补齐不覆盖」）。 */
 export function mergeJsonIfAbsent(target: unknown, source: unknown): MergeOutcome | null {
-  if (target != null) return null;
+  if (target !== null && target !== undefined) return null;
   return { data: source, added: 1, changed: true };
 }
 

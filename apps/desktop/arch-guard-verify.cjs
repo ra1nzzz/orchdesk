@@ -521,6 +521,26 @@ function scanRule(rule, code, fileName) {
     }
     assert(broken.length === 0, '以下 renderer JS 语法损坏：\n        ' + broken.join('\n        '));
   });
+
+  /* ---------------- R18：终端会话上限单源（R5-17） ---------------- */
+
+  await check('R18 终端会话上限单源（terminal-tools ↔ renderer app.js 副本）', () => {
+    const ttSrc = stripComments(read(path.join(APP_DIR, 'terminal-tools.ts')));
+    const ttMatch = ttSrc.match(/TERMINAL_MAX_SESSIONS\s*=\s*(\d+)/);
+    assert(ttMatch, 'terminal-tools.ts 未定义 TERMINAL_MAX_SESSIONS');
+    const cap = Number(ttMatch[1]);
+    assert(cap >= 1 && cap <= 32, `TERMINAL_MAX_SESSIONS=${cap} 超出合理范围`);
+
+    const appSrc = stripComments(read(path.join(APP_DIR, 'renderer', 'app.js')));
+    const appMatch = appSrc.match(/TERMINAL_MAX_SESSIONS\s*=\s*(\d+)/);
+    assert(appMatch, 'renderer app.js 未定义 TERMINAL_MAX_SESSIONS 副本');
+    assert(Number(appMatch[1]) === cap,
+      `渲染层副本 TERMINAL_MAX_SESSIONS=${appMatch[1]} 与 terminal-tools.ts=${cap} 不一致`);
+
+    // 禁用态判定必须引用常量，不再允许裸数字（主进程改上限时按钮要跟着变）。
+    const stray = appSrc.match(/sessions\.length\s*>=\s*\d+/g);
+    assert(!stray, `app.js 存在裸数字上限判定（应引用 TERMINAL_MAX_SESSIONS）：${stray && stray.join(', ')}`);
+  });
   /* -------------------- 元规则：防规则静默失效 -------------------- */
 
   console.log('== 架构守护：元规则自检（防规则失效）==');

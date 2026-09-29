@@ -281,6 +281,8 @@ export function apply(ctx: Context, _config: MultiConfig): void {
    * 把一个任务喂给指定 subagent 会话跑一轮，返回其回复。
    * 经 ctx.agents.followup（宿主注入的 agentRunner：单轮 callModel，无工具循环）。
    * 未注入运行器 / session 不存在 → followup 返回明确错误文案而非伪造成功。
+   * ctx.agents 上无 followup（非桌面宿主）→ 返回 null：调用方必须按「未执行」
+   * 置 failed + note，不得标 done（委派树不伪造成功）。
    */
   async function subAgentTurn(
     sessionId: SessionId,

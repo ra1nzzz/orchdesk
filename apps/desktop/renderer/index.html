@@ -18,9 +18,7 @@
   <div class="tray-hint"><span class="tray-dot"></span><span id="trayText">本地运行</span></div>
   <!-- 标题栏只留品牌/会话信息/时钟：浏览器·终端·文件的入口已下移到状态栏图标（右下角）
        与右栏 TAB（文件），主题切换在左下角导航底部，此处不再重复摆按钮。 -->
-  <!-- P1.2 轻模式导航入口：☰ 唤出导航抽屉（会话/插件/设置/主题），Ctrl+K 同效；
-       rail 在轻模式下隐藏，抽屉是其替代入口（project 态仍显示 rail）。 -->
-  <!-- 三入口轨常驻，不再用汉堡菜单替代。 -->
+  <!-- 三入口轨（会话/插件/设置）常驻，主题切换在 rail 底部；不用汉堡菜单/导航抽屉替代。 -->
   <span style="margin-left:auto" class="row">
     <span style="color:var(--fg-faint)" id="clock"></span>
   </span>
@@ -59,7 +57,7 @@
 
 <div id="modalRoot"></div>
 <div id="menuRoot"></div>
-<div id="navDrawerRoot"></div>
+
 <div id="toastRoot" role="status" aria-live="polite"></div>
 <!-- 文件（P2-11）保持全屏覆盖层：预览/编辑/diff 需要宽幅，窄抽屉放不下。
      它的入口已从标题栏按钮改为右栏「文件」TAB。 -->

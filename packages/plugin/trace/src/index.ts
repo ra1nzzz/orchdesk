@@ -60,7 +60,11 @@ export interface TraceRecord {
 }
 
 export interface TraceConfig {
-  /** 用户显式配置的公开 GitHub 仓库（脱敏遥测目标）；空则只缓存不上传。 */
+  /**
+   * 用户显式配置的公开 GitHub 仓库（脱敏遥测目标）。
+   * 空 = 用户关闭 trace / 未配置 → 不记录、不入队；关闭态经 queueSize().disabled
+   * 透出（调用方可区分「已关闭」与「接入但队列为空」，不静默）。
+   */
   repoUrl: string;
   /** 脱敏开关（默认开）。 */
   maskEnabled: boolean;
@@ -71,7 +75,7 @@ export interface TraceConfig {
    * 重要：**绝不**写死、绝不进任何日志、绝不进上传 payload。
    */
   token: string;
-  /** 每批上传记录数。 */
+  /** 每批上传记录数（≥1；0/负值会让 flush 的批处理永远取不到记录 → 死循环，schema 层拦截）。 */
   batchSize: number;
 }
 
@@ -80,7 +84,7 @@ export const Config: z<TraceConfig> = z.object({
   maskEnabled: z.boolean().default(true),
   cacheDir: z.string().default('.orchdesk/trace-cache'),
   token: z.string().default(''),
-  batchSize: z.number().default(20),
+  batchSize: z.number().min(1).default(20),
 });
 
 // ---- 运行时状态 ----
@@ -171,7 +175,8 @@ export function mask(rec: TraceRecord): TraceRecord {
 
 function enqueue(rec: TraceRecord): void {
   // ③无界队列加固：repoUrl 为空 ⟺ 用户关闭 trace / 未配置仓库（buildTraceConfig 使
-  // repoUrl 恒有值除非 enabled=false）→ 关闭则不记录，直接不入队。
+  // repoUrl 恒有值除非 enabled=false）→ 关闭则不记录，直接不入队；关闭态经
+  // queueSize().disabled 透出，调用方可区分「已关闭」与「接入但为空」，不静默。
   if (!activeConfig?.repoUrl) return;
   // 兜底硬上限：超 PENDING_MAX 丢最旧（遥测非关键，防极端场景内存无界）。
   while (pending.length >= PENDING_MAX) pending.shift();
@@ -237,6 +242,12 @@ export async function flush(): Promise<FlushResult> {
         result.skippedReason = 'token-not-configured';
         break;
       }
+      // 双保险：batchSize ≤ 0 时 splice(0, batchSize) 永返空批、pending 永不缩减 →
+      // 死循环空批上传且 flushing 永不复位。schema 已 min(1)，此处兜底防运行时绕过。
+      if (!(activeConfig.batchSize > 0)) {
+        result.skippedReason = 'invalid-batch-size';
+        break;
+      }
       const batch = pending.splice(0, activeConfig.batchSize);
       try {
         await uploadBatch(batch);
@@ -261,7 +272,7 @@ export async function flush(): Promise<FlushResult> {
 
 /**
  * 兜底上送（30s 定时器 / dispose 路径专用）：绕过 batchSize 门控，
- * 只受「无 repoUrl / 无 token」约束——低流量时滞留记录也能最终落网，
+ * 只受「无 repoUrl / 无 token / 非法 batchSize」约束——低流量时滞留记录也能最终落网，
  * 进程退出不丢数据。
  */
 export function flushNow(): Promise<FlushResult> {
@@ -369,9 +380,19 @@ export function recordFeedback(
   });
 }
 
-/** 供控制通道查询当前待发/重试/显式失败队列长度（可观测，不暴露内容）。 */
-export function queueSize(): { pending: number; retry: number; errors: number } {
-  return { pending: pending.length, retry: retryQueue.length, errors: errorQueue.length };
+/**
+ * 供控制通道查询当前待发/重试/显式失败队列长度 + 上传关闭态（可观测，不暴露内容）。
+ * `disabled` = repoUrl 为空 ⟺ 用户关闭 trace / 未配置仓库：此时记录不入队（见
+ * enqueue），三个队列数字恒为 0 —— 若无此字段，调用方无法区分「已关闭」与
+ * 「接入但队列为空」，违反三态区分铁律（未接入 ≠ 为空 ≠ 失败）。
+ */
+export function queueSize(): { pending: number; retry: number; errors: number; disabled: boolean } {
+  return {
+    pending: pending.length,
+    retry: retryQueue.length,
+    errors: errorQueue.length,
+    disabled: !activeConfig?.repoUrl,
+  };
 }
 
 /** 查询显式失败记录（如不支持的上传端点）：保留原因，可审计，不静默丢失。 */
@@ -383,11 +404,11 @@ export function errorRecords(): { rec: TraceRecord; reason: string; at: number }
 export interface TraceService {
   /** 记录用户对某条 Agent 回答的语用反馈（Loop 结束的真实落点）。 */
   recordFeedback(intent: IntentLabel | string, feedback: Feedback, sessionKey?: string, messageKey?: string): void;
-  /** 队列长度（可观测，不暴露内容）。 */
-  queueSize(): { pending: number; retry: number; errors: number };
+  /** 队列长度 + 关闭态（可观测，不暴露内容）。 */
+  queueSize(): { pending: number; retry: number; errors: number; disabled: boolean };
   /** 显式失败记录（保留原因，不静默丢失）。 */
   errorRecords(): { rec: TraceRecord; reason: string; at: number }[];
-  /** 立即冲刷（绕过 batchSize 门控，仍受无 repoUrl/token 约束）。 */
+  /** 立即冲刷（绕过 batchSize 门控，仍受无 repoUrl/token/非法 batchSize 约束）。 */
   flushNow(): Promise<FlushResult>;
 }
 

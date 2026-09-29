@@ -41,6 +41,13 @@ export const MODEL_IDLE_MS = 300_000;
 /** 单次 HTTP 绝对上限。持续有字节时不被空闲计时切断，但仍不能无限挂住。 */
 export const MODEL_MAX_MS = 600_000;
 
+/**
+ * completions（旧版 /v1/completions 文本补全）模式的输出上限。
+ * R1-9：原先内联 1024 且无法从调用方覆盖，长摘要场景会被静默截断。
+ * 注意 chat/responses 模式不设该字段（由服务端默认值决定），保持原状。
+ */
+export const COMPLETIONS_MAX_TOKENS = 2048;
+
 export type ModelAbortHandle = {
   signal: AbortSignal;
   /** 收到响应头或任意正文字节时调用，重置空闲计时。不重置绝对上限。 */
@@ -149,25 +156,35 @@ export class OpenAiSseParser {
   content = '';
   finish?: unknown;
   usage?: unknown;
+  /** R1-3：见过流终止标记（[DONE] 或任一 finish_reason）。连接被中途切断时为 false。 */
+  sawTerminator = false;
   private buf = '';
   private toolsByIndex = new Map<number, SseToolAcc>();
-  constructor(private onDelta?: (chunk: string) => void) {}
+  private onDelta?: (chunk: string) => void;
+  constructor(onDelta?: (chunk: string) => void) {
+    // R1-7：onDelta 的契约是「失败不影响回合」（同 emitDelta）。解析器内裸调时，
+    // 调用方回调一抛错就穿破 readStreamingText 把整回合炸掉——这里包一层兜底。
+    this.onDelta = typeof onDelta === 'function'
+      ? (chunk: string) => { try { onDelta(chunk); } catch { /* 渲染层失败不影响回合 */ } }
+      : undefined;
+  }
   push(text: string): void {
     this.buf += text;
     const lines = this.buf.split(/\r?\n/);
     this.buf = lines.pop() || '';
     for (const line of lines) this.consumeLine(line);
   }
-  end(): { content: string; toolCalls: unknown; finish?: unknown; usage?: unknown } {
+  end(): { content: string; toolCalls: unknown; finish?: unknown; usage?: unknown; sawTerminator: boolean } {
     if (this.buf.trim()) this.consumeLine(this.buf);
     this.buf = '';
-    return { content: this.content, toolCalls: [...this.toolsByIndex.values()], finish: this.finish, usage: this.usage };
+    return { content: this.content, toolCalls: [...this.toolsByIndex.values()], finish: this.finish, usage: this.usage, sawTerminator: this.sawTerminator };
   }
   private consumeLine(line: string): void {
     const t = line.trim();
     if (!t.startsWith('data:')) return;
     const payload = t.slice(5).trim();
-    if (!payload || payload === '[DONE]') return;
+    if (!payload) return;
+    if (payload === '[DONE]') { this.sawTerminator = true; return; }
     let json: Record<string, unknown>;
     try { json = JSON.parse(payload) as Record<string, unknown>; } catch { return; }
     if (json.usage) this.usage = json.usage;
@@ -176,7 +193,7 @@ export class OpenAiSseParser {
       finish_reason?: unknown;
     }> | undefined)?.[0];
     if (!choice) return;
-    if (choice.finish_reason != null) this.finish = choice.finish_reason;
+    if (choice.finish_reason !== null && choice.finish_reason !== undefined) { this.finish = choice.finish_reason; this.sawTerminator = true; }
     const delta = choice.delta;
     if (delta?.content) {
       this.content += delta.content;
@@ -198,7 +215,7 @@ export class OpenAiSseParser {
 export function consumeOpenAiSse(
   raw: string,
   onDelta?: (chunk: string) => void,
-): { content: string; toolCalls: unknown; finish?: unknown; usage?: unknown } {
+): { content: string; toolCalls: unknown; finish?: unknown; usage?: unknown; sawTerminator: boolean } {
   const p = new OpenAiSseParser(onDelta);
   p.push(raw);
   return p.end();
@@ -208,23 +225,31 @@ export class OllamaNdjsonParser {
   content = '';
   toolCalls: unknown = [];
   done_reason?: unknown;
+  /** R1-3：见过流终止标记（done:true 或 done_reason）。连接被中途切断时为 false。 */
+  sawTerminator = false;
   private buf = '';
-  constructor(private onDelta?: (chunk: string) => void) {}
+  private onDelta?: (chunk: string) => void;
+  constructor(onDelta?: (chunk: string) => void) {
+    // R1-7：同 OpenAiSseParser——渲染层回调抛错不穿破解析器、不炸整回合。
+    this.onDelta = typeof onDelta === 'function'
+      ? (chunk: string) => { try { onDelta(chunk); } catch { /* 渲染层失败不影响回合 */ } }
+      : undefined;
+  }
   push(text: string): void {
     this.buf += text;
     const lines = this.buf.split(/\r?\n/);
     this.buf = lines.pop() || '';
     for (const line of lines) this.consumeLine(line);
   }
-  end(): { content: string; toolCalls: unknown; done_reason?: unknown } {
+  end(): { content: string; toolCalls: unknown; done_reason?: unknown; sawTerminator: boolean } {
     if (this.buf.trim()) this.consumeLine(this.buf);
     this.buf = '';
-    return { content: this.content, toolCalls: this.toolCalls, done_reason: this.done_reason };
+    return { content: this.content, toolCalls: this.toolCalls, done_reason: this.done_reason, sawTerminator: this.sawTerminator };
   }
   private consumeLine(line: string): void {
     const t = line.trim();
     if (!t) return;
-    let obj: { message?: { content?: string; tool_calls?: unknown }; done_reason?: unknown };
+    let obj: { message?: { content?: string; tool_calls?: unknown }; done?: unknown; done_reason?: unknown };
     try { obj = JSON.parse(t) as typeof obj; } catch { return; }
     const piece = obj.message?.content || '';
     if (piece) {
@@ -232,14 +257,15 @@ export class OllamaNdjsonParser {
       this.onDelta?.(piece);
     }
     if (obj.message?.tool_calls) this.toolCalls = obj.message.tool_calls;
-    if (obj.done_reason != null) this.done_reason = obj.done_reason;
+    if (obj.done === true) this.sawTerminator = true;
+    if (obj.done_reason != null) { this.done_reason = obj.done_reason; this.sawTerminator = true; }
   }
 }
 
 export function consumeOllamaNdjson(
   raw: string,
   onDelta?: (chunk: string) => void,
-): { content: string; toolCalls: unknown; done_reason?: unknown } {
+): { content: string; toolCalls: unknown; done_reason?: unknown; sawTerminator: boolean } {
   const p = new OllamaNdjsonParser(onDelta);
   p.push(raw);
   return p.end();
@@ -403,6 +429,9 @@ export async function callOllama(
       content: nd.content,
       toolCalls,
       source: toolCalls.length ? 'native' : 'none',
+      // R1-3：流未见到终止标记（done:true/done_reason）就结束 = 连接可能被中途切断，
+      // content 只是部分内容。非流式整包 JSON 不置此位。
+      truncated: !nd.sawTerminator && nd.content ? true : undefined,
       emptyReason: (!nd.content && !toolCalls.length)
         ? emptyContentReason({
             provider: provider.name, model, mode: 'ollama', status: res.status,
@@ -426,6 +455,8 @@ export async function callOllama(
         content: streamed.content,
         toolCalls,
         source: toolCalls.length ? 'native' : 'none',
+        // R1-3：同 nd 路径——回退解析同样可能拿到被切断的流。
+        truncated: !streamed.sawTerminator && streamed.content ? true : undefined,
         emptyReason: (!streamed.content && !toolCalls.length)
           ? emptyContentReason({
               provider: provider.name, model, mode: 'ollama', status: res.status,
@@ -503,7 +534,7 @@ export function buildRequest(base: string, mode: 'chat' | 'responses' | 'complet
   if (mode === 'completions') {
     return {
       url: isFullEndpoint ? base : clean + '/v1/completions',
-      body: { model, prompt: messages.map(m => `${m.role}: ${m.content || ''}`).join('\n'), max_tokens: 1024 },
+      body: { model, prompt: messages.map(m => `${m.role}: ${m.content || ''}`).join('\n'), max_tokens: COMPLETIONS_MAX_TOKENS },
     };
   }
   return {
@@ -668,6 +699,8 @@ export async function callOpenAICompatible(
         content: streamed.content,
         toolCalls,
         source: toolCalls.length ? 'native' : 'none',
+        // R1-3：SSE 未见到 [DONE]/finish_reason 就结束 = 流被中途切断，content 可能不完整。
+        truncated: !streamed.sawTerminator && streamed.content ? true : undefined,
         usage: normalizeApiUsage({ usage: streamed.usage }) || undefined,
         toolsRejected: canUseTools && !att.tools && streamed.content && toolProtocolRejected ? true : undefined,
         softToolsFallback: canUseTools && !att.tools && streamed.content && !toolProtocolRejected && toolsAttemptFailed > 0 ? true : undefined,
@@ -696,6 +729,8 @@ export async function callOpenAICompatible(
           content: streamed.content,
           toolCalls,
           source: toolCalls.length ? 'native' : 'none',
+          // R1-3：同 detector 路径——整包回退解析同样可能拿到被切断的流。
+          truncated: !streamed.sawTerminator && streamed.content ? true : undefined,
           usage: normalizeApiUsage({ usage: streamed.usage }) || undefined,
         toolsRejected: canUseTools && !att.tools && streamed.content && toolProtocolRejected ? true : undefined,
         softToolsFallback: canUseTools && !att.tools && streamed.content && !toolProtocolRejected && toolsAttemptFailed > 0 ? true : undefined,

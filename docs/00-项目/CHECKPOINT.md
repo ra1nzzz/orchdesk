@@ -276,3 +276,64 @@
 **剩余 backlog（41 项：P2×8 / P3×33）**：完整清单在 `_ocr_findings.json`（含位置/规则/修法/工作量）。P3 集中在命名与硬编码收敛（如默认模型名 7 处硬编码、`completions` 模式 `max_tokens: 1024` 无常量）、残留死代码（UI 重构后 `navDrawer*`/`loadViewMode`/`getSmartRecommendations` 整链无调用者）、以及文案术语墙。P2 剩余含 SSE 截断无提示（R1-3，需扩 ModelReply 类型）、models-test 无超时、审批弹窗初始焦点落在最宽松选项等。
 
 **验证**：全链 `pnpm run verify` CHAIN_EXIT=0；tsc EXIT=0；e2e **300/300**；verify-plugins 92/0、intent-gate 10/0、arch-guard 27/0、model-catalog 19/0、dsh-runtime 32/0。改动 plugin src 后已重编译 + 重 vendor（arch-guard R6 守护）。
+
+### OpenCodeReview 剩余项消化（2026-09-29 续）
+
+接上一节「剩余 backlog 41 项（P2×8 / P3×33）」，按用户批准的四步顺序执行。清单已归档到 `docs/40-质量/open-code-review-findings-2026-09-29.json`（上一节写的 `_ocr_findings.json` 已不存在，以归档件为准）。
+
+**第 1 步 · 守护失效三项（本轮最高风险，守护本身失效比被守护的 bug 更危险）**
+
+| 编号 | 问题 | 修法 |
+|---|---|---|
+| R3-16 | `verify-plugins.mjs` 给同步的 `withhold(text: string)` 传对象，并断言不存在的 `proceed` 字段 → **恒真的假断言**，守护看着绿实际没验 | 改三条真断言：按字符串入参验 withhold / `firePreStep` + `setOutcome('rejected')` 验 reject / unavailable 验 reject |
+| R4-2 | 审批应答通道 `ipcMain.on` 不过 sender 门 → 任意渲染层可代答审批 | 补 `if (e && e.senderFrame) return;`（**必须空安全**：测试探针以 `null` 事件驱动该通道，直接写 `e.senderFrame` 会炸 4 个 credentials-verify 用例） |
+| R3-9 | evolution HARD_DENY 漏 ESM 形态，`import cp from 'node:child_process'` 不被拦 | 补 `esm-node-builtin` / `esm-remote-import` 两条规则；`staticGate` 开头加 `typeof spec?.code !== 'string'` fail-closed 拒绝 |
+
+**第 2 步 · UI 重构残留清理**：删约 200 行死码——`VIEWMODE_*` 全套、`navDrawer*` 整链（含 `#navDrawerRoot` 容器、`nav-drawer`/`view-mode-toggle` 注册、Esc 分支）、`escalateToProject`/`toggleViewMode` 空壳及 4 处调用点、`getSmartRecommendations`（68 行）+ `act_quick_weekly` + 8 个 `quick-*` 注册、`.proj-select`/`.ps-*` 16 行死 CSS、A 组单行死码 6 处。
+
+**第 3 步 · 硬编码收敛**
+- R1-8：6 处 `'qwen3:14b'` 收敛为 `agent-runtime.ts` 的 `DEFAULT_MODEL` + `pickModel(provider, cfg, requested?)`。**注意 requested 参数**——第一版把用户显式选的模型吞了，是回归，靠对照原逻辑抓住。
+- R1-9：`completions` 模式 `max_tokens: 1024` → `COMPLETIONS_MAX_TOKENS = 2048`（原值会把长摘要静默截断）。
+- R5-17：归档容器兜底不再硬编码种子 id `'p3'`，统一走 `__archived__` 虚拟容器（与 `doArchiveProject` 同口径，找不到就建）；终端上限 `6` 提为渲染层常量 + **新增 arch-guard R18** 机械校验与 `terminal-tools.ts` 的 `TERMINAL_MAX_SESSIONS` 一致（沿用 R10/R11 的跨构建边界单源模式）。R18 第一版自身有 bug（`stray` 为 null 时 `.join` 抛错），正是本轮在修的同类「守护失效」。
+- R5-13：`networkAllow` 兜底从 `['*']`（悄悄放开全网）改 `[]`，并加 `loaded` 标志区分「未拉取」与「空 = 全部拒绝」——原文案明写「留空 = 全部拒绝（fail-closed）」，代码却反着来。
+
+**第 4 步 · 按文件簇并行消化**：8 个并行子代理按模块分派（authz / intent / compensation / multi+brain / trace+memory+prompt / model-client / main.ts / ipc-browser+host-services+file-panel+preload），父代理接手风险最高的 `renderer/app.js`。
+
+**核对结论（重要）**：41 项里有相当一部分在 HEAD `a4e2bd0` 已修（R5-01/02/03/04/06/07/08、R2-6/7/8、R1-1/2、R3-1/3/4/5/6/7、R4-1/3、R5-14/15/16 的部分）。逐条核对后**只对确有缺口的做增量**，不重复改动——避免把已修的东西改出空 diff 或回归。
+
+**本轮真正新增的增量**
+
+| 编号 | 问题 | 修法 |
+|---|---|---|
+| R3-3 | authz 审批监听器 paranoid 早退不完整：HEAD 版只「跳过白名单」仍弹窗，偏执下用户点允许仍能开门 | 监听器最前 `paranoid` → `rejected` + 审计；读不到档位按最严。定论：白名单分支**保留**（桌面链路审批唯一发起方是 `host-services.approval.request`，但该监听器是 ADR-0008 明确的 dsh 管道 seam，删掉会丢 FR-9 语义且不增加安全性） |
+| R3-10 | intent G4 对**无 scheme 的裸串**整体 toLowerCase 当 host → `evil.net/x.api.openai.com` 命中 `.api.openai.com` 后缀，白名单被绕过 | 补 `hostOf()`：裸串也只取 host 段、剥 userinfo/端口，剥不出返回 `''` → 拒绝 |
+| R3-8 | 补偿层 HEAD 版把 withhold 判定**内联复制**到 pre-step 门——行为一致但两处各写一遍，改一处忘另一处就又分裂 | 提取 `needsWithhold(text)` 唯一判定处，两处都调 |
+| R3-13 | 补偿类别规则无边界子串：commit 命中 commitment、API 命中 rapid、GET/POST 命中 budget/poster → 普通对话被判 network-egress/irreversible，整回合弹确认 | 英文词加 `\b` 边界；HTTP 方法拆成**大小写敏感**独立规则（整表带 `/i`，`\bGET\b` 照样命中动词 get，只加边界不消误报）；补 `\bdelete\b`（英文删除原先完全不被命中，与文件头「删除文件默认 CONFIRM」承诺相反） |
+| R3-11 | trace `batchSize` 无下限，配 0 时 `splice(0,0)` 永返空批 → **死循环**且 flushing 永不复位 | schema `.min(1).default(20)` + flush 循环内双保险 break |
+| R3-12 | trace 关闭 = repoUrl 置空 → 插件直接 `return` 丢弃，宿主注释却承诺「只缓冲不上传，不静默丢数据」 | `queueSize()` 增补 `disabled: boolean` 并经 IPC 透出；宿主注释改为「直接不记录」，`TraceServiceLike` 类型同步 |
+| R3-14 | memory `dump()` 在每块摘要循环内调 `vectorizeCorpus()` → O(块数 × 语料大小)，单次 dump 数十次全语料遍历 | 提到循环外一次算完（注释已论证 IDF 时差可接受，提出去不改变结论） |
+| R3-15 | prompt `update()` 用 `{...cur, ...patch}` 浅合并 → 调用方传显式 `undefined` 就把 priority 重置 0、agents 重置 [] | 逐键过滤 undefined |
+| R1-3 | SSE/NDJSON 的 `[DONE]`/`finish_reason`/`done:true` 被忽略 → 连接中途 FIN/RST 时**半截内容当完整答复返回，无任何提示** | 两个 parser 记 `sawTerminator`，`ModelReply` 加 `truncated?: boolean`；**agent-turn 消费侧**补「响应可能不完整」提示（不消费则字段就绪但 UI 仍静默） |
+| R1-7 | `emitDelta` 有 try/catch 并注释「渲染层失败不影响回合」，但 parser 内 `onDelta` 调用无保护 → 契约自相矛盾，换调用方即踩雷 | parser 构造时包一层 |
+| R4-4 | host-services `sessionModes` 原样采信磁盘值 → 损坏的 sandbox.json 写入非法模式串后该会话被当作可写（顶层 mode 有白名单回落，这里漏了） | 装载时逐值过 `SANDBOX_MODES` |
+| R4-5 | file-panel `expectedMtimeMs` 嵌套三元 | 抽 `toFiniteNumber()`（**不钳制**——mtime 是外部修改检测基线，钳成默认值等于放过过期写入） |
+| R4-7 | preload 声明 `mergePrompts(category, body)` 返回 `{ok, conflicts}`，handler 实际只收一个 agentId、返回无 `ok` 字段 → body 死参数、ok 假类型 | 签名改 `(agentId: string)`，返回类型对齐 `MergeResult` |
+| R4-9 | `load-sessions` filter 回调 `(s: any)` 绕过类型保护 | 局部 `type StoredSession` + 类型谓词，真值语义逐字等价 |
+| R1-5 | trace 两个 handler 内 `const/let dataDir` 遮蔽模块级 `function dataDir()` | 改名 `dir` |
+| R1-6 | `models-test` 不传 signal 不包 withTimeout → 黑洞端点悬挂约 10 分钟 | 包 `withTimeout(..., 30_000)`，超时文案可读（剥掉 `summarize-timeout:` 前缀） |
+| R4-8 | host-services `followup` 里 `const meta = agents.get(...); void meta;` 死语句 | 删除（定论：`git log -S` 证实自引入起就是死的；真要传 meta 得先改 Map 结构 + main.ts 运行器，而运行器对 meta 零消费，接了只是把死代码搬家） |
+| R4-6 | `==`/`!=` 散落 10 处（含 sender 门这一安全关键判断） | main.ts 3 处 + data-dir/mcp-client 5 处全改；`connector-registry.ts:429` **保留**（TAPD status 可能是数字或字符串，宽松相等是语义需求，已带 `eslint-disable eqeqeq` + 注释） |
+| R2-11 | `state.ctxOpen` 初值是数字 0，与其余布尔字段不一致，取反后类型在 number/boolean 间摇摆 | 改 `false` |
+| R5-11 | statbar 授权模式点配色三层嵌套三元 | 提 `authModeDotColor()` 查表（未接入给 `fg-faint`，不挂绿点） |
+| R5-15 | 补偿记录 `(e.text||'').replace(/</g,'&lt;')` 只转 `<`，`e.note` 完全未转义 → 含 `&lt;` 的原文被解码后显示成别的字符 | 统一 `esc()` |
+| R2-9 | `render()` catch 把 `err.stack` 原样拼 innerHTML → 错误信息携带的用户文本可注入页面（同函数未知页分支本来就走 `esc()`，口径不一致） | `esc()` |
+| R2-10 | 我方的清理脚本把 7 个渲染层文件写成 CRLF 主导 + 裸 LF 混合（仓库规范形态是 LF，`core.autocrlf=true` 只是检出副作用） | 归一为纯 LF；`git diff` 仍是纯内容变更 |
+| R2-12 | index.html 标题栏注释同时写着「☰ 唤出导航抽屉」和「三入口轨常驻」——同一注释块自相矛盾；`renderRail` 注释承诺「底部给模式切换」而实际只有主题切换 | 两处注释改到与实现一致 |
+| R3-1 | （补测试缺口）`verify-plugins.mjs` 的 B-4 用例只覆盖字面量 `'*'`，没有 `'**'`/`'* *'`/`' * '` 的 permanent 用例 | 补 4 条 |
+
+**验证**：全链 `pnpm run verify` **CHAIN_EXIT=0**；tsc EXIT=0；e2e **300/300**；verify-plugins **94/0**（新增 4 条 B-4 用例）；intent-gate 10/0；verify-orchestration 50/0；verify-trace-upload 37/0；arch-guard **28/0**（新增 R18）；model-loop 50/0；model-catalog 19/0；file-panel 20/0；file-edit 20/0；browser-tools 44/0。改 plugin src 后 9 个包全部重编译 + 重 vendor。
+
+**遗留（不在本轮范围，已记录待跟踪）**
+- compensation / evolution 直接调 `ctx.approval.request`，paranoid 模式下仍弹 GUI 确认（不涉白名单，但与「paranoid = 任何 ask 自动拒绝」的产品承诺不一致）。
+- `e2e-fix-verify.cjs` 的 bridge mock 用自己一套简化正则，与真实 `CATEGORY_RULES` 不一致（测试夹具占位实现，是「两处判定可能分叉」的同类隐患）。
+- `main.ts` 里那批 `DEFAULT_MODEL`/`pickModel` 注释行号引用可能随后续改动漂移。

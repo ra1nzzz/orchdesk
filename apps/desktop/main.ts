@@ -66,6 +66,8 @@ import {
   type ToolResult,
   MAX_TOOL_ITERATIONS_CAP,
   MAX_TOOL_ITERATIONS_DEFAULT,
+  DEFAULT_MODEL,
+  pickModel,
 } from './agent-runtime';
 import { isAbsoluteLike } from './common-tools';
 import { callModel as callModelHttp, initModelClient } from './model-client';
@@ -127,7 +129,8 @@ refreshCatalogInBackground();
 // 生效即全覆盖，无需逐个改动。拒绝一律抛错（fail-closed，不静默回假数据）。
 // ---------------------------------------------------------------------------
 function isTrustedIpcSender(sender: unknown): boolean {
-  if (sender == null) return true; // 进程内直调（测试后门等），非真实 webContents
+  // R4-6：项目规则禁用 ==/!=（null 合并判断也列外），空值两种形态显式并列。
+  if (sender === null || sender === undefined) return true; // 进程内直调（测试后门等），非真实 webContents
   try {
     return !!(bootDesktop.mainWindow && !bootDesktop.mainWindow.isDestroyed() && sender === bootDesktop.mainWindow.webContents);
   } catch { return false; }
@@ -340,7 +343,7 @@ function loadModelConfig(): ModelConfig {
     const file = MODELS_FILE();
     // 三路径默认一致（MAX_TOOL_ITERATIONS_DEFAULT = 200；用户显式配置最多到 500，见 saveModelConfig 钳制）。
     // 坏文件回落到保守值而非「假装健康」，与项目 fail-closed 纪律一致。
-    if (!fs.existsSync(file)) return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: MAX_TOOL_ITERATIONS_DEFAULT };
+    if (!fs.existsSync(file)) return { providers: [], defaultProvider: 'ollama', defaultModel: DEFAULT_MODEL, maxToolIterations: MAX_TOOL_ITERATIONS_DEFAULT };
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
     let migrated = false;
     const providers = (raw.providers as Array<Record<string, unknown>> | undefined)?.map(p => {
@@ -357,14 +360,14 @@ function loadModelConfig(): ModelConfig {
     const cfg: ModelConfig = {
       providers,
       defaultProvider: (raw.defaultProvider as string | undefined) || 'ollama',
-      defaultModel: (raw.defaultModel as string | undefined) || 'qwen3:14b',
+      defaultModel: (raw.defaultModel as string | undefined) || DEFAULT_MODEL,
       // ?? 而非 ||：显式配置 0 不应用默认值吞掉（虽随后被消费端钳到 1）。
       maxToolIterations: (raw.maxToolIterations as number | undefined) ?? MAX_TOOL_ITERATIONS_DEFAULT,
     };
     const hasPlainKey = migrated;
     if (hasPlainKey) saveModelConfig(cfg);
     return cfg;
-  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: 'qwen3:14b', maxToolIterations: MAX_TOOL_ITERATIONS_DEFAULT }; }
+  } catch { return { providers: [], defaultProvider: 'ollama', defaultModel: DEFAULT_MODEL, maxToolIterations: MAX_TOOL_ITERATIONS_DEFAULT }; }
 }
 
 function saveModelConfig(cfg: ModelConfig): void {
@@ -585,11 +588,18 @@ ipcMain.handle('orchdesk:tool-execute', async (_e, tool: ToolCall) => {
 // 渲染层 init 的首个 IPC（load-sessions）即视为就绪——在那之前不存在用户输入源。
 let rendererReady = false;
 
+/** 存档会话的最小形状：store 的值类型是 unknown，读侧必须窄气（R4-9，不再用 any 绕过）。 */
+type StoredSession = { id?: string; msgs?: unknown };
+function isStoredSession(s: unknown): s is StoredSession {
+  if (!s || typeof s !== 'object') return false;
+  const o = s as StoredSession;
+  return !!o.id && Array.isArray(o.msgs) && o.msgs.length > 0;
+}
+
 ipcMain.handle('orchdesk:load-sessions', async () => {
   rendererReady = true;
   // 只返回有效会话（有真实消息的）；忽略过期数据
-  const all = Object.values(store);
-  return all.filter((s: any) => s && s.id && Array.isArray(s.msgs) && s.msgs.length > 0);
+  return Object.values(store).filter(isStoredSession);
 });
 
 // 插件真实热插拔（FR-3）：启用 = 注册 effect，停用 = 逆回滚，不重启、无残留
@@ -718,8 +728,17 @@ ipcMain.handle('orchdesk:models-get', async () => {
 
 ipcMain.handle('orchdesk:models-save', async (_e, config: unknown) => {
   try {
-    const current = loadModelConfig();
+    // R4-3：入参闸门。config 来自渲染层（preload 只标 Record<string, unknown>），
+    // 缺 providers / providers 非数组 / 条目非对象时，原实现会把
+    // `incoming.providers.map is not a function` 这类内部结构错误直接回给 UI。
+    // 先校验再动任何状态（loadModelConfig 可能触发明文 key 迁移落盘）。
+    if (!config || typeof config !== 'object') return { ok: false, reason: '模型配置格式不合法（必须是对象）' };
     const incoming = config as ModelConfig;
+    if (!Array.isArray(incoming.providers)) return { ok: false, reason: '模型配置格式不合法（providers 必须是数组）' };
+    if (incoming.providers.some((p) => !p || typeof p !== 'object')) {
+      return { ok: false, reason: '模型配置格式不合法（providers 含非对象条目）' };
+    }
+    const current = loadModelConfig();
     current.providers = incoming.providers.map(p => {
       const existing = current.providers.find(e => e.id === p.id);
       const apiKeyEnc = (p as unknown as Record<string, unknown>).apiKey ? encryptKey((p as unknown as Record<string, unknown>).apiKey as string) : (existing?.apiKeyEnc || '');
@@ -739,16 +758,31 @@ ipcMain.handle('orchdesk:models-save', async (_e, config: unknown) => {
   }
 });
 
+/**
+ * 「测试连接」超时上限（R1-6）：callModel 自身最坏等 MODEL_MAX_MS（600s）+ 空闲 300s，
+ * 黑洞端点会让设置页的「测试连接」无反馈悬挂约 10 分钟。取 30s：慢端点（冷启动 Ollama /
+ * 跨境中转）仍能通过，真挂死的端点不会把人钉在设置页。
+ */
+const MODEL_TEST_TIMEOUT_MS = 30_000;
+
 ipcMain.handle('orchdesk:models-test', async (_e, providerId: string, model: string) => {
   const cfg = loadModelConfig();
   const provider = cfg.providers.find(p => p.id === providerId);
   if (!provider) return { ok: false, error: '提供商不存在' };
   const t0 = Date.now();
   try {
-    await callModel(provider, model, [{ role: 'user', content: 'ping' }]);
+    // R1-6：包一层超时（与记忆摘要 seam 同手段）。不传 signal——测试连接没有回合上下文，
+    // 也没有可 abort 的对象；超时由 Promise.race 兜底。
+    await withTimeout(callModel(provider, model, [{ role: 'user', content: 'ping' }]), MODEL_TEST_TIMEOUT_MS);
     return { ok: true, latencyMs: Date.now() - t0 };
   } catch (err) {
-    return { ok: false, error: (err as Error).message, latencyMs: Date.now() - t0 };
+    const msg = (err as Error).message || String(err);
+    // withTimeout 的拒绝信息固定为 `summarize-timeout:<ms>`（memory-summarize 未参数化错误
+    // 文案），回给设置页的必须是可读的超时说明，而不是别的模块的内部措辞。
+    if (/^summarize-timeout:/.test(msg)) {
+      return { ok: false, error: `连接测试超时（${MODEL_TEST_TIMEOUT_MS / 1000} 秒内无响应，请检查 Base URL 与网络）`, latencyMs: Date.now() - t0 };
+    }
+    return { ok: false, error: msg, latencyMs: Date.now() - t0 };
   }
 });
 
@@ -848,7 +882,7 @@ async function bootRuntime(): Promise<void> {
       const cfg = loadModelConfig();
       if (!cfg.providers.length) return { text: '（未配置模型）SubAgent 无法执行' };
       const provider = cfg.providers[0]!;
-      const model = (provider.models || [])[0] || cfg.defaultModel || 'qwen3:14b';
+      const model = pickModel(provider, cfg);
       const reply = await callModel(provider, model, messages as ApiMessage[]);
       return { text: reply.content };
     });
@@ -868,7 +902,7 @@ async function bootRuntime(): Promise<void> {
         // 没配模型就直接抛 —— 让插件走兜底，而不是在这塞一句「（未配置模型）」
         // 当记忆存进去（那会污染语料，且召回出来是噪声）。
         if (!provider) throw new Error('no-provider');
-        const model = (provider.models || [])[0] || cfg.defaultModel || 'qwen3:14b';
+        const model = pickModel(provider, cfg);
         const texts = (messages || []).map(extractSummarizeText);
         const reply = await withTimeout(
           callModel(provider, model, buildSummarizeMessages(texts) as ApiMessage[]),
@@ -914,13 +948,13 @@ async function bootRuntime(): Promise<void> {
 
 // ---- TRACE 上报开关（TOKEN 加密内置于包内；用户仅可开关，默认开）----
 // enabled=false → dsh-runtime 装载 trace 时 repoUrl 置空 → 只缓冲不上传（观测照旧）。
-// 切换写 <dataDir>/trace.json，**重启生效**（config 在插件装载时注入）。
+// 切换写 <数据目录>/trace.json，**重启生效**（config 在插件装载时注入）。
 ipcMain.handle('orchdesk:trace-status', () => {
   let enabled = true;
   try {
-    const dataDir = getDataDir();
+    const dir = getDataDir();
     try {
-      const f = JSON.parse(fs.readFileSync(path.join(dataDir, 'trace.json'), 'utf-8')) as { enabled?: boolean };
+      const f = JSON.parse(fs.readFileSync(path.join(dir, 'trace.json'), 'utf-8')) as { enabled?: boolean };
       if (typeof f.enabled === 'boolean') enabled = f.enabled;
     } catch { /* 缺省开 */ }
   } catch { /* 数据目录未就绪：保持缺省开，builtin 探测照常 */ }
@@ -932,10 +966,10 @@ ipcMain.handle('orchdesk:trace-status', () => {
   return { enabled, builtin };
 });
 ipcMain.handle('orchdesk:trace-set-enabled', (_e, enabled: boolean) => {
-  let dataDir = '';
-  try { dataDir = getDataDir(); } catch { return { ok: false, reason: '数据目录未就绪' }; }
+  let dir = '';
+  try { dir = getDataDir(); } catch { return { ok: false, reason: '数据目录未就绪' }; }
   try {
-    fs.writeFileSync(path.join(dataDir, 'trace.json'), JSON.stringify({ enabled: !!enabled }, null, 2), 'utf-8');
+    fs.writeFileSync(path.join(dir, 'trace.json'), JSON.stringify({ enabled: !!enabled }, null, 2), 'utf-8');
     return { ok: true, requiresRestart: true };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
@@ -949,7 +983,9 @@ registerSandboxIpc(ipcMain);
 // 此前按钮只改渲染层本地 Set + persist()，反馈从未进入遥测链路。
 interface TraceServiceLike {
   recordFeedback(intent: string, feedback: string, sessionKey?: string, messageKey?: string): void;
-  queueSize(): { pending: number; retry: number; errors: number };
+  // R3-12：disabled = repoUrl 为空（用户关了遥测）。没有它，UI 分不清「队列空」
+  // 与「已关闭」——前者是健康，后者是配置态，显示成同一件事就是撒谎。
+  queueSize(): { pending: number; retry: number; errors: number; disabled?: boolean };
 }
 ipcMain.handle(
   'orchdesk:trace-feedback',
@@ -1120,7 +1156,8 @@ function readJsonFile(file: string): unknown | null {
 
 /** 把备份包内的凭据类（guanji/hub）搬进数据目录：目标不存在才写，绝不覆盖。 */
 function importCredentialSection(root: string, name: string, data: unknown, imported: Record<string, number>): boolean {
-  if (data == null || typeof data !== 'object') return false;
+  // R4-6：typeof 已覆盖 undefined，这里只需显式并列 null（禁 == null）。
+  if (data === null || typeof data !== 'object') return false;
   const target = path.join(root, name);
   if (fs.existsSync(target)) return false; // 目标侧已有凭据：保留，不覆盖
   fs.writeFileSync(target, JSON.stringify(data), 'utf-8');
@@ -1210,7 +1247,7 @@ ipcMain.handle('orchdesk:import-data', async () => {
     const notes: string[] = [];
     for (const [key, fileName] of [['guanji', DATA_FILE_NAMES.guanji], ['hub', DATA_FILE_NAMES.hub]] as const) {
       const section = bundle[key];
-      if (section == null) continue;
+      if (section === null || section === undefined) continue; // R4-6：禁 == null
       if (!credentialSectionValid(fileName, section)) {
         notes.push(`${key === 'hub' ? 'Hub' : '观雅集'}凭据结构无效，已跳过（拒绝明文凭据落盘）`);
         continue;

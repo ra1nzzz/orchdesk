@@ -295,6 +295,13 @@ function tick(n = 3) {
       [{ tool: '*', pattern: '*', scope: 'permanent' }, '永久全放行规则'],
       [{ tool: 'file_write', pattern: '*', scope: 'permanent' }, '永久 + 全目标'],
       [{ tool: '*', pattern: 'D:/work/*', scope: 'permanent' }, '永久 + 全工具'],
+      // R3-1：B-4 原来只比对字面量 '*'。'**' 及任意「去 * 后为空」的模式经
+      // grantPatternToRegExp 编译成 ^[\s\S]*[\s\S]*$，同样命中一切目标——
+      // 一条 tool=file_write, pattern='**', scope=permanent 就等于永久免审写任意文件。
+      [{ tool: 'file_write', pattern: '**', scope: 'permanent' }, '永久 + ** 全目标'],
+      [{ tool: 'file_write', pattern: '***', scope: 'permanent' }, '永久 + 连续星号'],
+      [{ tool: 'file_write', pattern: '* *', scope: 'permanent' }, '永久 + 空格分隔星号'],
+      [{ tool: 'file_write', pattern: ' * ', scope: 'permanent' }, '永久 + 空白包裹星号'],
     ];
     for (const [input, why] of cases) {
       const r = authz.grant(input);
@@ -775,14 +782,31 @@ function tick(n = 3) {
     }
     assert(comp.requiresWithhold('other') === false, 'other 不应需 withhold');
   });
-  await check('fail-closed：审批被拒时 withhold 不通过', async () => {
+  // R3-16：原来这条用例调 comp.withhold({text, sessionId})——withhold 的签名是
+  // (text: string) 且是**同步的 UI 预判器**（供设置页画「不可撤销」警示条），传对象会被
+  // classifyOutbound 归为 other、needsConfirm=false；断言又读返回物上不存在的 proceed
+  // 字段 → `undefined !== true` 恒真。这条 fail-closed 守护从来没真正跑过。
+  // 现在拆成两条：withhold 自身按正确签名验；「审批被拒 → 拦截」走真正的
+  // pre-step + approval seam 验。
+  await check('withhold 按文本判需否二次确认（UI 预警条数据源）', () => {
+    const yes = comp.withhold('把这封邮件发送给客户');
+    assert(yes && yes.needsConfirm === true, '外发文本应需二次确认，实际 ' + JSON.stringify(yes));
+    assert(typeof yes.warning === 'string' && yes.warning.length > 0, '需确认时应带警示文案');
+    const no = comp.withhold('帮我总结一下这段话');
+    assert(no && no.needsConfirm === false, '无害文本不应需确认，实际 ' + JSON.stringify(no));
+  });
+  await check('fail-closed：审批被拒时外发被拦截（reject）', async () => {
     try {
       setOutcome('rejected');
-      const r = await comp.withhold({ text: '发送消息给客户', sessionId: 's1' });
-      assert(r && r.proceed !== true, '审批被拒时不应放行：' + JSON.stringify(r));
+      const d = await firePreStep('把这封邮件发送给客户');
+      assert(d && d.kind === 'reject', '审批被拒时应 reject，实际 ' + JSON.stringify(d));
     } finally {
       setOutcome('unavailable');
     }
+  });
+  await check('fail-closed：审批无人应答（unavailable）时外发被拦截', async () => {
+    const d = await firePreStep('把这封邮件发送给客户');
+    assert(d && d.kind === 'reject', '无应答方时应 reject，实际 ' + JSON.stringify(d));
   });
   await check('getAudit 返回数组', () => {
     assert(Array.isArray(comp.getAudit()), '审计应返回数组');

@@ -286,7 +286,9 @@ const orchdesk = {
 
   /**
    * 用户亲手把窗口切到某个已访问过的页面（侧栏点 TAB 卡片）。
-   * 用户操作不走授权门，且目标 URL 本来就是 Agent 访问过的。
+   * 用户操作不走授权门，但主进程侧强制 SSRF 主机黑名单（isBlockedHost：内网/回环/
+   * 元数据一律拒绝）并记沙箱日志——不假设 URL 一定来自 Agent：bridge 暴露给页面
+   * 全局，被攻陷的渲染层传任意 URL 也到不了内网（R4-1）。
    */
   browserGoto: (url: string): Promise<{ ok: boolean; reason?: string; state?: Record<string, unknown> }> =>
     ipcRenderer.invoke('orchdesk:browser-goto', url),
@@ -402,9 +404,9 @@ const orchdesk = {
   listPrompts: (): Promise<Array<Record<string, unknown>>> =>
     ipcRenderer.invoke('orchdesk:prompt-list'),
 
-  /** 合并类别提示词（冲突标记）。 */
-  mergePrompts: (category: string, body: string): Promise<{ ok: boolean; conflicts?: Array<Record<string, unknown>> }> =>
-    ipcRenderer.invoke('orchdesk:prompt-merge', category, body),
+  /** 合并类别提示词（按 agentId；返回 sections 与显式冲突列表，无 ok 包层）。 */
+  mergePrompts: (agentId: string): Promise<{ sections: Array<Record<string, unknown>>; conflicts: Array<Record<string, unknown>> }> =>
+    ipcRenderer.invoke('orchdesk:prompt-merge', agentId),
 
   /** 保存单个提示词。 */
   savePrompt: (doc: Record<string, unknown>): Promise<{ ok: boolean }> =>

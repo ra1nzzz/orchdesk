@@ -150,6 +150,17 @@ export type NormalizedFileWrite = {
 export type RejectedFileWrite = { ok: false; reason: string };
 
 /**
+ * 数值入参归一化：number 原样、非空数字串转数值，其余 NaN（调用方按「缺失」拒绝）。
+ * 与 common-tools.ts 的 clampInt 同源但**不钳制**：expectedMtimeMs 是外部修改检测的
+ * 基线，钳成默认值等于放过一次过期写入。NaN/Infinity 原样返回，由调用方判有限。
+ */
+function toFiniteNumber(v: unknown): number {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string' && v.trim() !== '') return Number(v);
+  return NaN;
+}
+
+/**
  * 文件写回参数归一化。三条防呆都是「事故预防」而非安全边界：
  *  1. 二进制扩展名拒绝——把图片当文本保存必然损坏；
  *  2. 内容 ≤2MB——与读取上限一致，超限说明编辑器拿到了不该拿的东西；
@@ -170,11 +181,7 @@ export function normalizeFileWrite(
   if (bytes > FILE_READ_MAX_BYTES) {
     return { ok: false, reason: `内容超过写入上限（${humanSize(FILE_READ_MAX_BYTES)}）` };
   }
-  const mt = typeof src.expectedMtimeMs === 'number'
-    ? src.expectedMtimeMs
-    : typeof src.expectedMtimeMs === 'string' && src.expectedMtimeMs.trim() !== ''
-      ? Number(src.expectedMtimeMs)
-      : NaN;
+  const mt = toFiniteNumber(src.expectedMtimeMs);
   if (!Number.isFinite(mt) || mt < 0) {
     return { ok: false, reason: '缺少 expectedMtimeMs（外部修改检测）' };
   }

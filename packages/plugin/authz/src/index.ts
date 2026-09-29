@@ -507,20 +507,25 @@ export function apply(ctx: Context, config: AuthzConfig): void {
         sessionId,
       });
       // PRD FR-9：白名单命中即放行（hits++ 并入审计），不再惊动用户。
-      // R3-3：偏执模式下**这里也不认白名单**。原实现把 paranoid 的拦截完全推给
-      // 「主进程 approvalGate」，但本监听器本身就是 dsh 工具管道的 approval seam——
-      // 一旦审批确实由这条链路发起，一条永久白名单就能在偏执（全锁）模式下开门，
-      // 与「切到偏执 = 全锁」的产品承诺直接矛盾。fail-closed：宁可多问一次。
+      // R3-3 定论：桌面链路审批的实际发起方是主进程 approvalGate →
+      // host-services.approval.request（直接调注入的 uiAnswerer，不发本事件，
+      // 见 main.ts:451-471 与 host-services.ts:345-384）；本监听器是 dsh 工具
+      // 管道 / ADR-0008 完整 AgentLoop 的 seam。两条路径现在同序：先判档位，
+      // paranoid（全锁）一律 'rejected' 不弹窗——永久白名单在偏执模式下不开门
+      // （原实现把拦截完全推给 approvalGate，本 seam 自己却会放行）。
+      // fail-closed：读不到档位按最严（paranoid）处理。
       let mode: AuthzMode = 'default';
-      try { mode = await getMode(sessionId); } catch { /* 读不到档位按最严处理 */ mode = 'paranoid'; }
-      if (mode !== 'paranoid') {
-        const hit = matchGrant({
-          toolName: req.toolName,
-          target: (req as { target?: string }).target,
-          sessionId,
-        });
-        if (hit) return 'allowed-once';
+      try { mode = await getMode(sessionId); } catch { mode = 'paranoid'; }
+      if (mode === 'paranoid') {
+        pushAudit({ kind: 'approval-decided', ts: Date.now(), outcome: 'rejected', toolName: req.toolName, sessionId, reason: 'paranoid（全锁）模式自动拒绝，不弹窗' });
+        return 'rejected';
       }
+      const hit = matchGrant({
+        toolName: req.toolName,
+        target: (req as { target?: string }).target,
+        sessionId,
+      });
+      if (hit) return 'allowed-once';
       if (!uiAnswerer) {
         // 无 GUI 应答方（headless / 未接 Electron）：交还 dsh 默认链路；
         // dsh 无应答方时解析 unavailable → fail-closed（不开门），符合硬约束。

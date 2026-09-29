@@ -74,7 +74,13 @@ const HARD_DENY: { pattern: RegExp; label: string }[] = [
   { pattern: /((?:globalThis|global|window)\s*\[\s*['"`](?:process|require|eval)['"`]\s*\])/i, label: 'global-escape' },
   { pattern: /\.constructor\s*\(\s*['"`]/i, label: 'prototype-escape' },
   { pattern: /(\brequire\s*\(\s*['"`](?!(\.\.?\/|\.)|safe-)[^'"`]*['"`]\s*\))/i, label: 'unsafe-require' },
-  { pattern: /(\bimport\s*\(|from\s+['"`]https?:\/\/)/i, label: 'remote-import' },
+  // R3-9：原来只抓 CJS 的 require(...) 与动态 import(，**静态 ESM 导入完全不在任何
+  // 规则里**——`import cp from 'node:child_process'` / `import 'node:fs'` 可直接拿到
+  // 子进程与文件系统，把整道静态门绕掉。补两条：node: 内置模块导入（进程/子进程/
+  // fs/vm 类）+ http(s) 远程导入。相对路径与 safe- 前缀同 require 的口径放行。
+  { pattern: /(\bimport\s+[^;\n]*?from\s+['"`]node:(?:child_process|fs|node:fs|vm|worker_threads|process)[^'"`]*['"`]|\bimport\s+['"`]node:(?:child_process|fs|vm|worker_threads|process)['"`])/i, label: 'esm-node-builtin' },
+  { pattern: /(\bimport\s+[^;\n]*?from\s+['"`]https?:\/\/[^'"`]*['"`]|\bimport\s+['"`]https?:\/\/[^'"`]*['"`])/i, label: 'esm-remote-import' },
+  { pattern: /(\bimport\s*\(|from\s+['"`]https?:\/\/|\bimport\s+['"`]https?:\/\/)/i, label: 'remote-import' },
   { pattern: /\bvm\.(runInThisContext|runInNewContext|createContext)\s*\(/i, label: 'vm-escape' },
 ];
 
@@ -86,6 +92,11 @@ const SANDBOX_REQUIRED: { pattern: RegExp; label: string }[] = [
 ];
 
 export function staticGate(spec: TempPluginSpec): GateResult {
+  // R3-9：spec.code 不是字符串时（宿主/桥构造畸形 spec）原来会把 undefined 喂给
+  // 正则，test(undefined) 恒 false → 门对畸形 spec 全盘放行。fail-closed：拒。
+  if (typeof spec?.code !== 'string' || !spec.code.trim()) {
+    return { allowed: false, reason: '静态分析无法进行：spec.code 不是非空字符串', requiresSandbox: true };
+  }
   for (const rule of HARD_DENY) {
     if (rule.pattern.test(spec.code)) {
       return { allowed: false, reason: `静态分析命中硬拒绝模式：${rule.label}`, requiresSandbox: true };

@@ -123,6 +123,12 @@
     const m = authModesForRender().find((x) => x.id === id);
     return m ? m.label : '默认安全';
   };
+  // R5-11：授权模式状态点配色查表（原为三层嵌套三元内联在 statbar 模板里）。
+  // 授权服务未接入时给最暗的 fg-faint——「未接入」不是「健康」，不能挂绿点。
+  const AUTH_MODE_DOT_COLORS = { paranoid: 'var(--danger)', trusted: 'var(--warn)' };
+  const authModeDotColor = () => (state.authzLoaded
+    ? (AUTH_MODE_DOT_COLORS[state.authMode] || 'var(--ok)')
+    : 'var(--fg-faint)');
   const PROMPT_CAT_LABELS = { role: '角色行为', safety: '安全边界', format: '输出格式', 'skill-link': '技能联动' };
   const PROMPT_CATS = Object.keys(PROMPT_CAT_LABELS);
   const PLUGINS = [
@@ -255,7 +261,7 @@
 
   /* ---------- 状态 ---------- */
   const state = {
-    page: 'session', theme: 'dark', sel: null, ctxOpen: 0, ctxTab: 'todo', pendingConfirm: false, pendingConfirmHtml: '', wz: 0, wzExpert: 0,
+    page: 'session', theme: 'dark', sel: null, ctxOpen: false, ctxTab: 'todo', pendingConfirm: false, pendingConfirmHtml: '', wz: 0, wzExpert: 0,
     // P4-S3-04/S3-06：授权服务是否真的加载过（区分「拉到了但空」与「没拉到」）。
     // 未加载时风控区必须显式标注，不能拿兜底文案冒充活着。
     authzLoaded: false,
@@ -302,8 +308,11 @@
     pluginRuntime: null,
     // 编排目录（multi 插件真实数据；null = 未接入，UI 回落兜底清单并标注）
     orchestrationCatalog: null,
-    // 沙箱策略（PRD FR-8）：模式 + 网络域名白名单（null = 未拉取，UI 回落默认）
-    sandbox: { mode: 'workspace-write', networkAllow: [] },
+    // 沙箱策略（PRD FR-8）：模式 + 网络域名白名单。
+    // R5-13：loaded=false 时 mode 为空串，UI 显示「未接入」而不是拿 'workspace-write'
+    // 冒充已拉取（原注释写「null = 未拉取」但代码从不为 null，注释与实现早已漂移）。
+    // networkAllow 空数组 = 全部拒绝（fail-closed），与设置页说明文案一致。
+    sandbox: { mode: '', networkAllow: [], loaded: false },
     // 最近一次专家团派发结果（composeTeam 返回的 { rootId, nodes }）
     delegationLast: null,
     // TRACE 上报开关（默认开；bridge.traceStatus 拉取后覆盖）
@@ -387,23 +396,10 @@
   };
 
   /* ---------- P3 项目模式：状态记忆（spec §6「模式选择记忆」） ---------- */
-  const VIEWMODE_KEY = 'orchdesk.viewMode';
-  const VIEWMODE_PINNED_KEY = 'orchdesk.viewModePinned';
-  function loadViewMode() {
-    try { return localStorage.getItem(VIEWMODE_KEY) === 'project' ? 'project' : 'light'; } catch { return 'light'; }
-  }
-  function loadViewModePinned() {
-    try { return localStorage.getItem(VIEWMODE_PINNED_KEY) === '1'; } catch { return false; }
-  }
-  function saveViewMode() {
-    try {
-      localStorage.setItem(VIEWMODE_KEY, state.viewMode);
-      localStorage.setItem(VIEWMODE_PINNED_KEY, state.viewModePinned ? '1' : '0');
-    } catch { /* 隐私模式等忽略：记忆是增强，不是正确性依赖 */ }
-  }
-  // 双壳层已取消。旧 orchdesk.viewMode 不再改布局，避免历史偏好把右栏钉成 300px。
+  // R2-3：轻/项目双壳层已取消（commit 6dbf8e7），viewMode 只剩一个固定值。
+  // 原 loadViewMode / loadViewModePinned / saveViewMode 连 VIEWMODE_KEY 常量一并无人
+  // 调用，整块删除；旧 localStorage 偏好不再读，避免把右栏钉成常驻。
   state.viewMode = 'session';
-  state.viewModePinned = false;
 
   const $ = (s) => document.querySelector(s);
   const PAGES = [
@@ -485,7 +481,9 @@
 
   /* ---------- 渲染：导航 ---------- */
   function renderRail() {
-    // P3：project 态 rail 恢复，底部给模式切换（轻态 rail 隐藏，抽屉里已有同一入口）
+    // rail 常驻：三页导航（会话/插件/设置）+ 底部主题切换。
+    // 历史注释承诺的「底部给模式切换」随双壳层/导航抽屉取消已不存在——模式切换改在
+    // 设置页「沙箱与授权」与授权模式弹窗里，此处不再预留位置。
     $('#rail').innerHTML = PAGES.map((p) => `<button class="navbtn ${state.page === p.id ? 'active' : ''}" data-action="nav" data-id="${p.id}" title="${p.n}">${ic(p.icon)}<span class="nl">${p.n}</span></button>`).join('') +
       `<div class="sp"></div><button class="navbtn" data-action="toggle-theme" title="切换主题">${ic('sun')}<span class="nl">主题</span></button>`;
   }
@@ -1126,7 +1124,6 @@
     </div>`);
       }
       taskBlock = blocks.join('');
-    } else if (taskSessions.length) {
       // project 态：原有「任务」组
       const taskExpanded = state.pExpanded.has('__task__');
       taskBlock = `<div class="proj">
@@ -1169,74 +1166,11 @@
     return g + '! 一起来做点什么呢？';
   }
 
-  /* 智能推荐：基于最近 7 天对话主题信号 + 技能使用频率 + 空闲检测 */
-  function getSmartRecommendations() {
-    const sessions = Object.values(state.sessions || {});
-    const now = Date.now();
-    const week = 7 * 24 * 3600_000;
-
-    if (!sessions.length) {
-      // 首次使用 → 新手引导
-      return [
-        { label: '创建项目', icon: 'folder', action: 'home-create-proj' },
-        { label: '闲时任务', icon: 'clock', action: 'quick-idle' },
-        { label: '浏览技能', icon: 'grid', action: 'quick-skills' },
-        { label: '项目分析', icon: 'search', action: 'quick-analyze' },
-      ];
-    }
-
-    // 最近 7 天用户消息主题信号
-    const recent = sessions
-      .filter(s => s.ts > now - week)
-      .flatMap(s => (s.msgs || []).filter(m => m.role === 'user').map(m => (m.text || '')));
-
-    const match = (re) => recent.some(m => re.test(m));
-
-    let ordered = [];
-    if (match(/报错|bug|修复|debug|error|exception/i))              ordered.push('报错修复');
-    if (match(/文档|报告|周报|总结|markdown|readme/i))               ordered.push('文档报告');
-    if (match(/重构|refactor|优化|升级|架构/i))                       ordered.push('项目重构');
-    if (match(/数据|分析|统计|报表|dashboard/i))                       ordered.push('数据分析');
-    if (match(/PPT|幻灯片|演示|presentation|slides/i))               ordered.push('PPT 制作');
-
-    // 高频技能替换
-    const skillFreq = {};
-    sessions.forEach(s => (s.msgs || []).forEach(m => {
-      (m.tools || []).forEach(t => { skillFreq[t.n] = (skillFreq[t.n] || 0) + 1; });
-      if (m.sub) { const n = m.sub.name || 'agent'; skillFreq[n] = (skillFreq[n] || 0) + 1; }
-    }));
-    const topSkill = Object.entries(skillFreq).sort((a, b) => b[1] - a[1])[0];
-    if (topSkill && topSkill[1] >= 2 && ordered.length >= 3) {
-      ordered[2] = topSkill[0];
-    }
-
-    // 空闲检测（7 天无新会话 → 加入闲时任务）
-    const hasRecent = sessions.some(s => s.ts > now - week);
-    if (!hasRecent && !ordered.includes('闲时任务')) ordered.push('闲时任务');
-
-    // 兜底填充
-    const pool = ['报错修复', '文档报告', 'PPT 制作', '闲时任务'];
-    pool.forEach(k => { if (!ordered.includes(k)) ordered.push(k); });
-
-    const iconMap = {
-      '报错修复': 'wrench', '文档报告': 'fileText', '项目重构': 'code',
-      '数据分析': 'barChart', 'PPT 制作': 'presentation', '闲时任务': 'clock',
-      '创建项目': 'folder', '浏览技能': 'grid', '项目分析': 'search',
-    };
-    const actionMap = {
-      '报错修复': 'quick-debug', '文档报告': 'quick-weekly', 'PPT 制作': 'quick-ppt',
-      '项目重构': 'quick-refactor', '数据分析': 'quick-data', '闲时任务': 'quick-idle',
-      '创建项目': 'home-create-proj', '浏览技能': 'quick-skills', '项目分析': 'quick-analyze',
-    };
-
-    return ordered.slice(0, 4).map(label => ({
-      label,
-      icon: iconMap[label] || 'zap',
-      action: actionMap[label] || 'todo',
-    }));
-  }
-
+  /* R2-5：智能推荐（getSmartRecommendations）随首页改版整链失去调用者——渲染它的
+     .home-quick-actions 已不存在，依赖它的 quick-* 八个动作注册因此不可达；且该函数
+     即使被调用也是坏的（读 m.text / m.role，而消息结构用 m.x / m.r）。删除。 */
   function thinkLabel(l) { return ({ off: '关闭', standard: '标准', deep: '深度', max: '最大' })[l] || '标准'; }
+
   /* P4：意图门状态从运行时读，不写死。原实现是一行静态 HTML「本地模型」+ 绿点，
      意图门插件未装载/被停用时 UI 仍宣称本地模型在初筛，placeholder 也承诺「先经意图
      识别插件初筛」——安全初筛控件的状态是编造的（铁律：fail-closed + UI 不许撒谎）。
@@ -2139,7 +2073,7 @@
           // P4-S3-13：授权模式点与沙箱徽标不再「永远健康」。原实现无论默认/信任/偏执
           // 都挂同一个绿点、沙箱服务未就绪也照样显示 ok 徽标——同一行里状态语义一半真
           // 一半装饰。现在按档位给色，授权服务未接入时明说（fail-closed：按最严处理）。
-          <div class="stat"><div class="sk">授权模式</div><div class="sv"><span class="dot" style="background:${state.authzLoaded ? (state.authMode === 'paranoid' ? 'var(--danger)' : state.authMode === 'trusted' ? 'var(--warn)' : 'var(--ok)') : 'var(--fg-faint)'}"></span>${authModeLabel(state.authMode)}${state.authzLoaded ? '' : ' · 未接入'}</div></div>
+          <div class="stat"><div class="sk">授权模式</div><div class="sv"><span class="dot" style="background:${authModeDotColor()}"></span>${authModeLabel(state.authMode)}${state.authzLoaded ? '' : ' · 未接入'}</div></div>
           <div class="stat"><div class="sk">沙箱</div><div class="sv">${state.sandbox.mode ? `<span class="badge ok" style="font-weight:600">Windows ACL · ${esc(state.sandbox.mode)}</span>` : '<span class="badge">未接入</span>'}</div></div>
           <div class="stat"><div class="sk">数据目录</div><div class="sv" style="font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px" title="${esc(ddOk ? state.dataDirInventory.dir : '')}">${ddOk ? '…/' + esc(ddShort) : '本地（未扫描）'}</div></div>
           <div class="stat"><div class="sk">运行时</div><div class="sv" style="font-size:12px;font-weight:500">${rtOk ? `插件运行时就绪 · ${state.pluginRuntime.activeCount}/${state.pluginRuntime.total}` : '插件运行时未启动'}</div></div>
@@ -2238,7 +2172,8 @@
           </div>
           <div class="sec-title" style="margin:16px 0 8px">网络域名白名单</div>
           <div class="faint" style="margin-bottom:6px">一行一个域名（如 <span class="mono">github.com</span>），<span class="mono">*</span> 表示不限。<b>留空 = 全部拒绝</b>（fail-closed）：web_fetch / browser_open 命中不了白名单即直接拒绝。内网/云元数据端点另受 SSRF 防护拦截。</div>
-          <textarea class="inp mono" id="net-allow" rows="3" style="width:100%;font-size:11.5px">${esc((state.sandbox.networkAllow || []).join('\n'))}</textarea>
+          ${state.sandbox.loaded ? '' : '<div class="faint" style="margin-bottom:6px">白名单尚未拉取（主进程未返回）——显示为空，不代表已确认全部拒绝。</div>'}
+          <textarea class="inp mono" id="net-allow" rows="3" style="width:100%;font-size:11.5px"${state.sandbox.loaded ? '' : ' disabled'} placeholder="${state.sandbox.loaded ? '' : '未拉取'}">${esc((state.sandbox.networkAllow || []).join('\n'))}</textarea>
           <div class="faint" style="margin:6px 0">${state.authMode === 'trusted' ? '信任模式：列表已自动合并开发常用域名（github/npm/pypi/models.dev 等）；保存后合并项随你的列表一同落盘。' : ''}</div>
           <div class="row" style="margin-top:8px"><button class="btn sm primary" data-action="sandbox-save-net">保存白名单</button><span class="faint" id="net-allow-tip"></span></div>
           <div class="sec-title" style="margin:16px 0 8px">L0-L4 分级</div>
@@ -2283,7 +2218,7 @@
           </div>
           <div class="sec-title" style="margin:16px 0 8px">补偿层审计（边界外操作）</div>
           <div class="audit-log">
-            ${state.compAudit.length ? state.compAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:11px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge warn">补偿</span><span class="mono faint">${(e.text || '').replace(/</g, '&lt;')}</span>${e.note ? `<span class="faint">${e.note}</span>` : ''}</div>`).join('') : '<div class="faint">暂无补偿动作记录（外发/不可逆操作后在此提供「补偿动作」）</div>'}
+            ${state.compAudit.length ? state.compAudit.slice().reverse().slice(0, 12).map((e) => `<div class="al"><span class="mono" style="font-size:11px">${new Date(e.ts).toLocaleTimeString('zh-CN')}</span><span class="badge warn">补偿</span><span class="mono faint">${esc(e.text || '')}</span>${e.note ? `<span class="faint">${esc(e.note)}</span>` : ''}</div>`).join('') : '<div class="faint">暂无补偿动作记录（外发/不可逆操作后在此提供「补偿动作」）</div>'}
           </div>
           <div class="row" style="margin-top:8px"><button class="btn sm" data-action="comp-record">+ 记录补偿动作</button><span class="faint">不保证完全撤销，仅尽力补偿</span></div>
           <div class="sec-title" style="margin:16px 0 8px">沙箱日志（可检索）</div>
@@ -2327,7 +2262,7 @@
               // img onerror 之类的片段会在渲染设置页时执行。本文件其余同类内容早已走 esc()，
               // 此处是漏网的那一处。（注释里别写反引号——会提前关闭外层模板字面量。）
               <div class="pl-h"><b>${esc(d.title)}</b><span class="badge info">${esc(PROMPT_CAT_LABELS[d.category] || d.category)}</span>${d.agents.length ? `<span class="faint">· ${esc(d.agents.join(', '))}</span>` : '<span class="faint">· 全局</span>'}</div>
-              <div class="mono faint" style="font-size:11px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d.body.replace(/</g, '&lt;').slice(0, 80)}</div>
+              <div class="mono faint" style="font-size:11px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc((d.body || '').slice(0, 80))}</div>
             </div>`).join('') : '<div class="faint">暂无提示词（新建后在此列出，可按 Agent 绑定与合并）</div>'}
           </div>
           ${state.promptConflicts.length ? `<div class="warn-list" style="margin-top:8px"><div class="badge warn">合并冲突 ${state.promptConflicts.length} 处（已显式标记，未静默覆盖）</div>${state.promptConflicts.slice(0, 4).map((c) => `<div style="font-size:11px;margin-top:4px">· ${esc(PROMPT_CAT_LABELS[c.category] || c.category)}：${esc(c.docA)} ↔ ${esc(c.docB)}</div>`).join('')}</div>` : ''}
@@ -2567,7 +2502,9 @@
       const sc = $('#msgScroll'); if (sc) sc.scrollTop = sc.scrollHeight;
     } catch (err) {
       console.error('[render] ERROR:', err);
-      $('#main').innerHTML = '<div style="color:#EF4444;padding:40px;font-family:monospace"><b>渲染错误</b><pre>' + (err && err.stack || err) + '</pre></div>';
+      // R2-9：err.stack 可能携带用户文本（会话标题 / prompt 片段），原样拼 innerHTML
+      // 会把 HTML 注进错误页。同函数的未知页分支（下方）本来就走 esc()，此处口径不一致。
+      $('#main').innerHTML = '<div style="color:#EF4444;padding:40px;font-family:monospace"><b>渲染错误</b><pre>' + esc((err && err.stack) || String(err)) + '</pre></div>';
     }
   }
 
@@ -2748,19 +2685,9 @@
     }, 0);
   }
 
-  /* ---------- P1.2 轻模式导航抽屉（rail 的替代入口；Ctrl+K / ☰ 唤出） ---------- */
-  function navDrawerHTML() {
-    const proj = state.viewMode === 'project';
-    return `<div class="nav-drawer" id="navDrawer" role="menu" aria-label="导航菜单">
-      ${PAGES.map((p) => `<button class="nd-item ${state.page === p.id ? 'active' : ''}" role="menuitem" data-action="nav" data-id="${p.id}">${ic(p.icon, 16)}<span>${p.n}</span></button>`).join('')}
-      <div class="nd-sep"></div>
-      <button class="nd-item" role="menuitem" data-action="toggle-theme">${ic('sun', 16)}<span>切换主题</span></button>
-    </div>`;
-  }
-  /* P3：模式切换。手动切 = 用户偏好，之后不再被编排触发自动升级（viewModePinned）。 */
-  function toggleViewMode() {
-    // 双壳层已取消。保留函数名，避免旧动作抛错。
-  }
+  // R2-1：导航抽屉随汉堡菜单一并删除（commit 6dbf8e7）——全仓已无
+  // [data-action="nav-drawer"] 触发元素，navDrawerHTML / toggleNavDrawer /
+  // closeNavDrawer 与 #navDrawerRoot、.nav-drawer CSS 全是不可达死码。
   function openInspectorForTurn() {
     if (state.ctxOpen) return;
     state.ctxOpen = true;
@@ -2789,53 +2716,8 @@
       ctxEl.innerHTML = VIEWS.session.ctx();
       hardenActions(ctxEl);
     }
-  }
-  /**
-   * P3：编排触发 → 自动升级到项目模式（spec §6 触发条件）。
-   * 两条克制：已在项目态不重复动作；用户手动切过（viewModePinned）绝不打扰——
-   * 自动升级是「按需」，不是「替用户决定」。
-   */
-  function escalateToProject() {
-    return false;
-  }
-  function toggleNavDrawer(anchor) {
-    const root = $('#navDrawerRoot');
-    if (!root) return;
-    if (root.innerHTML) { closeNavDrawer(); return; }
-    root.innerHTML = navDrawerHTML();
-    const btn = anchor || $('#navDrawerBtn');
-    const dd = $('#navDrawer');
-    // 锚点不可见时（project 态 ☰ 被 CSS 隐藏，Ctrl+K 仍可唤出）getBoundingClientRect
-    // 全为 0 → 抽屉定位到视口 (0,0) 被裁掉。offsetParent 为 null 即不可见，回落到固定位。
-    const r = btn && btn.offsetParent ? btn.getBoundingClientRect() : null;
-    if (dd) {
-      if (r) {
-        dd.style.top = (r.bottom + 4) + 'px';
-        dd.style.left = Math.max(8, r.left) + 'px';
-      } else {
-        dd.style.top = '48px';
-        dd.style.left = '12px';
-      }
-    }
-    btn?.setAttribute?.('aria-expanded', 'true');
-    // 不用 {once:true}：抽屉内的「切换主题」不关抽屉，once 监听被该次点击消耗后，
-    // 再点抽屉外将永远关不掉（A-P2-1）。改为常驻监听，抽屉已关时自行摘除。
-    setTimeout(() => {
-      document.addEventListener('click', function close(ev) {
-        if (!$('#navDrawerRoot')?.innerHTML) { document.removeEventListener('click', close); return; }
-        if (!ev.target.closest('.nav-drawer') && !ev.target.closest('[data-action="nav-drawer"]')) {
-          closeNavDrawer();
-          document.removeEventListener('click', close);
-        }
-      });
-    }, 0);
-  }
-  function closeNavDrawer() {
-    const root = $('#navDrawerRoot');
-    if (root) root.innerHTML = '';
-    $('#navDrawerBtn')?.setAttribute?.('aria-expanded', 'false');
-  }
 
+  }
   /* ---------- 会话工作区（BUG-023）：项目绑定目录 → 会话默认 cwd ---------- */
   // 主进程 sessionCwds 是进程内 Map（重启即失），所以「创建会话 / 打开会话 /
   // 重选项目 / 分叉」每次都要重放一次；无绑定或任务模式跳过（不误设）。
@@ -2888,7 +2770,7 @@
 
   function createSessionInProject(pid) {
     // P3 触发①：主动建项目会话 → 自动升级项目模式（用户手动切过则不打扰）
-    escalateToProject('创建项目会话');
+
     const id = 's' + Date.now().toString(36);
     const p = state.projects.find((x) => x.id === pid);
     const s = { id, pid, title: '新会话', expert: expertList()[state.wzExpert] || expertList()[0], model: state.selectedModels[0] || '—', updated: '刚刚', ts: nowTime(), msgs: [] };
@@ -3076,7 +2958,7 @@
       scheduleCtxAutoClose();
       // P3 触发④：Agent 产出多步计划 → 自动升级项目模式（任务监控/编排可视化就位）。
       // 单步不算——一步就能干完的活不值得把用户搬去重形态。
-      if (extractPlanSteps(s.msgs).steps.length >= 2) escalateToProject('Agent 产出多步计划');
+
     }
   }
 
@@ -3148,7 +3030,13 @@
     // state.projects 为 []——原来无条件访问 state.projects[0].sessions[0] 必抛
     // TypeError，归档按钮在该路径上直接坏掉，且 persist 已执行、状态半生效。
     // 兜底也不能再硬编码找 'p3'（那是种子数据的 id，真实首跑环境不存在）。
-    const arc = state.projects.find((p) => p.archived === 1) || state.projects.find((p) => p.id === 'p3');
+    // 归档目标统一为「已归档」虚拟容器，与 doArchiveProject 同一口径：找不到就建，
+    // 不再借道任意 archived===1 的项目（那会把会话塞进一个已归档的真实项目里）。
+    let arc = state.projects.find((p) => p.id === '__archived__');
+    if (!arc) {
+      arc = { id: '__archived__', n: '已归档', d: '', open: 0, archived: 1, sessions: [] };
+      state.projects.push(arc);
+    }
     if (arc && !arc.sessions.includes(sid)) arc.sessions.unshift(sid);
     s.pid = arc ? arc.id : s.pid; s.archived = 1;
     if (state.sel === sid) {
@@ -3186,7 +3074,6 @@
   function confirmSwitchAuth(target) {
     const targetSpec = authModesForRender().find((m) => m.id === target);
     const loosening = (MODE_RANK[target] ?? 1) > (MODE_RANK[state.authMode] ?? 1);
-    const danger = target === 'trusted' || target === 'default' ? '' : '';
     openModal(`<div class="mh ${loosening ? 'danger' : ''}">${ic('shield', 18)}<b>切换授权模式到「${targetSpec ? targetSpec.label : target}」？</b></div>
       <div class="mb">
         <div>${targetSpec ? targetSpec.blurb : ''}</div>
@@ -3545,6 +3432,11 @@
     empty.innerHTML = text;
   }
 
+  // R5-17：终端会话上限的渲染层副本。权威值在 terminal-tools.ts 的 TERMINAL_MAX_SESSIONS
+  // （渲染层不许 import 主进程模块，arch-guard R17 机械校验两份一致，防漂移）。
+  // 原来这里内联裸 6，主进程改上限时按钮的禁用态不会跟着变。
+  const TERMINAL_MAX_SESSIONS = 6;
+
   function renderTerminalPanel() {
     if (!$('#terminalRoot').dataset.ready) return;
     const t = state.terminal;
@@ -3564,7 +3456,7 @@
     head.innerHTML = `<b>终端</b>
       <span class="badge${t.ptyAvailable ? '' : ' warn'}" title="${t.ptyAvailable ? 'node-pty 已加载（真 PTY）' : 'node-pty 不可用：已降级为管道模式（交互式程序受限）'}">${terminalShortcutLabel()}</span>
       <span class="row" style="margin-left:10px">${tabs}</span>
-      <button class="btn sm ghost" data-action="term-new" ${t.sessions.length >= 6 ? 'disabled title="已达会话上限（6）"' : ''}>+ 新建</button>
+      <button class="btn sm ghost" data-action="term-new" ${t.sessions.length >= TERMINAL_MAX_SESSIONS ? `disabled title="已达会话上限（${TERMINAL_MAX_SESSIONS}）"` : ''}>+ 新建</button>
       <span style="margin-left:auto"></span>${fullBtn}${closeBtn}`;
     if (!t.sessions.length) {
       showTermEmpty('<div class="faint">没有打开的终端。点「+ 新建」开一个。</div>');
@@ -3866,7 +3758,8 @@
     const reason = fileEditBlockReason(r);
     const btns = [];
     if (fp.view === 'edit') {
-      btns.push(`<button class="btn sm ${fp.diffRows ? 'ghost' : 'ghost'}" data-action="file-edit-diff">${fp.view === 'diff' ? '退出对比' : '对比变更'}</button>`);
+      // R5-12：原为 ${fp.diffRows ? 'ghost' : 'ghost'}——两分支相同，条件恒无效果。
+      btns.push(`<button class="btn sm ghost" data-action="file-edit-diff">${fp.view === 'diff' ? '退出对比' : '对比变更'}</button>`);
       btns.push(`<button class="btn sm primary" data-action="file-edit-save"${fp.saving ? ' disabled' : ''}>${fp.saving ? '保存中…' : '保存'}</button>`);
       btns.push(`<button class="btn sm ghost" data-action="file-edit-cancel">${fp.discardArmed ? '确认丢弃？' : (fp.dirty ? '放弃修改' : '取消编辑')}</button>`);
     } else if (editable) {
@@ -4359,18 +4252,14 @@
   }
 
   /* ---------- 交互 ---------- */
-  // 点击空白处关闭项目下拉
+  // 点击空白处关下拉
   document.body.addEventListener('click', (e) => {
-    // 预设下拉：点击面板外即关（与项目下拉同一模式）
+    // 预设下拉：点击面板外即关
     if (state.mpPresetOpen && !e.target.closest('.mp-preset')) { state.mpPresetOpen = false; mpRefreshPreset(); }
-    if ((state.projDropdownOpen && !e.target.closest('.proj-select') && !e.target.closest('.proj-dropdown')) ||
-        (state.composerMoreOpen && !e.target.closest('.composer-more'))) {
-      state.projDropdownOpen = false;
+    // R2-4：原实现还顺带查 .proj-select / .proj-dropdown 两个已随 UI 重构消失的类名，
+    // 并读永不为 true的 state.projDropdownOpen——整段是不可达分支。
+    if (state.composerMoreOpen && !e.target.closest('.composer-more')) {
       state.composerMoreOpen = false;
-      const dd = document.querySelector('.proj-dropdown');
-      if (dd) dd.classList.remove('open');
-      const ps = document.querySelector('.proj-select');
-      if (ps) ps.classList.remove('open');
       const cm = document.querySelector('.composer-more-dropdown');
       if (cm) cm.classList.remove('open');
     }
@@ -4391,9 +4280,9 @@
     }
   });
   document.body.addEventListener('keydown', (e) => {
-    // P1.2：Ctrl+K / Cmd+K 唤出导航抽屉（轻模式主导航入口；与 ☰ 同效）。
-    // 焦点在终端内部时不抢——xterm/vim 等交互程序大量使用 Ctrl+K（A-P2-5：此前只有
-    // Escape 分支有 inTerm 守卫，Ctrl+K 漏了，会在终端里误唤抽屉）。
+    // R2-2：Ctrl+K / Cmd+K 把焦点送到导航轨第一项（汉堡菜单与导航抽屉已随
+    // commit 6dbf8e7 删除，注释原写「唤出导航抽屉」与实现双向漂移）。
+    // 焦点在终端内部时不抢——xterm/vim 等交互程序大量使用 Ctrl+K（A-P2-5）。
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
       const inTerm = e.target && e.target.closest && e.target.closest('#terminalRoot .term-container');
       if (inTerm) return;
@@ -4402,8 +4291,7 @@
       if (railBtn) railBtn.focus();
       return;
     }
-    // P1.2：Esc 关导航抽屉
-    if (e.key === 'Escape' && $('#navDrawerRoot')?.innerHTML) { closeNavDrawer(); return; }
+
     // 预设下拉键盘导航：↑/↓ 移动、Enter 选中、Esc 关闭（先于硬委托，避免双触发）
     if (e.target && e.target.closest && e.target.closest('.mp-preset-pop')) {
       // 可见性按内联 display 判：mpPresetFilter 用 el.style.display 隐藏，本项目没有
@@ -4435,8 +4323,9 @@
     }
     if (e.key === 'Enter' && !e.shiftKey && (e.target.id === 'homeComposer' || e.target.id === 'composer')) {
       e.preventDefault();
-      const sendBtn = e.target.closest('.home-textarea-wrap')?.querySelector('[data-action="home-send"]')
-        || document.querySelector('[data-action="home-send"], [data-action="send"]');
+      // R5-18：原 closest('.home-textarea-wrap') 全仓不存在该类（欢迎页用的是
+      // .home-input-wrap），该 closest 恒返回 null。删掉只留兜底 querySelector。
+      const sendBtn = document.querySelector('[data-action="home-send"], [data-action="send"]');
       if (sendBtn) sendBtn.click();
     }
     // P1 键盘可达（/harden）：委托层统一把 Enter/Space 映射到 [data-action] 的 click。
@@ -4458,7 +4347,7 @@
      ctx 注入本 IIFE 私有面；模块内一律 ctx.X 引用，不直连 app.js 作用域。 */
   const ACTIONS = {};
   {
-    const ctx = { $, MODEL_SELECTION_KEY, MODE_RANK, SKILLS_MARKET, adoptOllama, applyBrowserState, applySessionCwd, askInput, autoSelectModels, bridge, browserAct, cancelFileEdit, checkOutbound, closeFilePanel, closeModal, closeNavDrawer, closeTerminalPanel, confirmArchiveProject, confirmDestructive, confirmNewBranch, confirmRename, confirmSwitchAuth, confirmOutboundIfNeeded, createSessionInProject, desktopAutostartDesc, doAbortSend, doArchiveProject, doArchiveSession, doDeletePrompt, doDeleteSession, doFork, doInstallGuanjiSkill, doNewConv, doRename, doSavePrompt, doSend, doSwitchAuth, dynamicModels, escalateToProject, revealInspector, esc, expertList, fileTabLoadDir, getModelPool, ic, importSuspend, loadFileDir, memReasonText, mpApplyPreset, mpEnsureCatalog, mpFetchModels, mpRefreshPool, mpRefreshPreset, mpRefreshPresetList, newTerminalSession, nowTime, openAuthPicker, openBrowserPanel, openExpertPicker, openFilePanel, openFilePreview, openMenu, openModal, openModelPicker, openModelSetupModal, openProductPreview, openPromptEditor, openSkillPicker, openTerminalPanel, persist, pickFileRoot, pickWorkspace, pushFloatingContext, refreshConnectorAudit, refreshConnectors, refreshDataDirInventory, refreshCtxLive, refreshMarket, refreshMcp, refreshMemoryDomain, refreshMemorySummarize, refreshSandboxLog, refreshSessionEvents, refreshTerminal, refreshUsage, reloadFilePreview, render, renderBrowserSide, renderFilePanel, renderModelProviders, renderSettingsMain, renderStatusBarActions, renderTerminalPanel, renderWizard, saveFileEdit, saveModelSelection, saveWorkspaceDir, startFileEdit, state, toast, toggleFileDiff, toggleNavDrawer, toggleTermFull, toggleViewMode, updateProtocolRow, updateTraceUi };
+    const ctx = { $, MODEL_SELECTION_KEY, MODE_RANK, SKILLS_MARKET, adoptOllama, applyBrowserState, applySessionCwd, askInput, autoSelectModels, bridge, browserAct, cancelFileEdit, checkOutbound, closeFilePanel, closeModal, closeTerminalPanel, confirmArchiveProject, confirmDestructive, confirmNewBranch, confirmRename, confirmSwitchAuth, confirmOutboundIfNeeded, createSessionInProject, desktopAutostartDesc, doAbortSend, doArchiveProject, doArchiveSession, doDeletePrompt, doDeleteSession, doFork, doInstallGuanjiSkill, doNewConv, doRename, doSavePrompt, doSend, doSwitchAuth, dynamicModels, revealInspector, esc, expertList, fileTabLoadDir, getModelPool, ic, importSuspend, loadFileDir, memReasonText, mpApplyPreset, mpEnsureCatalog, mpFetchModels, mpRefreshPool, mpRefreshPreset, mpRefreshPresetList, newTerminalSession, nowTime, openAuthPicker, openBrowserPanel, openExpertPicker, openFilePanel, openFilePreview, openMenu, openModal, openModelPicker, openModelSetupModal, openProductPreview, openPromptEditor, openSkillPicker, openTerminalPanel, persist, pickFileRoot, pickWorkspace, pushFloatingContext, refreshConnectorAudit, refreshConnectors, refreshDataDirInventory, refreshCtxLive, refreshMarket, refreshMcp, refreshMemoryDomain, refreshMemorySummarize, refreshSandboxLog, refreshSessionEvents, refreshTerminal, refreshUsage, reloadFilePreview, render, renderBrowserSide, renderFilePanel, renderModelProviders, renderSettingsMain, renderStatusBarActions, renderTerminalPanel, renderWizard, saveFileEdit, saveModelSelection, saveWorkspaceDir, startFileEdit, state, toast, toggleFileDiff, toggleTermFull, updateProtocolRow, updateTraceUi };
     for (const install of (window.__orchdeskActionModules || [])) install(ACTIONS, ctx);
   }
 
@@ -4806,7 +4695,19 @@ let outboundTimer = null;
         if (r.domainCounts && typeof r.domainCounts === 'object') state.memory.stats = r.domainCounts;
       }).catch(() => {}),
       bridge.getCompensationAudit().then(r => { if (Array.isArray(r)) state.compAudit = r; }).catch(() => {}),
-      bridge.getSandbox().then(r => { if (r && typeof r === 'object') state.sandbox = { mode: r.mode || 'workspace-write', networkAllow: Array.isArray(r.networkAllow) ? r.networkAllow : ['*'] }; }).catch(() => {}),
+      // R5-13：networkAllow 非数组时兜底为空数组（全部拒绝），不再是 ['*']（悄悄放开全网）。
+      // 原实现在主进程没返回白名单时把 UI 显示成「不限」，与同页「留空 = 全部拒绝
+      // （fail-closed）」的说明直接矛盾——用户看到的和实际生效的是两回事。
+      // mode 缺失时留空串（UI 走「未接入」分支），不用 'workspace-write' 冒充已拉取。
+      bridge.getSandbox().then(r => {
+        if (!r || typeof r !== 'object') return;
+        state.sandbox = {
+          mode: typeof r.mode === 'string' ? r.mode : '',
+          networkAllow: Array.isArray(r.networkAllow) ? r.networkAllow : [],
+          loaded: true,
+        };
+        render();
+      }).catch(() => {}),
       // 数据目录内容清单（PRD FR-4.2）：真实体积与文件数（此前 UI 写死「~ 24 MB」）
       (typeof bridge.getDataDirInventory === 'function'
         ? bridge.getDataDirInventory().then(r => { if (r && typeof r === 'object') state.dataDirInventory = r; })

@@ -295,9 +295,15 @@ function runGates(action: ActionPreview, config: IntentConfig, modelUsed: boolea
     // 放行一切；条目未 trim/小写化。现在先归一化两侧，再要求「等于条目」或「是条目的
     // 子域」（即以 .条目 结尾）。
     const normAllow = config.externalAllowlist.map((d) => String(d || '').trim().toLowerCase()).filter(Boolean);
+    // 主机名提取：有 scheme 走 URL 形式；无 scheme 的裸串（本地模型常直接输出域名，
+    // 也可能带路径）也只取 host 段——后缀匹配必须落在主机名上，否则裸串
+    // 「evil.net/x.api.openai.com」会以路径冒充子域绕过白名单。随后剥掉
+    // userinfo 与端口，与 URL hostname 语义一致；剥不出主机名则返回空 → 拒绝（fail-closed）。
     const hostOf = (u: string): string => {
-      const m = String(u || '').trim().toLowerCase().match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/);
-      return m ? (m[1] || '').replace(/:\d+$/, '') : String(u || '').trim().toLowerCase();
+      const raw = String(u || '').trim().toLowerCase();
+      const m = raw.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/);
+      const hostPart = m ? m[1] : raw.split(/[/?#]/, 1)[0];
+      return (hostPart || '').split('@').pop()?.replace(/:\d+$/, '') ?? '';
     };
     const host = hostOf(action.target || '');
     const allowed = !!host && normAllow.some((d) => host === d || host.endsWith('.' + d));

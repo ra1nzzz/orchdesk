@@ -33,7 +33,9 @@ export const TRACE_REPO_URL = 'https://github.com/ra1nzzz/orchdesk';
 /**
  * 组装 trace 插件配置（装载时注入，非运行时桥）：
  * - 用户开关：`<dataDir>/trace.json` `{ enabled: boolean }`，缺省 **true**；
- *   关闭 = repoUrl 置空 → 插件行为退化为「只缓冲不上传」（观测照旧，不静默丢数据）。
+ *   关闭 = repoUrl 置空 → 插件**直接不记录**（enqueue 早退，不入队、不上传）。
+ *   关闭态不静默：`queueSize()` 增补 `disabled: boolean` 并经 IPC 透出，UI 可显示
+ *   「已关闭」而非「队列为空」（空队列与已关闭是两件事，混为一谈就是撒谎）。
  * - TOKEN 加密内置：打包前 `node scripts/prepare-trace.cjs` 产出
  *   `build/trace-token.enc.json` + `build/trace-key.local`（随包），运行时解密；
  *   文件缺失（dev / 未内置）→ 空 token → 只缓冲（安全降级，与未配置等价）。

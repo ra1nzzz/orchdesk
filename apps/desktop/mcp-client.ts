@@ -218,7 +218,7 @@ export function connectMcpServer(
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
-      if (v == null) continue;
+      if (v === null || v === undefined) continue;
       if (STRIP_ENV_KEYS.includes(k as (typeof STRIP_ENV_KEYS)[number])) continue;
       env[k] = v;
     }
@@ -261,7 +261,7 @@ export function connectMcpServer(
         if (!line) continue;
         let msg: { id?: number | string; result?: unknown; error?: { code: number; message: string } };
         try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.id != null && typeof msg.id === 'number' && pending.has(msg.id)) {
+        if (typeof msg.id === 'number' && pending.has(msg.id)) {
           const p = pending.get(msg.id)!;
           pending.delete(msg.id);
           if (msg.error) p.reject(new Error(msg.error.message || `MCP error ${msg.error.code}`));
@@ -332,7 +332,7 @@ export function callMcpTool(
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
-      if (v == null) continue;
+      if (v === null || v === undefined) continue;
       if (STRIP_ENV_KEYS.includes(k as (typeof STRIP_ENV_KEYS)[number])) continue;
       env[k] = v;
     }
@@ -365,7 +365,7 @@ export function callMcpTool(
         if (!line) continue;
         let msg: { id?: number | string; result?: unknown; error?: { code: number; message: string } };
         try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.id != null && typeof msg.id === 'number' && pending.has(msg.id)) {
+        if (typeof msg.id === 'number' && pending.has(msg.id)) {
           const p = pending.get(msg.id)!;
           pending.delete(msg.id);
           if (msg.error) p.reject(new Error(msg.error.message || `MCP error ${msg.error.code}`));

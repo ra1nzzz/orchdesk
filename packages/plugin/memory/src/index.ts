@@ -365,19 +365,21 @@ export function apply(ctx: Context, config: MemoryConfig): void {
     const mode: DumpRecord['mode'] =
       !summarizeFn || fallbacks === chunks.length ? 'extractive' : fallbacks === 0 ? 'llm' : 'mixed';
 
+    // IDF 与语料规模在循环外一次算完：此前每块摘要都对四域全量语料重建 IDF
+    // （O(块数 × 语料大小)；分块转储 + 200 条/域上限下，单次 dump 可产生数十次
+    // 全语料遍历）。同批所有块共用转储前的 IDF 快照，不改变「随时间演进的 IDF
+    // 差异可接受」的结论——TF-IDF 本就是近似，且召回端每次都按当前全量语料重算，
+    // 不会累积漂移。
+    const idf = vectorizeCorpus();
+    const corpusTotal = corpusSize();
     const memoryIds: string[] = [];
     for (const summary of summaries) {
-      const idf = vectorizeCorpus();
-      const n = corpusSize();
       const entryId = nextId('mem');
       const entry: MemoryEntry = {
         id: entryId,
         domain,
         text: summary,
-        // 每块单独算 IDF：先落盘的块会改变语料分布，但那正是「随时间演进的 IDF」，
-        // 与召回时（全语料重新计算）口径不同。差异可接受 —— TF-IDF 本就是近似，
-        // 且召回端每次都按当前全量语料重算，不会累积漂移。
-        vector: tfidf(tokenize(summary), idf, n),
+        vector: tfidf(tokenize(summary), idf, corpusTotal),
         source: { agent: opts?.agent, sessionId, origin: `dump:${sessionId}` },
         createdAt: Date.now(),
       };

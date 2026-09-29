@@ -85,7 +85,13 @@ function loadSandbox(): SandboxState {
     const raw = JSON.parse(fs.readFileSync(f, 'utf-8')) as Partial<SandboxState>;
     return {
       mode: SANDBOX_MODES.includes(raw.mode as SandboxMode) ? (raw.mode as SandboxMode) : 'workspace-write',
-      sessionModes: raw.sessionModes && typeof raw.sessionModes === 'object' ? raw.sessionModes : {},
+      // R4-4：sessionModes 逐值过白名单——与顶层 mode（上一行）同口径。手改或损坏的
+      // sandbox.json 写入非法模式串时，原样采信会让 resolve() 返回未定义行为，所有
+      // === 'read-only' 判定落空（该会话被当作可写）；setSandboxMode 对未知模式是
+      // 降级为最严的，装载侧不能反其道而行之。不认识的条目整体丢弃，回落全局 mode。
+      sessionModes: raw.sessionModes && typeof raw.sessionModes === 'object'
+        ? Object.fromEntries(Object.entries(raw.sessionModes).filter(([, v]) => SANDBOX_MODES.includes(v as SandboxMode)))
+        : {},
       networkAllow: normalizeNetworkAllow(raw.networkAllow),
       authMode: raw.authMode === 'trusted' || raw.authMode === 'paranoid' ? raw.authMode : 'default',
       audit: Array.isArray(raw.audit) ? raw.audit.slice(-200) : [],
@@ -422,8 +428,6 @@ export const hostServices = {
       async followup(sessionId, messages) {
         if (!agents.has(sessionId)) return { text: `（SubAgent ${sessionId} 不存在或已销毁）` };
         if (!agentRunner) return { text: '（SubAgent 运行器未接入，无法执行）' };
-        const meta = agents.get(sessionId);
-        void meta;
         return agentRunner({ sessionId, messages });
       },
       list() { return [...agents.keys()]; },

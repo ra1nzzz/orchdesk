@@ -131,8 +131,19 @@ export function apply(ctx: Context, config: PromptConfig): void {
   function update(id: string, patch: Partial<Omit<PromptDoc, 'id' | 'updatedAt'>>): PromptDoc | undefined {
     const cur = docs.get(id);
     if (!cur) return undefined;
-    const merged = { ...cur, ...patch } as Omit<PromptDoc, 'id' | 'updatedAt'>;
-    const next: PromptDoc = { ...normalizeDoc(merged), id: cur.id, updatedAt: Date.now() };
+    // 合并时过滤显式 undefined：Partial 类型允许 undefined 字段（host/桥构造 patch 时
+    // 常见），直接 {...cur, ...patch} 会把它们盖上去，再过 normalizeDoc 时 priority 被
+    // 静默重置为 0、agents 被重置为 []——「绑定 Agent」变成「全局默认」且无任何提示。
+    // 未提供（undefined）的字段保持现值，只有真实提供的值才覆盖。
+    const merged = { ...cur } as Record<string, unknown>;
+    for (const [k, v] of Object.entries(patch)) {
+      if (v !== undefined) merged[k] = v;
+    }
+    const next: PromptDoc = {
+      ...normalizeDoc(merged as Omit<PromptDoc, 'id' | 'updatedAt'>),
+      id: cur.id,
+      updatedAt: Date.now(),
+    };
     docs.set(id, next);
     return { ...next };
   }

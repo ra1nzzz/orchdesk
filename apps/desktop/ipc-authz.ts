@@ -134,7 +134,15 @@ export function registerAuthzIpc(ipc: IpcMain, deps: AuthzIpcDeps): void {
 
   // 审批应答：渲染层弹窗 → submitDecision → 解除挂起的 approvalGate。
   // 非法 outcome 归一化为 unavailable（fail-closed 不猜用户意图）。
-  ipc.on('orchdesk:authz-submit-decision', (_e, id: string, outcome: string) => {
+  // R4-2：这条通道走 ipcMain.on，**不在 main.ts 对 ipcMain.handle 的 sender 门 patch
+  // 覆盖范围内**（main.ts:125 与 ipc-guard-verify 都声明「92 个 handler 全过 sender 门」）。
+  // 今天只有一个带 preload 的窗所以没有实际越权面，但一旦加入第二个合法窗，它就能
+  // 代替主窗应答——甚至自动应答 allowed-once——全部挂起审批，用户确认门被绕过。
+  // 这里按同一口径补一道 sender 校验：只接受主窗（无 frame 的 webContents）发来的应答。
+  ipc.on('orchdesk:authz-submit-decision', (e, id: string, outcome: string) => {
+    // 空安全：验证探针会以 null 事件驱动本通道（credentials-verify 的 runToolProbe），
+    // 所以不能无条件读 e.senderFrame。真实 IPC 事件一定有该字段。
+    if (e && e.senderFrame) return;   // 只接受主 frame 的应答，拒绝 iframe/子 frame 代答
     const pending = pendingApprovals.get(id);
     if (!pending) return;
     clearTimeout(pending.timer);

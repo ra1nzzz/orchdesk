@@ -129,6 +129,8 @@ export interface SubAgentRecord {
   finishedAt?: number;
   /** 成果（晋升主会话记忆前须经 Director 过滤）。 */
   result?: string;
+  /** 收敛过程中的异常原因（如 dispose 底层失败）：状态照常收敛，原因不静默。 */
+  note?: string;
   parentSession?: SessionId;
 }
 
@@ -220,7 +222,9 @@ export function apply(ctx: Context, config: BrainConfig): void {
       try {
         await handle.dispose();
       } catch (err) {
-        console.warn('[brain] SubAgent dispose 失败（仍继续收尾）:', (err as Error).message);
+        // 收敛语义优先：status/事件/清理照走，失败原因落 note + 日志（不静默）。
+        rec.note = `dispose-error:${err instanceof Error ? err.message : String(err)}`;
+        console.warn('[brain] SubAgent dispose 失败（仍继续收尾）:', rec.note);
       }
       handles.delete(id);
     }
