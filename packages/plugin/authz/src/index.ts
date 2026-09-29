@@ -181,8 +181,11 @@ export function normalizeGrant(input: unknown): { ok: boolean; rule?: GrantInput
   if (!pattern) return { ok: false, reason: '缺少目标模式（pattern）；不限目标请填 *' };
   if (grantPatternToRegExp(pattern) === null) return { ok: false, reason: `目标模式非法：${pattern}` };
   if (!isGrantScope(raw.scope)) return { ok: false, reason: `授权粒度非法：${String(raw.scope)}（应为 session 或 permanent）` };
-  if (raw.scope === 'permanent' && (tool === '*' || pattern === '*')) {
-    return { ok: false, reason: '永久授权不允许通配全部工具或全部目标（tool/pattern 均需具体值）' };
+  // R3-1：`**` 经 grantPatternToRegExp 编译成 ^[\s\S]*[\s\S]*$，命中一切目标，
+  // 与 `*` 完全同义。原来只比对字面量 pattern === '*'，用户填 `**`（或 `* *`）即可拿到
+  // 「永久免审 + 任意目标」，正是这条规则要防的语义。判定改为「去掉 * 后为空即通配」。
+  if (raw.scope === 'permanent' && (tool === '*' || pattern.replace(/\*/g, '').trim() === '')) {
+    return { ok: false, reason: '永久授权不允许通配全部工具或全部目标（tool/pattern 均需具体值；`*`/`**` 都算通配）' };
   }
   const sessionId = String(raw.sessionId ?? '').trim();
   if (raw.scope === 'session' && !sessionId) return { ok: false, reason: '会话级白名单必须指定 sessionId' };
@@ -504,36 +507,53 @@ export function apply(ctx: Context, config: AuthzConfig): void {
         sessionId,
       });
       // PRD FR-9：白名单命中即放行（hits++ 并入审计），不再惊动用户。
-      // 偏执模式的拦截发生在主进程 approvalGate（白名单不覆盖 paranoid）。
-      const hit = matchGrant({
-        toolName: req.toolName,
-        target: (req as { target?: string }).target,
-        sessionId,
-      });
-      if (hit) return 'allowed-once';
+      // R3-3：偏执模式下**这里也不认白名单**。原实现把 paranoid 的拦截完全推给
+      // 「主进程 approvalGate」，但本监听器本身就是 dsh 工具管道的 approval seam——
+      // 一旦审批确实由这条链路发起，一条永久白名单就能在偏执（全锁）模式下开门，
+      // 与「切到偏执 = 全锁」的产品承诺直接矛盾。fail-closed：宁可多问一次。
+      let mode: AuthzMode = 'default';
+      try { mode = await getMode(sessionId); } catch { /* 读不到档位按最严处理 */ mode = 'paranoid'; }
+      if (mode !== 'paranoid') {
+        const hit = matchGrant({
+          toolName: req.toolName,
+          target: (req as { target?: string }).target,
+          sessionId,
+        });
+        if (hit) return 'allowed-once';
+      }
       if (!uiAnswerer) {
         // 无 GUI 应答方（headless / 未接 Electron）：交还 dsh 默认链路；
         // dsh 无应答方时解析 unavailable → fail-closed（不开门），符合硬约束。
         return next();
       }
+      // R3-4：超时定时器与 abort 监听必须在 race 结束后清理。原来 UI 先应答时
+      // setTimeout 从不 clearTimeout、signal 监听从不 removeEventListener——每次审批泄漏
+      // 一个最长 120s 的定时器和一个挂在会话级 AbortSignal 上的监听器；同一会话第 12 次
+      // 审批起 Node 会开始告警。改为把两者交还调用方，在 finally 里统一收。
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
       const timeout = new Promise<ApprovalOutcome>((resolve) => {
-        const t = setTimeout(() => resolve('unavailable'), config.approvalTimeoutMs);
+        timer = setTimeout(() => resolve('unavailable'), config.approvalTimeoutMs);
         if (req.signal) {
-          req.signal.addEventListener('abort', () => {
-            clearTimeout(t);
-            resolve('cancelled');
-          }, { once: true });
+          onAbort = () => { if (timer) clearTimeout(timer); resolve('cancelled'); };
+          req.signal.addEventListener('abort', onAbort, { once: true });
         }
       });
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (onAbort && req.signal) req.signal.removeEventListener('abort', onAbort);
+      };
       try {
         const ui = uiAnswerer({ toolName: req.toolName, reason: req.reason, sessionId }).then(
           (o): ApprovalOutcome => (o === 'allowed-once' || o === 'rejected' || o === 'cancelled' || o === 'unavailable' ? o : 'unavailable'),
           (): ApprovalOutcome => 'unavailable',
         );
         const outcome = await Promise.race([ui, timeout]);
+        cleanup();
         pushAudit({ kind: 'approval-decided', ts: Date.now(), outcome, toolName: req.toolName, sessionId });
         return outcome;
       } catch {
+        cleanup();
         return 'unavailable';
       }
     },

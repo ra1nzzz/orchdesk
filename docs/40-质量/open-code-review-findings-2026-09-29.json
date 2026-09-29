@@ -1,0 +1,578 @@
+[
+ {
+  "id": "R1-1",
+  "sev": "P1",
+  "eff": "S",
+  "loc": "`apps/desktop/model-client.ts:593-596`（与 `apps/desktop/agent-turn.ts:216-218`、`apps/desktop/model-client.ts:31-35` 联动）",
+  "rule": "Async Handling Standards — Error Handling（错误分类可读）+ Correctness",
+  "prob": "fetch 等响应头阶段被空闲/绝对超时 abort 时，原错误（`name='AbortError'`、`message='idle-timeout 300000ms'`）被包成普通 `Error`，`isAbortError` 匹配不到，用户看到「（模型调用失败）请求模型接口失败：idle-timeout 300000ms」而非 `modelTimeoutText` 的可读文案；且与 Ollama 路径（`model-client.ts:362` 原样 rethrow）和流式中断路径（`model-client.ts:626` 原样 rethrow）行为不一致——同样超时，流式中断友好、等响应头 cryptic。`openModelAbort` 注释（`model-client.ts:56-58`）明确宣称「超时原因的 name 固定为 AbortError，便于与网络错误区分」，此包装恰好废掉该设计。",
+  "fix": "包装前保留 abort 语义：`if (isAbortError(err)) throw err;`，或 `const w = new Error(...); w.name = (err as Error).name; throw w;`"
+ },
+ {
+  "id": "R1-2",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/model-client.ts:394-398`、`414-438`",
+  "rule": "Correctness / Error Handling；项目铁律「未接入 ≠ 为空 ≠ 失败」",
+  "prob": "Ollama 流式返回**合法但零内容**的 NDJSON 时，落入 `JSON.parse` 失败分支，报「Ollama 返回非 JSON 响应」并附 body 片段——事实错误（它就是合法 JSON），且丢失 OpenAI 路径同款的 `emptyContentReason` 诊断（provider/model/apiMode/finish_reason），用户无法区分「模型空回复」与「网关故障」。",
+  "fix": "`nd` 存在但 content/toolCalls 均空时，直接返回 `{ content: '', toolCalls: [], source: 'none', emptyReason: emptyContentReason({ ..., finish: nd.done_reason, bodySnippet: rawBody.slice(0, 200) }) }`，与 `model-client.ts:449-464` 非流式分支同构"
+ },
+ {
+  "id": "R1-3",
+  "sev": "P2",
+  "eff": "M",
+  "loc": "`apps/desktop/model-client.ts:161-165`（`end()`）、`179`/`235`（finish 采集）、`629-654`（SSE 返回路径）",
+  "rule": "Correctness — 边界条件（任务点名的「截断响应处理」）",
+  "prob": "`finish_reason`/`done_reason` 被采集但只用于空内容诊断，`[DONE]`（`model-client.ts:170`）被直接忽略；连接中途 FIN/RST（未静默到 300s 空闲计时）时 `read()` 正常结束，**部分 content 被当作完整最终答复返回，无任何截断提示**——Agent 工作台里用户会拿到一个 silently truncated 的答案。",
+  "fix": "两个 parser 记录 `sawTerminator`（见 `[DONE]`/`done:true`/任一 `finish_reason` 即置位）；返回前若 `!sawTerminator && content` 非空，给 `ModelReply` 加 `truncated?: boolean`（agent-runtime.ts:45 的类型已含软降级等可选字段，扩展同构），agent-turn 在 `emptyReason` 同款位置追加「（响应可能不完整：流未收到终止标记）」并落盘可见"
+ },
+ {
+  "id": "R1-4",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/agent-turn.ts:177`（对照 `apps/desktop/main.ts:361-362` 注释）",
+  "rule": "Correctness / Code Quality — 与注释声明不符",
+  "prob": "`main.ts` 注释明确「`??` 而非 `||`：显式配置 0 不应用默认值吞掉（虽随后被消费端钳到 1）」，但消费端 agent-turn 用 `||`：手改 `models.json` 设 `maxToolIterations: 0`（意图=最少迭代）→ `0 || 200` = **200**，与承诺的「钳到 1」相反，显式配置被静默放大 200 倍。",
+  "fix": "改为 `modelCfg.maxToolIterations ?? MAX_TOOL_ITERATIONS_DEFAULT`，与 `loadModelConfig` 同口径"
+ },
+ {
+  "id": "R1-5",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/main.ts:911`、`apps/desktop/main.ts:925`",
+  "rule": "Maintainability — 命名表达意图",
+  "prob": "trace 两个 handler 内用 `const/let dataDir` 遮蔽了模块级 `function dataDir()`（`main.ts:203`），同文件两种 `dataDir` 语义混读，后续维护易误判调用的是哪个。",
+  "fix": "两处局部变量改名 `dir`"
+ },
+ {
+  "id": "R1-6",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/main.ts:732-743`（对照 `main.ts:863-866`）",
+  "rule": "Async Handling — 超时缺失",
+  "prob": "`orchdesk:models-test` 调 `callModel` 既不传 `signal`也不包 `withTimeout`；黑洞端点时最坏挂到 `MODEL_MAX_MS`（600s）+ 空闲 300s，设置页「测试连接」可无反馈悬挂约 10 分钟。同文件的记忆摘要 seam（`main.ts:863-866`）就正确用了 `withTimeout(..., SUMMARIZE_TIMEOUT_MS)`，处理不一致。",
+  "fix": "用现成 `withTimeout` 包一层（如 30s 常量），超时返回可读 `error`"
+ },
+ {
+  "id": "R1-7",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/model-client.ts:183`、`232`、`659`（对照 `model-client.ts:124-127`）",
+  "rule": "Async/Error Handling — 容错不一致",
+  "prob": "`emitDelta` 明确 try/catch 并注释「渲染层失败不影响回合」，但 SSE/NDJSON parser 内的 `onDelta` 调用无任何保护；一旦调用方回调抛错，异常穿破 `readStreamingText` 使整回合失败。当前 `notifyAgentDelta`（`main.ts:531-537`）内部有 catch 所以不炸，但契约上矛盾，换调用方即踩雷。",
+  "fix": "parser 构造时把 `onDelta` 包一层 try/catch（或统一走 `emitDelta` 式包装）"
+ },
+ {
+  "id": "R1-8",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/main.ts:343`、`360`、`367`、`841`、`861` + `apps/desktop/agent-turn.ts:127`",
+  "rule": "Hardcoding + Duplicate Code",
+  "prob": "默认模型名 `'qwen3:14b'` 在两家文件 7 处硬编码，`(provider.models || [])[0] || cfg.defaultModel || 'qwen3:14b'` 取模逻辑重复 3 处，无单一来源；改默认模型要改 7 个地方。",
+  "fix": "在 `agent-runtime.ts` 或 `model-client.ts` 导出 `DEFAULT_MODEL` 常量与 `pickModel(provider, cfg)` helper，7 处收敛"
+ },
+ {
+  "id": "R1-9",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/model-client.ts:487`",
+  "rule": "Hardcoding — 业务数字",
+  "prob": "completions 模式 `max_tokens: 1024` 写死在请求体构造里，是影响模型输出的业务参数，却无常量无注释。",
+  "fix": "提取模块级常量 `COMPLETIONS_MAX_TOKENS = 1024` 并注释用途"
+ },
+ {
+  "id": "R2-1",
+  "sev": "P2",
+  "eff": "M",
+  "loc": "`apps/desktop/renderer/app.js:2740-2826`（含 `app.js:2742`）、`apps/desktop/renderer/index.html:62`、`apps/desktop/renderer/styles.css:85-90`、`apps/desktop/renderer/actions/session.js:1142`",
+  "rule": "Dead Code（声明未引用 / 永不执行）",
+  "prob": "汉堡菜单删除后，导航抽屉整条链路不可达——Ctrl+K 已不再调 `toggleNavDrawer`（见 R2-2），全仓无任何元素带 `data-action=\"nav-drawer\"`，抽屉永远不会被打开；`navDrawerHTML`/`toggleNavDrawer`/`closeNavDrawer`、`#navDrawerRoot` 容器、`.nav-drawer` 全套 CSS、动作注册全部成为死码，且 `navDrawerHTML` 内 `const proj = state.viewMode === 'project'`（2742）声明后从未使用。",
+  "fix": "删除 `navDrawerHTML`/`toggleNavDrawer`/`closeNavDrawer`（app.js:2740-2826）、`index.html:62` 的 `#navDrawerRoot`、`styles.css:85-90` 的 `.nav-drawer*`、`session.js:1142` 注册及 `act_nav` 里的 `ctx.closeNavDrawer()`（session.js:12）；`app.js:4379` 的 Escape 关抽屉分支一并删。"
+ },
+ {
+  "id": "R2-2",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:4366-4377`",
+  "rule": "Code Comments（注释描述的行为已不存在）+ Correctness",
+  "prob": "Ctrl+K 处理器注释仍写「唤出导航抽屉（轻模式主导航入口；与 ☰ 同效）」，实际代码已退化为「focus 到 rail 第一个按钮」，且 ☰ 按钮在本提交中已删除——注释与实现双向漂移；Ctrl+K 现在无任何可见反馈，替代入口仅剩常驻 rail（Tab 可达，功能上够用）。",
+  "fix": "注释改为「Ctrl+K/Cmd+K：焦点跳到导航轨（三入口常驻后的替代入口）」；`railBtn` 缺失时不要静默 return，可 `toast` 或省略该快捷键。"
+ },
+ {
+  "id": "R2-3",
+  "sev": "P2",
+  "eff": "M",
+  "loc": "`apps/desktop/renderer/app.js:392-403`、`app.js:2515-2516`、`app.js:2750-2752`、`app.js:2787-2789`、`app.js:292-294`、`app.js:488`、`styles.css:77-84`、`styles.css:880`、`actions/session.js:752-756`、`session.js:1221`",
+  "rule": "Dead Code + 过时注释",
+  "prob": "双壳层（light/project）取消后留下一整片残骸：`loadViewMode`/`loadViewModePinned`/`saveViewMode` 定义后全仓无调用者；`toggleViewMode`/`escalateToProject` 是空壳却仍被 4 处调用（`app.js:2874`、`app.js:3062`、`session.js:1131`、`settings.js:34`），调用处注释还在承诺「自动升级项目模式」；`render()` 每帧 remove 从不有人 add 的 `light`/`project`/`light-mode`；`state.viewMode` 注释（292-294）描述 light/project 双态而值已是 `'session'`；CSS `.app.light`、`body.light-mode .rail`、`#navDrawerBtn` 均为死钩子（`#navDrawerBtn` 指向已删除的按钮）。",
+  "fix": "删 `loadViewMode`/`loadViewModePinned`/`saveViewMode` 及 `VIEWMODE_KEY`/`VIEWMODE_PINNED_KEY`；`toggleViewMode`/`escalateToProject` 连同 4 个调用点与 `session.js:1221` 的 `view-mode-toggle` 注册一并删；`render()` 去掉 2515-2516 两行 class 清理；`state.viewMode`/`viewModePinned` 字段与 292-294、488 注释改如实描述；CSS 删 77-84、880。"
+ },
+ {
+  "id": "R2-4",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/styles.css:398-413`、`styles.css:416`、`styles.css:444`、`styles.css:452-458`（与 `styles.css:682-687` 重复）、`app.js:4339-4346`、`app.js:262`、`actions/session.js:1152`",
+  "rule": "Dead Code + Duplicate Code",
+  "prob": "composer 旧「项目选择器」一行被工作目录 chip 取代后，`.proj-select`/`.ps-*`/`.proj-dropdown`/`.pd-*` 共 16 行 CSS 无任何 HTML 渲染；document 级 outside-click 仍查询这两个类名并读永不为 true 的 `state.projDropdownOpen`；`proj-select-toggle` 动作注册不可达；另 `.composer .tools-left`、`.composer .intent-hint`、`.composer .think-slider`（且与 682-687 整段重复）也均已无对应标记。",
+  "fix": "删 styles.css:398-413、416、444、452-458（保留 682-687 一份或两份都删，新滑块由 443 行 `.think-item input[type=range]` 接管）；`app.js:4339-4346` 只留 `composerMoreOpen` 分支；删 `state.projDropdownOpen`（262）与 `session.js:1152` 注册。"
+ },
+ {
+  "id": "R2-5",
+  "sev": "P2",
+  "eff": "S（删除）/ M（重新接线）",
+  "loc": "`apps/desktop/renderer/app.js:1173-1237`、`app.js:1191`、`app.js:926`、`actions/session.js:1158-1165`、`styles.css:92`、`styles.css:464-466`",
+  "rule": "Dead Code",
+  "prob": "首页改版后「智能推荐」整链未接线：`getSmartRecommendations()` 无任何调用者，依赖它的 `quick-weekly/debug/ppt/idle/refactor/data/skills/analyze` 8 个动作注册不可达，`.home-quick-actions`/`.quick-action-btn`/`.home-ws-row` CSS 死亡；且该函数即使被调用也是坏的——读 `m.text`/`m.role`，而消息结构是 `m.x`/`m.r`（`renderMsg` 用 `m.r || m.role`），主题信号恒为空。",
+  "fix": "要么在 `renderHomeScreen` 重新渲染推荐 chips（同时把 1191 改成 `m.x`/`m.r`），要么删 `getSmartRecommendations` + 8 个 quick 动作 + 三段 CSS；不要留半接线。"
+ },
+ {
+  "id": "R2-6",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:1317`（对照 `app.js:1052`、`app.js:1559`）",
+  "rule": "XSS Protection / innerHTML Safety（转义完整性）",
+  "prob": "`renderComposer` 的 placeholder 直插 `${s.expert}` 未过 `esc()`，而同文件另两处消费 `s.expert` 都转义；expert 名来自 `orchestrationCatalog`（插件目录，`app.js:85`），一旦含 `\"` 会撑破属性、其余内容泄流成杂散属性；CSP `script-src 'self'` 挡住脚本执行，故非直接 XSS，但属属性注入与转义不一致。",
+  "fix": "改 `placeholder=\"向 ${esc(s.expert)} 发消息…\"`；顺带把 `app.js:2445`（向导专家卡 `${e}`）一并补 esc。"
+ },
+ {
+  "id": "R2-7",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:1263-1273`（chip 渲染）、`app.js:2841-2858`（pickWorkspace）",
+  "rule": "Correctness / 项目铁律「UI 不许撒谎」",
+  "prob": "项目绑定会话里 chip 显示的是 `projectPathOf`（只读绑定目录），但「更改」按钮点击后 `pickWorkspace` 因 2847 行守卫跳过会话级应用，只写全局 `workspaceDir`，随后 toast「工作目录已设置：X」——用户眼前的 chip 毫无变化却收到成功提示，操作看似被静默吞掉（对轻/任务会话则正常生效）。",
+  "fix": "项目绑定会话下 chip 去掉「更改」或改 `title=\"项目绑定目录：…（在设置→项目中更改）\"` 并不触发 ws-pick；或 toast 如实说明「已设为新任务会话的默认目录，当前项目会话仍用绑定目录」。"
+ },
+ {
+  "id": "R2-8",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:1564`（唯一关闭入口）、`app.js:1451-1461`（renderHomeScreen）、`app.js:1890`（VIEWS.plugins.ctx）、`app.js:2418`（VIEWS.settings.ctx）",
+  "rule": "Correctness（状态机死态）",
+  "prob": "右栏「按需浮出」的关闭控件（toggle-ctx chevron）只存在于「有选中会话的 session 主区」。用户在会话中钉住检查器（`ctxOpen=true`）后点新对话进入主页，或导航到插件/设置页，右栏保持展开且这三个视图都没有关闭按钮，只能先回到会话页才能收起——浮出状态机存在无出口的死角。",
+  "fix": "在 `VIEWS.session.ctx()` 头部加一个常驻关闭钮（`ctx-header` 右侧 iconbtn → `act_toggle_ctx`），三个页共用；或在 `renderHomeScreen` 补同一按钮。"
+ },
+ {
+  "id": "R2-9",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:2559`",
+  "rule": "XSS Protection / innerHTML Safety",
+  "prob": "`render()` 全局 catch 把 `err.stack` 原样拼进 innerHTML 渲染「渲染错误」页；若错误信息携带用户文本（如会话标题、prompt 片段）且含 HTML，会注入页面（CSP `script-src 'self'` 可挡脚本执行，但属性/样式注入与布局破坏仍可能）。同函数 2508 行的未知页分支就用了 `esc()`，此处不一致。",
+  "fix": "`esc(err && err.stack || err)`；`err.stack` 不存在时回落 `esc(String(err))`。"
+ },
+ {
+  "id": "R2-10",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js`（155 行 LF，其余 CRLF；典型如 `app.js:1263-1273` 与上下文 `1262`/`1275` 不一致）",
+  "rule": "Maintainability",
+  "prob": "app.js 行尾混合：约 155 行以 LF 结尾、其余为 CRLF（本提交新增/改写的 `workdirChipHTML`、ctx 步骤段等正是 LF 段）。混合 EOL 会让后续提交产生整文件 diff 噪音，也可能被 autocrlf 设置整体重写。",
+  "fix": "统一转 CRLF（或按仓库既有约定）后提交一次；是否本提交引入待验证（可用 `git show 6dbf8e7 -- apps/desktop/renderer/app.js | cat -A | head` 确认）。"
+ },
+ {
+  "id": "R2-11",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:258`",
+  "rule": "Code Quality（类型严谨性）",
+  "prob": "`state.ctxOpen` 初值是数字 `0` 而非布尔 `false`，与其余全部布尔字段不一致；当前靠 `!!state.ctxOpen`（2514）兜底不显故障，但 `act_toggle_ctx` 取反后类型在 number/boolean 间摇摆，后续任何直接 `if (state.ctxOpen === false)` 式判断都会踩坑。",
+  "fix": "改 `ctxOpen: false`。"
+ },
+ {
+  "id": "R2-12",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/index.html:19-23`、`app.js:488`",
+  "rule": "Code Comments（注释与实现矛盾）",
+  "prob": "index.html 标题栏注释仍整段描述「☰ 唤出导航抽屉 / 轻模式 rail 隐藏 / project 态显示 rail」，紧接着又写「三入口轨常驻，不再用汉堡菜单替代」——同一注释块自相矛盾；`renderRail` 注释（488）承诺「底部给模式切换」，实际 rail 底部只有主题切换，模式切换已随双壳层取消。",
+  "fix": "index.html 19-23 压缩为一句「三入口轨（会话/插件/设置）常驻，主题切换在 rail 底部」；`app.js:488` 改为「rail 常驻：三页导航 + 主题切换」。"
+ },
+ {
+  "id": "R3-1",
+  "sev": "P1",
+  "eff": "S",
+  "loc": "`packages/plugin/authz/src/index.ts:184`（配合 `:139-149`）",
+  "rule": "Code Security Checks / Correctness（白名单永久粒度通配拒绝被绕过）",
+  "prob": "B-4 只拒绝了字面量 `pattern === '*'`，但 `**`（及任意「全是 `*`」的模式）经 `grantPatternToRegExp` 编译成 `^[\\s\\S]*[\\s\\S]*$`，命中一切目标——用户手动添加一条 `tool=file_write, pattern='**', scope=permanent` 即获得「永久免审写任意文件」，正是 B-4 要防的语义。",
+  "fix": "在 `normalizeGrant` 中把「去 `*` 后为空」也判为通配：`if (raw.scope === 'permanent' && (tool === '*' || pattern.replace(/\\*/g, '').trim() === '')) return { ok:false, ... }`；或在 `grantPatternToRegExp` 前先把连续 `*` 折叠成单个再比对。"
+ },
+ {
+  "id": "R3-2",
+  "sev": "P1",
+  "eff": "S",
+  "loc": "`packages/plugin/intent/src/index.ts:114`",
+  "rule": "Correctness / Obvious Typos（正则转义错误导致安全信号失效）",
+  "prob": "F1 系统路径词表写成 `C:\\\\\\\\Windows`，在正则字面量里表示「匹配两个连续反斜杠」，真实 Windows 路径只有一个反斜杠 → 该分支永不命中，`system-path` 信号（weight 0.35）在本应用的主平台上实际是死规则，漏斗向 fail-open 方向衰减。影响被放大：无本地模型时 `runGates` 的 g4 系统路径检查依赖 `action.target`，而漏斗降级路径 target 恒为 `''`（`intent/src/index.ts:421`、`:290`），此时 F1 是唯一的系统路径信号。",
+  "fix": "改为 `C:\\\\Windows|C:\\\\Users[\\\\/][^\\\\/]+[\\\\/]\\.ssh`（单层转义），或直接复用 `SYSTEM_PATH_RE` 的字符类风格；补一条针对 `C:\\Users\\<name>\\.ssh` 的权重规则。"
+ },
+ {
+  "id": "R3-3",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`packages/plugin/authz/src/index.ts:506-513`",
+  "rule": "Correctness / fail-closed 铁律（白名单与 paranoid 的判定顺序）",
+  "prob": "`approval/request` 监听器里白名单命中即返回 `'allowed-once'`，全程不读当前 mode——注释把 paranoid 拦截推给「主进程 approvalGate」，但该监听器是 dsh 工具管道 seam。若审批确实由 dsh 管道发起，paranoid 会被永久白名单覆盖；若桌面链路只有 `host-services.approval.request`（直接调 `uiAnswerer`，绕过本监听器）这一条发起路径，则这段白名单逻辑是死代码。两种可能都对安全叙事不利，需定论。",
+  "fix": "在监听器最前面加 `if ((await getMode(sessionId)) === 'paranoid') return 'rejected'`（与主进程门同序）；同时确认 `approval/request` 的实际发起方——若只有 host-services 一条路径，删掉监听器里的白名单分支避免「看似有门实则绕门」。"
+ },
+ {
+  "id": "R3-4",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`packages/plugin/authz/src/index.ts:519-533`",
+  "rule": "Async Handling / 资源释放",
+  "prob": "`Promise.race([ui, timeout])` 中 UI 先应答时，`setTimeout` 从不 `clearTimeout`，`req.signal` 的 abort 监听也从不 `removeEventListener` → 每次审批泄漏一个最长 120s 的定时器和一个挂在会话级 AbortSignal 上的监听器；同一会话第 12 次审批起 Node 会打 `MaxListenersExceededWarning`（EventTarget 默认 10）。",
+  "fix": "把 `t` 和 `onAbort` 提到 race 之外声明，`finally` 里 `clearTimeout(t); req.signal?.removeEventListener('abort', onAbort)`（可参照 `host-services.ts:355-363` 的 `finish()` 写法）。"
+ },
+ {
+  "id": "R3-5",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`packages/plugin/intent/src/index.ts:194-199`",
+  "rule": "Async Handling（错误处理/超时）",
+  "prob": "`callLocalModel` 的 fetch 只挂 `payload.signal`，没有自身超时。Ollama 端口活着但不响应（模型加载中、连接挂起）时 pre-step waterfall 无限期阻塞，整个 Agent 回合楔死且 abort 也救不回来（abort 只在回合取消时触发，而回合就卡在这里）。",
+  "fix": "`fetch(url, { signal: AbortSignal.any([payload.signal, AbortSignal.timeout(10_000)]) })`（Node 20+）或 `Promise.race` + 独立定时器，超时按「模型不可用」返回 null 走保守回退。"
+ },
+ {
+  "id": "R3-6",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`packages/plugin/multi/src/index.ts:235-237`（配合 `:286`）",
+  "rule": "Correctness / UI 不许撒谎铁律",
+  "prob": "`subAgentTurn` 在运行器未注入时返回 `null`，调用方却执行 `node.result = r?.text || ''; node.status = 'done'` → 委派树把「从没执行」的 Director 标成 done、result 空串、无 note，渲染层只能显示成功。文件自己声明「未注入运行器 → 返回明确错误文案而非伪造成功」，实际走向正是伪造成功。",
+  "fix": "`if (!r) { node.status = 'failed'; node.note = 'subagent-runner-unavailable'; continue; }`，或在 `subAgentTurn` 返回 `{ text: '（SubAgent 运行器未接入，无法执行）' }` 与 host-services `followup` 的错误文案口径对齐。"
+ },
+ {
+  "id": "R3-7",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`packages/plugin/brain/src/index.ts:214-219`",
+  "rule": "Correctness / 资源释放",
+  "prob": "`await handle.dispose()` 没有 try/catch：一旦抛错，`rec.status` 停留在 `executing`、`handles`/`registry` 条目不删、`dispose` 事件不发 → 渲染层 inline 芯片永久显示「执行中」（违反三态诚实），且该 SubAgent 永久占用 `maxConcurrentSubagents` 配额，后续 dispatch 全部抛 cap 错误。",
+  "fix": "包 try/catch，catch 里仍走完 `rec.status='disposed'; rec.note='dispose-error:...'; emit(...); registry.delete(id); handles.delete(id)`（或最差也保证 `registry.delete`），与 `commitWorkerResult` 「dispose 优先」的既定语义一致。"
+ },
+ {
+  "id": "R3-8",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`packages/plugin/compensation/src/index.ts:241-242`（对照 `:180-192`）",
+  "rule": "Correctness / fail-closed 铁律（同名配置两条门不一致）",
+  "prob": "`failClosedUnknown`（默认 true，注释称 fail-closed）只在 `withhold()` 里生效；插件自己挂在 `agent/pre-step` 的强制门用 `requiresWithhold(category)`，对 `other` 类直接放行 → 同一段「外发/删除」措辞的文本，主进程 `outboundGate`（`main.ts:488`）会弹确认，插件门放行，两条强制点判定相反。哪个是权威取决于调用时序，行为不可预测。",
+  "fix": "pre-step 门改为复用 `withhold()` 的判定（提取一个 `needsWithhold(text)` 内部函数，两处都调它），或让 `requiresWithhold(category, config)` 把 `failClosedUnknown` 纳入；保证「同输入同结论」。"
+ },
+ {
+  "id": "R3-9",
+  "sev": "P2",
+  "eff": "M",
+  "loc": "`packages/plugin/evolution/src/index.ts:70-79`（配合 `:88-90`）",
+  "rule": "Code Security（静态门控绕过面）",
+  "prob": "`HARD_DENY` 只覆盖 CJS 形态：`require('child_process')` 被抓，但静态 ESM `import cp from 'node:child_process'` / `import 'node:fs'` 完全不在任何规则里（`remote-import` 只抓动态 `import(` 和 `from 'http...'`），可直接拿到子进程与 fs；同时 `staticGate` 不校验 `spec.code` 是字符串，`undefined`/对象会被 `RegExp.test` 强制转成 `\"[object Object]\"` 从而真空过门，而 `spec` 是从渲染层经 IPC 直传的（`ipc-plugins.ts:67`）。",
+  "fix": "加一条 `/(?:^|[;\\n])\\s*import\\s+(?:[^'\"]*\\s+from\\s+)?['\"`](?![./])(?!safe-)[^'\"`]+['\"`]/i` 拒掉非相对路径的静态 import；`staticGate` 入口加 `if (typeof spec.code !== 'string') return { allowed:false, reason:'插件源码缺失或非字符串', requiresSandbox:true }`。待验证点：宿主实例化临时插件用 CJS 还是 ESM（当前实例化是未实现的 seam），决定 ESM 规则的现实权重。"
+ },
+ {
+  "id": "R3-10",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`packages/plugin/intent/src/index.ts:286`",
+  "rule": "Code Security（白名单匹配不严谨）",
+  "prob": "G4 外发域名用子串包含判定 `host.includes(d)`：白名单里的 `api.openai.com` 会同时放行 `api.openai.com.evil.net`；白名单条目为空字符串时放行一切；条目未 trim/小写化。属可绕过的白名单。",
+  "fix": "改为精确相等或「点边界后缀」匹配：`const dom = d.trim().toLowerCase(); host === dom || host.endsWith('.' + dom)`，并过滤空条目；`host` 先做 URL 解析取 hostname 而非裸 `toLowerCase()`。"
+ },
+ {
+  "id": "R3-11",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`packages/plugin/trace/src/index.ts:83`（配合 `:240`）",
+  "rule": "Correctness（缺边界条件）/ Async in Loops",
+  "prob": "`batchSize` 用 `z.number()` 无下限；若为 0（或负），`flush()` 的 `while (pending.length > 0)` 里 `pending.splice(0, 0)` 永远返回空批、pending 永不缩减 → 死循环空批上传，且 `flushing` 永不复位，插件上传链路整体卡死。",
+  "fix": "schema 改 `z.number().min(1).default(20)`；`flush()` 循环里加 `if (!(activeConfig.batchSize > 0)) { result.skippedReason='invalid-batch-size'; break; }` 双保险。"
+ },
+ {
+  "id": "R3-12",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`packages/plugin/trace/src/index.ts:172-181`（对照 `apps/desktop/dsh-runtime.ts:36`）",
+  "rule": "Correctness / 可观测性（行为与注释矛盾 + 静默丢弃）",
+  "prob": "宿主注释称「关闭 = repoUrl 置空 → 只缓冲不上传（观测照续，不静默丢数据）」，插件实现是 `if (!activeConfig?.repoUrl) return;` 直接丢弃、且 `queueSize()` 无法反映「已关闭」状态 → 用户关遥测后的反馈既不上传也不可观测，与注释承诺相反。",
+  "fix": "二选一——(a) 让 `queueSize()` 增补 `disabled: boolean` 字段并把关闭态经 IPC 透出，注释与行为对齐；(b) 修正 `dsh-runtime.ts:36` 注释为「直接不记录」。建议 (a)，与「不静默」铁律一致。"
+ },
+ {
+  "id": "R3-13",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`packages/plugin/compensation/src/index.ts:58-61`",
+  "rule": "Correctness（正则子串误匹配）",
+  "prob": "类别规则用无边界子串匹配：`commit` 命中 \"commitment\"、`API` 命中 \"rapid\"、`GET`/`POST` 命中 \"budget\"/\"poster\" → 普通对话被误判为 network-egress/irreversible，触发整回合二次确认弹窗（确认被拒即 `reject` 整个回合），属可感知的误报。",
+  "fix": "英文词加边界 `\\b(POST|GET|PUT|API|commit|payment)\\b`（中文无边界问题）；`commit` 收紧为 `git\\s+commit|提交代码`。"
+ },
+ {
+  "id": "R3-14",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`packages/plugin/memory/src/index.ts:369-380`",
+  "rule": "Performance（不必要重复计算）",
+  "prob": "`dump()` 在「每块摘要」的循环体内调用 `vectorizeCorpus()`，每次都对四域全量语料重建 IDF → O(块数 × 语料大小)。分块转储 + 200 条/域上限下，单次 dump 可产生数十次全语料遍历。",
+  "fix": "`vectorizeCorpus()` 与 `corpusSize()` 提到循环外一次算完（注释已论证「随时间演进的 IDF 差异可接受」，提出来不改变该结论）。"
+ },
+ {
+  "id": "R3-15",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`packages/plugin/prompt/src/index.ts:131-137`",
+  "rule": "Correctness（缺空值/边界处理）",
+  "prob": "`update(id, patch)` 与现值浅合并后过 `normalizeDoc`，调用方若传显式 `undefined` 字段（`Partial` 类型允许，host/桥构造 patch 时常见），`priority` 被静默重置为 0、`agents` 被重置为 `[]`（从「绑定 Agent」变成「全局默认」），无任何提示。",
+  "fix": "合并时过滤 `undefined` 值：`for (const [k,v] of Object.entries(patch)) if (v !== undefined) (merged as Record<string,unknown>)[k] = v;`"
+ },
+ {
+  "id": "R3-16",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`scripts/verify-plugins.mjs:778-786`",
+  "rule": "Correctness（验证空转，安全门假绿）",
+  "prob": "该检查把对象传给 `withhold(text: string)`（正是团队自己修掉的「契约 bug」形态），并对 `WithholdResult` 上不存在的 `proceed` 字段断言 → 分类恒为 `other`、`needsConfirm=false`，断言永远通过，「审批被拒时 withhold 不通过」这条 fail-closed 检查实际什么都没验证。",
+  "fix": "改 `comp.withhold('发送消息给客户')` 并断言 `r.needsConfirm === true && r.category === 'external-message'`；若要测 fail-closed，应驱动 `agent/pre-step` 钩子（setOutcome('rejected') → 期望 `kind==='reject'`）。"
+ },
+ {
+  "id": "R4-1",
+  "sev": "P1",
+  "eff": "S",
+  "loc": "`apps/desktop/ipc-browser.ts:58-68`",
+  "rule": "Code Security Checks（SSRF 防护缺失）；违反项目「SSRF 与白名单独立生效」的既定口径",
+  "prob": "Agent 侧 `browser_open` 在 `tool-exec.ts:238-249` 同时强制域名白名单（fail-closed）+ `isBlockedHost`，而渲染层可达的 `browser-goto` 只校验 `^https?://` 就把隐藏内部浏览器导航到任意主机；页面标题/截图 `dataUrl` 又经 `browser-status` 回传渲染层，形成「内网/云元数据读数 → 渲染层」的 SSRF 通道，且该路径不记沙箱日志、事后不可追溯。preload 注释「目标 URL 本来就是 Agent 访问过的」是无强制的假设（当前 UI 只传 Agent 访问过的 URL，但 bridge 已暴露给页面全局，被 XSS/供应链攻陷的渲染层可传任意 URL）",
+  "fix": "handler 内对 `url` 调用 `host-services.ts:154` 已导出的 `isBlockedHost(url)`，命中即返回 `{ ok:false, reason:'目标为内网/回环/元数据地址，已被 SSRF 防护拒绝' }`；同时按 Agent 路径同规格补一条 `recordSandbox({ tool:'browser.goto', kind:'network', target:url, decision })` 留痕"
+ },
+ {
+  "id": "R4-2",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/ipc-authz.ts:137-144`（门实现在 `apps/desktop/main.ts:136-146`）",
+  "rule": "Correctness / Maintainability（文档化安全不变量被单点破坏）",
+  "prob": "`main.ts:125` 与 `ipc-guard-verify.cjs:6` 都写明「92 个 handler 全经 `ipcMain.handle` 注册、统一过 sender 门」，但审批应答通道走 `ipcMain.on`，不在 patch 覆盖内。当前唯一带 preload 的窗是主窗，暂无实际越权面；但一旦加入第二个带 preload 的合法窗，该窗可代替主窗应答（或自动应答 `allowed-once`）全部挂起审批，用户确认门被绕过。附带问题：审批 id 是可预测的自增序列（`ipc-authz.ts:149` `apr-${++approvalSeq}`），无猜测成本",
+  "fix": "把 `main.ts` 的 patch 同样包一层 `ipcMain.on`（复用 `isTrustedIpcSender`），或将该通道改为 `handle` 形态；`nextApprovalId` 改用 `crypto.randomUUID()`"
+ },
+ {
+  "id": "R4-3",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/main.ts:696-698`（同类：`main.ts:713`、`main.ts:604`）",
+  "rule": "Null Checks / 未校验的入参类型",
+  "prob": "`run-agent-turn` 的 `sessionId`/`text` 只有 TS 标注、无运行时闸门（同文件的 terminal/mcp/connector/file-panel handler 都有 `typeof` 校验，此处是例外）。`text` 非字符串时 `agent-turn.ts:133` 的 `text.slice(0,64)` 抛 TypeError，整回合以裸 reject 失败，而 `beginTurn`/`ensureSession` 副作用已发生；`models-save` 的 `incoming.providers.map` 在缺字段时抛出 `incoming.providers.map is not a function`，把内部代码结构泄进回给渲染层的错误信息",
+  "fix": "入口补 `if (typeof sessionId !== 'string' || !sessionId) return { ok:false, reason:'参数不合法' }`、`typeof text === 'string'`（空串放行由业务定）、`Array.isArray(incoming?.providers)`；非法入参走 `{ok:false}` 而非抛错"
+ },
+ {
+  "id": "R4-4",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/host-services.ts:88`",
+  "rule": "Correctness / fail-safe（与自身 `setSandboxMode` 双标）",
+  "prob": "顶层 `mode` 落盘加载时有 `SANDBOX_MODES.includes(...)` 白名单回落（`host-services.ts:87`），但 `sessionModes` 原样采信磁盘值。手改或损坏的 `sandbox.json` 写入非法模式串后，`resolve()` 将其当生效模式返回，所有 `=== 'read-only'` 判定落空，该会话被当作可写——而 `setSandboxMode`（`:307`）对未知模式是降级为最严的",
+  "fix": "装载时逐值过滤：`Object.fromEntries(Object.entries(raw.sessionModes).filter(([,v]) => SANDBOX_MODES.includes(v as SandboxMode)))`"
+ },
+ {
+  "id": "R4-5",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/file-panel.ts:173-177`",
+  "rule": "Code Quality — Ternary Expressions（不允许嵌套三元）",
+  "prob": "`expectedMtimeMs` 的归一化用了嵌套三元，是仓库内少数违反该规则的点，可读性差且后续加分支极易改错",
+  "fix": "改为 `if/else if/else`，或抽 `toFiniteNumber(v): number` 小 helper（`common-tools.ts` 已有 `clampInt` 可类比）"
+ },
+ {
+  "id": "R4-6",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/main.ts:130`（同文件 `:1113`、`:1203`；`data-dir.ts:302,399`；`connector-registry.ts:429`；`mcp-client.ts:221,264,335,368`）",
+  "rule": "Code Quality — Equality Comparisons（严禁 `==`/`!=`）",
+  "prob": "sender 门这一安全关键判断用了松散相等 `sender == null`；虽语义正确（null+undefined 合并判断），但违反项目明文规则，且散落 10 处，lint 若有该规则会全红",
+  "fix": "统一改 `sender === null || sender === undefined`（或 `typeof sender === 'undefined'`）"
+ },
+ {
+  "id": "R4-7",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/preload.ts:406-407` vs `apps/desktop/ipc-prompt.ts:28-31`",
+  "rule": "Code Quality / TypeScript Types（桥契约漂移）",
+  "prob": "preload 声明 `mergePrompts(category, body)` 返回 `{ ok, conflicts }`；handler 实际只收一个 `agentId` 参、原样返回插件的 `MergeResult`（`{sections, conflicts}`，无 `ok` 字段）。唯一调用方（`app.js:4135`、`app.js:4763`）只传一个参、只读 `conflicts`，所以 `body` 是死参数、`ok` 是假类型——下次真有调用方按签名用 `body` 或判 `ok` 时才爆",
+  "fix": "preload 签名改为 `(agentId: string)`，返回类型对齐 `{ sections: Array<...>; conflicts: Array<...> }`（或由 handler 包一层 `{ ok: true, ...merged }`）"
+ },
+ {
+  "id": "R4-8",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/host-services.ts:425-426`",
+  "rule": "Dead Code",
+  "prob": "`followup` 里取 `meta` 后立刻 `void meta` 丢弃，是无副作用死语句（疑似删逻辑后的残留）",
+  "fix": "删除这两行；若本意是把 meta 传给 runner，补上 `agentRunner({ sessionId, meta: meta?.fiber ? {...} : undefined, messages })`"
+ },
+ {
+  "id": "R4-9",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/main.ts:592`",
+  "rule": "TypeScript Types（避免 `any`）",
+  "prob": "`load-sessions` 的 filter 回调用 `(s: any)` 绕过 `store: Record<string, unknown>` 的类型保护，与文件里其它 handler 的窄气风格不一致",
+  "fix": "改 `(s: unknown)` 后用 `typeof s === 'object' && s !== null && 'id' in s ...` 窄气，或定义局部 `type StoredSession = { id?: string; msgs?: unknown }`"
+ },
+ {
+  "id": "R5-01",
+  "sev": "P1",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:4882-4890`（关键行 4886-4888）",
+  "rule": "Hardcoding（业务相关硬编码 URL）+ 项目铁律「本地优先：数据不出本机」+「UI 不许撒谎」",
+  "prob": "每次冷启动都向 `api.github.com` 拉取**上游仓库 main 的最新 commit**，并把该 sha 当作「OrchDesk Core」的版本显示在状态栏——本地构建/fork/旧版本运行时，状态栏展示的并不是正在运行的代码；同时这是模型 API 之外的云端依赖，违反「本地优先、离线可用」。项目自己的先例（`app.js:2440-2442` P4-S1-13、`app.js:2125-2126`）正是因「无运行时背书的 commit 展示」修掉过同类问题，此处复发；且 `docs/50-发布/release.md:94` 记录 api.github.com 约 50% 概率 000/SSL EOF，该状态显示会经常静默回落 `local`。",
+  "fix": "删掉整段 fetch。主进程已有本地版本源（`main.ts:1225` 用 `app.getVersion()`）：经 preload 暴露 `getAppVersion()`，状态栏显示 `OrchDesk Core · v<本地版本>`；拿不到就显示 `OrchDesk Core`（如 index.html:45 初值），不编造任何 commit。"
+ },
+ {
+  "id": "R5-02",
+  "sev": "P1",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:2317-2319`（及 2322）",
+  "rule": "XSS Protection / innerHTML Safety",
+  "prob": "提示词库列表把用户/插件可控的 `d.title` **完全未转义**拼进 innerHTML；`c.docA ↔ c.docB`（合并冲突）同样未转义。提示词标题经 `openPromptEditor`→`doSavePrompt`→`bridge.savePrompt` 落盘后由 `listPrompts` 读回，属于可持久化的存储型 XSS：标题里含 `<img src=x onerror=...>` 会在渲染设置页时执行（渲染进程虽 sandbox+contextIsolation，但 bridge 暴露了删会话/导出数据等破坏性 IPC，且本文件其余同类内容全部走了 `esc()`，此处是明确的漏网）。",
+  "fix": "`${esc(d.title)}`；2322 行 `${esc(c.docA)} ↔ ${esc(c.docB)}`；顺带 2319 行 `d.body.replace(/</g,'&lt;')` 与 2279 行 `(e.text||'').replace(/</g,'&lt;')`、`${e.note}` 统一换成 `esc()`（见 R5-15）。"
+ },
+ {
+  "id": "R5-03",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:4086`（及 4081、4085）",
+  "rule": "XSS Protection / innerHTML Safety",
+  "prob": "提示词编辑器把用户输入的回显值未转义插进 HTML **属性**：`value=\"${agents}\"`。agents 是用户自由输入（逗号分隔），含 `\"` 即打断属性，可注入 `onfocus=...` 等事件属性；title 只转义了 `\"`（4081）、body 只转义了 `<`（4085），同一函数内三种口径且都不完整。",
+  "fix": "三处分别改 `value=\"${esc(agents)}\"`、`value=\"${esc(title)}\"`、`${esc(body)}`（textarea 内容用 `esc()` 即可，实体在 RCDATA 中会正确解码回原文）。"
+ },
+ {
+  "id": "R5-04",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:4565-4573`（根因在 `app.js:192-197`）",
+  "rule": "Correctness / 项目铁律「UI 不许撒谎」",
+  "prob": "设置页改「默认模型」后调用 `autoSelectModels(...)`，而该函数第一优先是 localStorage 里的历史选择（`saved.every(has)` 即早退），**常见路径下 `state.selectedModels` 原样返回**——用户选的默认模型对实际发送（`doSend` 传 `state.selectedModels`）毫无影响，却 toast「默认模型已设为 X」。一个看起来生效、实际不生效的配置项。",
+  "fix": "该分支不要走 `autoSelectModels` 的 saved 优先逻辑——显式把 `defaultModel` 设为 `selectedModels[0]`（或插入首位）并 `saveModelSelection`，让「默认模型=主运行模型」的口径与 `openModelPicker` 文案（`app.js:4325`「第一个选中 = 主运行模型」）一致。"
+ },
+ {
+  "id": "R5-05",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:3133`（关联 3130）",
+  "rule": "Null Checks / Correctness",
+  "prob": "`doArchiveSession` 无条件访问 `state.projects[0].sessions[0]`。首跑用户从欢迎页发消息会创建 `__task__` 会话且**不创建任何项目**（`actions/session.js:151-158`），而 `main.ts:278` 的 `loadProjects` 无文件时返回 `[]`——此时归档该会话必抛 `TypeError`；且抛出点在前面的内存改写之后，`persist()/render()` 没执行：用户看到「操作执行失败」toast，会话实则已被标记 `archived` 留在内存里，状态半生效。另 3130 行兜底写死项目 id `'p3'`（硬编码）。",
+  "fix": "改为 `state.sel = (state.projects[0] && state.projects[0].sessions[0]) || null`（`null` 会落回主页，`VIEWS.session.main` 已有 `!state.sel` 分支）；`'p3'` 兜底删除，找不到归档容器时按 `__archived__` 语义创建（与 `doArchiveProject` 的 3141-3145 一致）。"
+ },
+ {
+  "id": "R5-06",
+  "sev": "P2",
+  "eff": "M",
+  "loc": "`apps/desktop/renderer/app.js:4370-4377`（死代码链：`app.js:2741-2826`、`actions/session.js:1142`）",
+  "rule": "Dead Code / Correctness",
+  "prob": "Ctrl+K 处理器注释写「唤出导航抽屉（与 ☰ 同效）」，实际只 `railBtn.focus()`，**从不调用 `toggleNavDrawer`**；而 commit 6dbf8e7 删掉汉堡菜单后，index.html 里已无任何 `[data-action=\"nav-drawer\"]` 触发元素——`navDrawerHTML/toggleNavDrawer/closeNavDrawer`、actions 注册项、styles.css 的 `.nav-drawer*`（85-90 行）整链成为死代码，Esc 关抽屉分支（`app.js:4379`）同样不可达。键盘快捷键承诺与行为不符。",
+  "fix": "二选一——(a) 删除整条 nav-drawer 死链（约 90 行：app.js 2741-2826、session.js:1142 注册、styles.css 85-90、app.js:4379 的 Esc 分支），Ctrl+K 保留 focus rail 并改注释如实描述；(b) 若抽屉仍要，则在 Ctrl+K 里真正调用 `toggleNavDrawer()` 并恢复触发按钮。不要维持现状（承诺与实现分层）。"
+ },
+ {
+  "id": "R5-07",
+  "sev": "P2",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:3082`、`3375`、`3973`（+ `actions/*.js` 共 13 处）",
+  "rule": "Correctness / 可维护性（与「UI 不许撒谎」相关）",
+  "prob": "`toast(msg,'err')` 用的类型名 `err` 在 CSS 里不存在——`styles.css:609` 只定义 `.toast.ok/.warn/.danger`。所有错误 toast（保存失败、清除失败、切换失败、探测失败…）渲染成默认中性样式，与成功/警告 toast 无法从视觉区分，失败被「静默」成普通提示。",
+  "fix": "全局把 `'err'` 改成 `'danger'`（app.js 3 处 + actions 13 处，机械替换），或在 `toast()` 里做 `type === 'err' ? 'danger' : type` 归一化（一处修复，推荐）。"
+ },
+ {
+  "id": "R5-08",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:389-403`（赋值点 405-406）",
+  "rule": "Dead Code",
+  "prob": "双壳层取消后的遗留：`loadViewMode()`、`loadViewModePinned()`、`saveViewMode()` 三个函数**无任何调用者**（全仓 grep 仅定义处），`VIEWMODE_KEY/VIEWMODE_PINNED_KEY` 也无人写入；`state.viewMode` 已被 405 行硬编码为 `'session'`。留存只会让下一个人误以为模式记忆仍生效。",
+  "fix": "删除 389-403 三个函数与两个 KEY 常量；`toggleViewMode`（2749-2752）、`escalateToProject`（2787-2789）已有注释说明保留意图，可不动（若要保持\"旧动作不抛错\"，至少在注释里点名它们是空实现）。"
+ },
+ {
+  "id": "R5-09",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:1129-1140`",
+  "rule": "Dead Code（永不执行的分支）",
+  "prob": "`else if (taskSessions.length)` 与前置 `if (taskSessions.length)` 条件完全相同，永远不可达；其注释「project 态：原有任务组」对应的代码随双态取消已死。",
+  "fix": "删除 1129-1140 整个 `else if` 块。"
+ },
+ {
+  "id": "R5-10",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:3165`",
+  "rule": "Dead Code / Code Quality",
+  "prob": "`const danger = target === 'trusted' || target === 'default' ? '' : '';` 两个分支返回值相同，且 `danger` 在全函数内再无读取——条件判断与变量都是死的（疑似早前 `danger ? 'danger' : ''` 样式逻辑被 `loosening` 取代后的残留）。",
+  "fix": "删除该行。"
+ },
+ {
+  "id": "R5-11",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:2135`",
+  "rule": "Ternary Expressions（不允许嵌套三元）",
+  "prob": "statbar 授权模式点颜色用了三层嵌套三元，可读性差且是本文件少数违反项。",
+  "fix": "提为小函数，如 `authModeDotColor()`，内部用查表 `{ paranoid: 'var(--danger)', trusted: 'var(--warn)' }` + 默认值。"
+ },
+ {
+  "id": "R5-12",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:3845`",
+  "rule": "Code Quality（无意义三元）",
+  "prob": "`${fp.diffRows ? 'ghost' : 'ghost'}` 两分支相同，条件恒无效果（疑似本想按 `fp.view === 'diff'` 给样式）。",
+  "fix": "直接写 `class=\"btn sm ghost\"`；若本意是 diff 视图高亮，改为 `${fp.view === 'diff' ? 'primary' : 'ghost'}`。"
+ },
+ {
+  "id": "R5-13",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:4773`（关联初值 `app.js:306`、展示 `app.js:2136`）",
+  "rule": "Correctness / 铁律 fail-closed（展示层）",
+  "prob": "`getSandbox` 返回值缺 `networkAllow` 时兜底 `['*']`——白名单文案明写「留空 = 全部拒绝（fail-closed）」，展示层却把「没拿到」显示成「不限」，与项目 fail-closed 口径相反；同页 `state.sandbox.mode` 初值硬编码 `'workspace-write'`（306 行），桥未返回前 statbar 直接把一个具体模式当既成事实展示（`authzLoaded` 那种「未接入」标注在这两处缺席）。**当前不可达**（main `ipc-sandbox.ts:122` 与 stub 都总返回数组），属潜在 fail-open，标注待验证。",
+  "fix": "缺字段时保持 fail-closed 口径：`networkAllow: Array.isArray(r.networkAllow) ? r.networkAllow : []`，并按 `sandboxLoaded` 标志在 statbar/白名单区标注「未拉取」（复用 `authzLoaded` 模式）。"
+ },
+ {
+  "id": "R5-14",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:1317`、`1654`、`2445`",
+  "rule": "XSS Protection / 一致性",
+  "prob": "来自编排插件目录的专家名/团名在三个渲染点未转义（composer placeholder、插件页侧栏 `staticRow`、向导专家选项），而同文件其他站点（`app.js:1052`、`4287-4289`、`1655`）都对同类字符串做了 `esc()`——口径漂移，插件目录一旦含 HTML 即注入。",
+  "fix": "三处分别改 `esc(s.expert)`、`staticRow(esc(e), …)`、`<b>${esc(e)}</b>`。"
+ },
+ {
+  "id": "R5-15",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:2279`、`2319`",
+  "rule": "XSS Protection / 一致性",
+  "prob": "只替换 `<` 的部分转义：`&`、`\"`、`'`、`>` 原样输出。标签注入因 `<` 被挡位不可利用，但含 `&lt;`/`&amp;` 的原文会被浏览器解码后显示成别的字符（补偿记录 `comp-record` 是用户自由文本，`app.js:4053` 一路落到这里），属于可见的内容错显；且 2279 行的 `${e.note}` 完全未转义。",
+  "fix": "统一 `esc(e.text)`、`esc(e.note)`、`esc(d.body)`（2319 行），删掉手写 replace。"
+ },
+ {
+  "id": "R5-16",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:1498`",
+  "rule": "Null Checks",
+  "prob": "`labelOf` 无条件访问 `FORK.REPLAY_KIND_LABELS`，`FORK` 为 null（session-fork.js 缺失）时抛 TypeError，而 `render()` 的 catch 会整页替换成「渲染错误」红屏。**当前不可达**：`replayFor` 只由 `actions/session.js:342`（replay-open）设置，该按钮仅在 `FORK` 存在时渲染（`app.js:1562`）——标注待验证，属防御性缺口。",
+  "fix": "`const labelOf = (kind) => (FORK ? (FORK.REPLAY_KIND_LABELS[kind] || kind) : kind);`"
+ },
+ {
+  "id": "R5-17",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:3130`、`3543`",
+  "rule": "Hardcoding（业务数字/标识）",
+  "prob": "归档容器兜底 id 写死 `'p3'`（e2e 种子里的 id，真实用户的归档容器 id 由 `doArchiveProject` 创建为 `'__archived__`，兜底永远打不中还对错了对象）；终端会话上限 `6` 硬编码在按钮与 title 文案两处，主进程无对应上限约束，两侧口径无单一真源。",
+  "fix": "`'p3'` 兜底删除（见 R5-05）；上限提为常量 `const TERM_MAX_SESSIONS = 6` 放文件顶部常量区，按钮与文案共用。"
+ },
+ {
+  "id": "R5-18",
+  "sev": "P3",
+  "eff": "S",
+  "loc": "`apps/desktop/renderer/app.js:4411`",
+  "rule": "Dead Code",
+  "prob": "Enter-to-send 里 `e.target.closest('.home-textarea-wrap')` —— 全仓不存在该 class（欢迎页用的是 `.home-input-wrap`，`app.js:1453`），该 closest 恒返回 null，属于失效的选择器（功能因后续 `document.querySelector` 兜底未坏）。",
+  "fix": "改为 `.home-input-wrap`（与 `renderHomeScreen` 结构一致），或直接删除第一个 `closest` 只留 querySelector 兜底。"
+ }
+]

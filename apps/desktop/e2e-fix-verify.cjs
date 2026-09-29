@@ -614,7 +614,9 @@ async function run() {
   const ensureCtxOpen = async () => {
     const grid = page.locator('#appGrid');
     if ((await grid.getAttribute('class') || '').includes('has-ctx')) return;
-    const tg = page.locator('[data-action="toggle-ctx"]').first();
+    // 注意 :visible——R2-8 之后右栏自己头部也有一个 toggle-ctx（面板收起时它虽在 DOM
+    // 里却被 CSS 隐藏），用 .first() 会点到那个隐藏按钮并超时。只点可见的那个。
+    const tg = page.locator('[data-action="toggle-ctx"]:visible').first();
     if (await tg.count() > 0) { await tg.click(); await page.waitForTimeout(300); }
   };
 
@@ -737,7 +739,7 @@ async function run() {
   {
     const grid = page.locator('#appGrid');
     if ((await grid.getAttribute('class') || '').includes('has-ctx')) {
-      await page.locator('[data-action="toggle-ctx"]').first().click();
+      await page.locator('[data-action="toggle-ctx"]:visible').first().click();
       await page.waitForTimeout(250);
     }
   }
@@ -749,7 +751,7 @@ async function run() {
     '回合开始后任务监控自动浮出（轻模式）');
 
   // 回合中手动关闭 = 用户接管
-  await page.locator('[data-action="toggle-ctx"]').first().click();
+  await page.locator('[data-action="toggle-ctx"]:visible').first().click();
   await page.waitForTimeout(200);
   await assert(!(await page.locator('#appGrid').evaluate((el) => el.classList.contains('has-ctx'))),
     '回合中手动关闭面板生效');

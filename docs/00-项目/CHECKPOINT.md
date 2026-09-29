@@ -10,7 +10,7 @@
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| **当前版本** | `0.16.1`（未打 tag；基于 v0.16.0 的本地修复构建） | SemVer，权威版本见 `apps/desktop/package.json` |
+| **当前版本** | `0.16.2`（未打 tag；修复模型空闲超时与渲染进程闪退） | SemVer，权威版本见 `apps/desktop/package.json` |
 | **最新 Commit** | `4aa7553` | docs(发布): 补充 v0.16.0 发布记录 |
 | **主线分支** | `main` | protected，push 需 CI 通过 |
 | **远端仓库** | `ra1nzzz/orchdesk` | GitHub，public |
@@ -236,3 +236,43 @@
 **验证**：全链 CHAIN_EXIT=0；e2e **320/320**（本轮调整 1 项断言并强化其语义）。
 
 **累计进度**：P4 三轮共修 **39 项**（第一轮 15 + 第二轮 17 + 第三轮 7），覆盖 P0×1 / P1×20 / P2×18。剩余 backlog ~48 项已按「跨层需新 IPC / UI 重构 M 起 / 文案细节 S」三组记入上一节，继续按序推进。
+
+### OpenCodeReview 全面审查与修复（2026-09-29）
+
+按阿里巴巴 [OpenCodeReview](https://github.com/alibaba/open-code-review)（ocr v1.12.10）的规则集做了一次全项目审查。因变更已全部提交、无有意义 diff，采用其**委托模式**（`ocr delegate rule <files>` 取规则，由本 agent 执行评审）——OCR 负责文件选择与规则解析，不消耗其 LLM 配额。规则集两套：`system / **/*.{ts,js,...}`（28 条）+ `system / default`（正确性/安全/性能/可维护性/测试覆盖）。
+
+**审查方式**：5 个范围并行只读走查（未提交的模型链路 / UI 重构提交 6dbf8e7 / 插件层安全 / IPC 与宿主层 / 渲染层主体），每个发现带 file:line 证据。共产出 **64 项发现：P0×0 / P1×6 / P2×25 / P3×33**。
+
+**已修 23 项（P1×6 + 高价值 P2×17）**
+
+| 编号 | 级 | 问题 | 修法 |
+|---|---|---|---|
+| R3-1 | P1 | authz 永久白名单只拒字面量 `*`，`**` 编译成 `^[\s\S]*[\s\S]*$` 命中一切目标 → 「永久免审写任意文件」 | 判定改为「去掉 `*` 后为空即通配」 |
+| R3-2 | P1 | intent F1 写成 `C:\\Windows`（匹配两个连续反斜杠），真实路径一个反斜杠 → 系统路径信号在主平台是**死规则**，漏斗朝 fail-open 衰减 | 改单层转义 + 6 个用例自校验 |
+| R4-1 | P1 | 渲染层可达的 `browser-goto` 只校验 http(s)，无 `isBlockedHost` → 内网/云元数据读数经标题截图回传的 SSRF 通道，且不记沙箱日志 | 补主机黑名单 + `recordSandbox` 留痕 |
+| R5-02 | P1 | 提示词标题/冲突文档**完全未转义**拼进 innerHTML，经落盘读回 = 存储型 XSS | 统一 `esc()` |
+| R5-01 | P1 | 每次冷启动 fetch api.github.com 拿**上游 main 的 commit** 当本地版本显示——本地构建/fork/旧版本展示的不是正在运行的代码，且违反本地优先 | 删 fetch，改显本地版本（新增 `orchdesk:app-version` IPC） |
+| R1-1 | P1 | 等响应头阶段被超时 abort 时错误被包成普通 Error，`isAbortError` 匹配不到 → 用户看到 cryptic 文案 | abort 原样 rethrow |
+| R3-4 | P2 | 审批 `Promise.race` 后不 clearTimeout/不 removeEventListener → 每次审批泄漏 120s 定时器 + 监听器 | 抽出 cleanup，race 结束即收 |
+| R3-5 | P2 | 本地模型 fetch 只挂调用方 signal 无自身超时 → Ollama 挂着时回合楔死且 abort 救不回 | `AbortSignal.any` 合并 15s 超时 |
+| R3-10 | P2 | G4 外发域名用 `host.includes(d)` → `api.openai.com.evil.net` 被放行、空条目放行一切 | 归一化 + 相等或子域匹配 |
+| R3-6 | P2 | multi 运行器未注入时 subAgentTurn 返 null，调用方仍置 `status='done'` → 委派树伪造成功 | null → failed + note |
+| R3-7 | P2 | brain `await handle.dispose()` 无 try/catch → 抛错则状态卡 executing、配额永久占用 | try/catch 后继续收尾 |
+| R4-3 | P2 | `run-agent-turn` 的 sessionId/text 无运行时闸门（同文件其他 handler 都有）→ text 非字符串时整链崩 | 补 typeof 校验 |
+| R1-4 | P2 | `maxToolIterations` 用 `||` 取默认值，显式配 0 被静默放大 200 倍（loadModelConfig 注释承诺的是 `??`） | 改 `??` |
+| R5-05 | P2 | `doArchiveSession` 无条件访问 `state.projects[0].sessions[0]` → 首跑无项目时归档必崩且状态半生效 | 空值保护 + 去掉硬编码 'p3' 兜底 |
+| R5-07 | P2 | `toast(msg,'err')` 的类型名 err 在 CSS 不存在 → 所有错误提示渲染成中性样式，失败被静默 | `.toast.err` 别名到 danger |
+| R2-6 | P2 | composer placeholder 直插 `${s.expert}`（外部目录数据）未转义 → 含 `"` 撑破属性 | `esc()` |
+| R2-7 | P2 | 项目绑定会话的「更改」工作目录对 chip 无效却 toast 成功 | 按会话类型给不同成功文案 |
+| R2-8 | P2 | 右栏关闭钮只在会话页头部 → 钉住后进主页/插件/设置页无收起入口（状态机死角） | 关闭钮加进右栏自己的头部 |
+| R5-03 | P2 | 提示词编辑器三个回显值三种口径且都不完整（title 只转 `"`、body 只转 `<`、agents 完全没转）→ 属性注入 | 统一 `esc()` |
+| R5-04 | P2 | 改「默认模型」后 autoSelectModels 被 localStorage 早退覆盖 → 默认模型对实际发送毫无影响却 toast 成功 | 前插默认项 + 先落盘再 autoSelect |
+| R1-2 | P2 | Ollama 流式零内容落入 JSON.parse 失败分支，报「返回非 JSON 响应」（事实错误）且丢诊断 | 可按 JSON 解析时返回 emptyReason |
+| R3-3 | P2 | 审批监听器白名单命中即放行且不读 mode → 偏执（全锁）模式下永久白名单仍能开门 | 偏执模式不认白名单 |
+| R3-8 | P2 | 补偿层强制门只问 `requiresWithhold`（对 other 恒 false）→ 同段文本主进程拦、插件放行 | 与 withhold() 同口径 |
+
+**顺带修掉的测试基建问题**：R2-8 给右栏加了第二个 `toggle-ctx` 入口后，e2e `ensureCtxOpen` 的 `.first()` 会点到面板收起时被 CSS 隐藏的那个 → 三处 locator 改 `:visible`。**这是新入口带来的真实回归，被既有测试抓住正是设计意图。**
+
+**剩余 backlog（41 项：P2×8 / P3×33）**：完整清单在 `_ocr_findings.json`（含位置/规则/修法/工作量）。P3 集中在命名与硬编码收敛（如默认模型名 7 处硬编码、`completions` 模式 `max_tokens: 1024` 无常量）、残留死代码（UI 重构后 `navDrawer*`/`loadViewMode`/`getSmartRecommendations` 整链无调用者）、以及文案术语墙。P2 剩余含 SSE 截断无提示（R1-3，需扩 ModelReply 类型）、models-test 无超时、审批弹窗初始焦点落在最宽松选项等。
+
+**验证**：全链 `pnpm run verify` CHAIN_EXIT=0；tsc EXIT=0；e2e **300/300**；verify-plugins 92/0、intent-gate 10/0、arch-guard 27/0、model-catalog 19/0、dsh-runtime 32/0。改动 plugin src 后已重编译 + 重 vendor（arch-guard R6 守护）。

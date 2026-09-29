@@ -46,3 +46,6 @@ _tmp_*
 .github/agents/
 .github/hooks/
 .github/skills/
+
+# 其他 AI 工具的本地产物（设计稿/评审记录），非本项目代码
+.monkeyai/

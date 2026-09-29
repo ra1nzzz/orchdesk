@@ -54,6 +54,44 @@ export function setFloatingContext(next: { title: string; sessions: number }): {
   return floatingContext;
 }
 
+let recoveringRenderer = false;
+const rendererGoneAt: number[] = [];
+
+export function isRecoveringRenderer(): boolean {
+  return recoveringRenderer;
+}
+
+function allowRendererRecovery(): boolean {
+  const now = Date.now();
+  while (rendererGoneAt.length && now - rendererGoneAt[0]! > 60_000) rendererGoneAt.shift();
+  rendererGoneAt.push(now);
+  return rendererGoneAt.length <= 3;
+}
+
+function recoverRenderer(win: BrowserWindow, why: string): void {
+  if (!allowRendererRecovery()) {
+    recoveringRenderer = false;
+    log('ERROR', 'desktop', `渲染进程反复退出，停止自动恢复：${why}`);
+    return;
+  }
+  recoveringRenderer = true;
+  log('ERROR', 'desktop', `渲染进程异常，准备恢复：${why}`);
+  setTimeout(() => {
+    try {
+      if (!win.isDestroyed()) {
+        win.loadFile(path.join(__dirname, '../renderer/index.html'));
+        log('INFO', 'desktop', '渲染进程已重新加载');
+        return;
+      }
+    } catch (err) {
+      log('WARN', 'desktop', `渲染进程重载失败，重建窗口：${(err as Error).message}`);
+    }
+    try { if (!win.isDestroyed()) win.destroy(); } catch { /* 已关闭 */ }
+    createWindow();
+  }, 50);
+  setTimeout(() => { recoveringRenderer = false; }, 1500);
+}
+
 export function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -77,7 +115,12 @@ export function createWindow(): void {
   // 拒绝 window.open / target=_blank 逃逸（无 popup 需求；内部打开走别通道）。
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.once('ready-to-show', () => mainWindow?.show());
-  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+  const win = mainWindow;
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (details.reason === 'clean-exit') return;
+    recoverRenderer(win, `${details.reason} exit=${details.exitCode}`);
+  });
+  win.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
 
 function showMainWindow(): void {

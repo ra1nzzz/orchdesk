@@ -693,11 +693,21 @@ ipcMain.handle('orchdesk:persist-projects', async (_e, projects: unknown[]) => {
   saveProjects(projects as Array<Record<string, unknown>>);
   return { ok: true };
 });
-ipcMain.handle('orchdesk:run-agent-turn', async (_e, sessionId: string, text: string, opts: unknown) => {
+ipcMain.handle('orchdesk:run-agent-turn', async (_e, sessionId: unknown, text: unknown, opts: unknown) => {
+  // R4-3：补运行时入参闸门。同文件的 terminal/mcp/connector/file-panel handler 都有
+  // typeof 校验，此处原是例外——text 非字符串时 agent-turn 的 text.slice(0,64) 直接抛
+  // TypeError 把整条链路带崩。预载层有 TS 标注，但 IPC 边界不能只靠类型。
+  if (typeof sessionId !== 'string' || !sessionId) return { text: '', intent: 'ERROR', error: 'sessionId 不合法' };
+  if (typeof text !== 'string' || !text) return { text: '', intent: 'ERROR', error: 'text 不合法（必须是非空字符串）' };
   return runAgentTurn(sessionId, text, opts as { models?: string[]; thinkLevel?: string });
 });
 ipcMain.handle('orchdesk:abort-agent-turn', async (_e, sessionId: string) => {
   return abortAgentTurn(String(sessionId || ''));
+});
+
+// ---- R5-01：本地版本源（状态栏显示用，不再向上游仓库要 commit） ----
+ipcMain.handle('orchdesk:app-version', async () => {
+  return { version: typeof app.getVersion === 'function' ? app.getVersion() : '' };
 });
 
 // ---- FR-5 模型管理桥接 ----
@@ -1298,8 +1308,29 @@ app.whenReady().then(async () => {
   if (bootDesktop.desktopConfig.notify) bootDesktop.notifyDesktop('OrchDesk 已启动', '点击托盘图标或按 ' + SHORTCUT_LABEL + ' 唤起主窗');
 });
 
+function installProcessGuards(): void {
+  process.on('uncaughtException', (err) => {
+    const msg = (err && err.stack) || String(err);
+    try { log('ERROR', 'boot', `uncaughtException: ${msg}`); } catch { /* 日志失败不能再抛 */ }
+    let packaged = false;
+    try { packaged = !!app.isPackaged; } catch { packaged = false; }
+    if (packaged) process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    const err = reason as { stack?: string; message?: string } | undefined;
+    const msg = err?.stack || err?.message || String(reason);
+    try { log('ERROR', 'boot', `unhandledRejection: ${msg}`); } catch { /* ignore */ }
+  });
+}
+installProcessGuards();
+
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  if (process.platform === 'darwin') return;
+  if (bootDesktop.isRecoveringRenderer()) {
+    log('WARN', 'desktop', '渲染进程恢复中，跳过退出');
+    return;
+  }
+  app.quit();
 });
 
 app.on('before-quit', () => {

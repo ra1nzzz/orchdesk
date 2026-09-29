@@ -23,7 +23,7 @@ import { DATA_FILE_NAMES } from './data-dir';
 import { emitCanonicalEvent } from './event-emit';
 import { firePreStep, getService } from './dsh-runtime';
 import { log } from './logger';
-import { callModel as callModelHttp, isAbortError, type ModelProviderLike } from './model-client';
+import { callModel as callModelHttp, isAbortError, modelTimeoutText, type ModelProviderLike } from './model-client';
 import { appendEvents, eventFileFor, type SessionEvent } from './session-events';
 import { appendUsageTurn, readUsageFile, writeUsageFile, type UsageEntry } from './usage-registry';
 
@@ -169,11 +169,15 @@ export async function runAgentTurn(
 
   const toolSteps: Array<{ n: string; ph: 'running' | 'done' | 'error'; result?: string }> = [];
   let finalReply = '';
+  let modelFailed = false;
   let stepCount = 0;
   let turnUsage: { p: number; c: number; t: number } | null = null;
   // BUG 修复前 maxToolIterations 上限三处不一致（渲染层滑块 500 / 保存钳制 200 / 回合 200）：
   // 统一收敛到 agent-runtime 单源常量，所见即所得。
-  const MAX_ITERATIONS = Math.max(1, Math.min(MAX_TOOL_ITERATIONS_CAP, modelCfg.maxToolIterations || MAX_TOOL_ITERATIONS_DEFAULT));
+  // R1-4：用 ?? 而非 ||。loadModelConfig 的注释明确「显式配置 0 不应用默认值吞掉
+  // （虽随后被消费端钳到 1）」，但这里原来是 ||——手改 models.json 设 maxToolIterations: 0
+  // （意图=最少迭代）会被 0 || 200 静默放大 200 倍，与承诺的「钳到 1」相反。
+  const MAX_ITERATIONS = Math.max(1, Math.min(MAX_TOOL_ITERATIONS_CAP, modelCfg.maxToolIterations ?? MAX_TOOL_ITERATIONS_DEFAULT));
   const rejectKey = toolRejectKey(provider, model);
   // M-1：memo 带 TTL——一次误判（如模型合法空回复被当成「不吃工具」）不应把
   // 该模型在整个进程生命周期内永久打回文本兜底。10 分钟后自动重试原生协议。
@@ -210,12 +214,13 @@ export async function runAgentTurn(
       });
     } catch (err) {
       if (bail()) break;
-      // isAbortError 且非用户中止 = 120s requestSignal 超时：不是「已停止」，
-      // 文案必须可区分（此前超时被 bail 之外的路径吞成「无总结」，原因丢失）。
-      if (isAbortError(err)) {
-        return { text: `（模型调用失败）请求超时或连接中断（120s）。可重试或降低输入长度。`, intent: 'CONFIRM' };
-      }
-      return { text: `（模型调用失败）${(err as Error).message}`, intent: 'CONFIRM' };
+      // 空闲/绝对超时不是用户「已停止」。break 而不是 return，已完成步骤才会落盘。
+      modelFailed = true;
+      finalReply = isAbortError(err)
+        ? modelTimeoutText(stepCount > 0)
+        : `（模型调用失败）${(err as Error).message}`;
+      log('ERROR', 'model', `回合失败，保留已完成步骤：${finalReply}`);
+      break;
     }
     if (reply.usage) {
       const u = reply.usage;
@@ -351,6 +356,7 @@ export async function runAgentTurn(
   );
 
   if (aborted) return { text: finalReply, intent: 'CONFIRM', aborted: true, tools: toolSteps, steps: stepCount };
+  if (modelFailed) return { text: finalReply, intent: 'CONFIRM', tools: toolSteps, steps: stepCount };
   return { text: finalReply, intent: 'ACT', tools: toolSteps, steps: stepCount };
   } finally {
     finishTurn(sessionId, ac);

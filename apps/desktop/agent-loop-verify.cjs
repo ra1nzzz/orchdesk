@@ -251,6 +251,9 @@ const { check, summary } = createChecker();
   await check('网络错误被捕获并返回可读提示', () => {
     assert.ok(out.text.includes('模型调用失败'), '实际: ' + out.text);
     assert.strictEqual(out.intent, 'CONFIRM');
+    const data = JSON.parse(fs.readFileSync(path.join(HOME, 'orchdesk-sessions.json'), 'utf-8'));
+    const last = data['s4'] && data['s4'].msgs && data['s4'].msgs.at(-1);
+    assert.ok(last && last.role === 'assistant' && String(last.text).includes('模型调用失败'), '失败回合应落盘');
   });
   fetchError = null;
 

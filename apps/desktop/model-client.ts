@@ -31,23 +31,94 @@ export function initModelClient(deps: { decryptKey: DecryptKey }): void {
 export function isAbortError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as { name?: string; message?: string };
-  return e.name === 'AbortError' || /aborted|AbortError/i.test(String(e.message || ''));
+  return e.name === 'AbortError' || e.name === 'TimeoutError' || /aborted|AbortError|TimeoutError/i.test(String(e.message || ''));
 }
 
-/** 用户中止 ∪ 120s 超时。Node 22+ 走 AbortSignal.any。 */
-export function requestSignal(user?: AbortSignal, ms = 120_000): AbortSignal {
-  const timeout = AbortSignal.timeout(ms);
-  if (!user) return timeout;
-  if (typeof AbortSignal.any === 'function') return AbortSignal.any([user, timeout]);
+/**
+ * 单次模型 HTTP 的空闲上限。长思考会先沉默再吐字，固定 120s 硬切会把仍在生成的请求判死。
+ */
+export const MODEL_IDLE_MS = 300_000;
+/** 单次 HTTP 绝对上限。持续有字节时不被空闲计时切断，但仍不能无限挂住。 */
+export const MODEL_MAX_MS = 600_000;
+
+export type ModelAbortHandle = {
+  signal: AbortSignal;
+  /** 收到响应头或任意正文字节时调用，重置空闲计时。不重置绝对上限。 */
+  touch: () => void;
+  dispose: () => void;
+};
+
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  const t = timer as ReturnType<typeof setTimeout> & { unref?: () => void };
+  t.unref?.();
+}
+
+/**
+ * 用户中止 ∪ 空闲超时 ∪ 绝对上限。
+ * 超时原因的 name 固定为 AbortError，便于与网络错误区分，且不误标成用户「已停止」。
+ */
+export function openModelAbort(
+  user?: AbortSignal,
+  idleMs = MODEL_IDLE_MS,
+  maxMs = MODEL_MAX_MS,
+): ModelAbortHandle {
   const ac = new AbortController();
-  const onAbort = (): void => ac.abort();
-  if (user.aborted || timeout.aborted) {
-    ac.abort();
-    return ac.signal;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let maxTimer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+
+  const clearTimers = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (maxTimer) clearTimeout(maxTimer);
+    idleTimer = undefined;
+    maxTimer = undefined;
+  };
+  const abortTimeout = (why: string): void => {
+    if (ac.signal.aborted) return;
+    const err = new Error(why);
+    err.name = 'AbortError';
+    ac.abort(err);
+  };
+  const armIdle = (): void => {
+    if (disposed || ac.signal.aborted) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => abortTimeout(`idle-timeout ${idleMs}ms`), idleMs);
+    unrefTimer(idleTimer);
+  };
+  const onUser = (): void => {
+    if (!ac.signal.aborted) ac.abort(user?.reason);
+  };
+
+  if (user?.aborted) {
+    ac.abort(user.reason);
+  } else if (user) {
+    user.addEventListener('abort', onUser, { once: true });
   }
-  user.addEventListener('abort', onAbort, { once: true });
-  timeout.addEventListener('abort', onAbort, { once: true });
-  return ac.signal;
+  if (!ac.signal.aborted) {
+    armIdle();
+    maxTimer = setTimeout(() => abortTimeout(`max-timeout ${maxMs}ms`), maxMs);
+    unrefTimer(maxTimer);
+  }
+
+  return {
+    signal: ac.signal,
+    touch: armIdle,
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      clearTimers();
+      user?.removeEventListener('abort', onUser);
+    },
+  };
+}
+
+/** 超时文案。秒数与 MODEL_IDLE_MS 同源，避免再写死 120s。 */
+export function modelTimeoutText(hadSteps: boolean): string {
+  const idleSec = Math.round(MODEL_IDLE_MS / 1000);
+  if (hadSteps) {
+    return `（模型调用失败）已完成的步骤已保留，但下一步 ${idleSec}s 内没有数据。可发「继续」或降低输入长度。`;
+  }
+  return `（模型调用失败）请求超时或连接中断（${idleSec}s 内没有数据）。可重试或降低输入长度。`;
 }
 
 function emitDelta(opts: CallModelOpts, chunk: string): void {
@@ -269,21 +340,31 @@ export async function callOllama(
 ): Promise<ModelReply> {
   const url = provider.baseUrl.replace(/\/$/, '') + '/api/chat';
   const t0 = Date.now();
+  let abort: ModelAbortHandle | undefined;
+  const disposeAbort = (): void => { abort?.dispose(); abort = undefined; };
   const post = async (stream: boolean): Promise<Response> => {
+    disposeAbort();
+    abort = openModelAbort(opts.signal);
     const body: Record<string, unknown> = { model, messages, stream };
     if (toolDefs.length) body.tools = toolDefs;
     logModel('request', { provider: provider.name, model, apiMode: 'ollama', url, toolCalls: toolDefs.length });
-    return fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: requestSignal(opts.signal),
-    }).catch((err) => {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: abort.signal,
+      });
+      abort.touch();
+      return res;
+    } catch (err) {
       logModel('error', { provider: provider.name, model, apiMode: 'ollama', url, ms: Date.now() - t0, error: (err as Error).message });
       throw err;
-    });
+    }
   };
-  let res = await post(true);
+  let res: Response;
+  try {
+  res = await post(true);
   if (!res.ok) {
     const txt = await res.text();
     if (shouldRetryWithoutStream(res.status, txt, true)) {
@@ -295,7 +376,16 @@ export async function callOllama(
   }
   if (!res.ok) throw new Error(`Ollama 返回 HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const detector = createBodyDetector(opts.onDelta);
-  const rawBody = await readStreamingText(res, (piece) => detector.push(piece));
+  let rawBody: string;
+  try {
+    rawBody = await readStreamingText(res, (piece) => {
+      abort?.touch();
+      detector.push(piece);
+    });
+  } catch (err) {
+    logModel('error', { provider: provider.name, model, apiMode: 'ollama', url, ms: Date.now() - t0, error: (err as Error).message });
+    throw err;
+  }
   let data: {
     message?: { content?: string; tool_calls?: unknown };
     error?: string;
@@ -344,6 +434,25 @@ export async function callOllama(
           : undefined,
       };
     }
+    // R1-2：能按 JSON/NDJSON 解析但零内容时，返回空内容诊断而不是抛「非 JSON 响应」。
+    // 原文案在「合法 JSON、模型就是没说话」时也报「返回非 JSON 响应」并附 body 片段——
+    // 事实错误，且丢掉了 OpenAI 路径同款的 emptyContentReason 诊断（provider/model/
+    // apiMode/finish_reason），用户分不清「模型空回复」与「网关故障」。
+    if (/^\s*\{/.test(rawBody)) {
+      logModel('response', {
+        provider: provider.name, model, apiMode: 'ollama', url,
+        status: res.status, ms: Date.now() - t0, contentLen: 0, toolCalls: 0,
+      });
+      return {
+        content: '',
+        toolCalls: [],
+        source: 'none',
+        emptyReason: emptyContentReason({
+          provider: provider.name, model, mode: 'ollama', status: res.status,
+          finish: streamed.done_reason, bodySnippet: rawBody.slice(0, 200),
+        }),
+      };
+    }
     throw new Error(`Ollama 返回非 JSON 响应（HTTP ${res.status}）: ${rawBody.slice(0, 200)}`);
   }
   if (data.error) throw new Error(data.error);
@@ -372,6 +481,9 @@ export async function callOllama(
         })
       : undefined,
   };
+  } finally {
+    disposeAbort();
+  }
 }
 
 export function buildRequest(base: string, mode: 'chat' | 'responses' | 'completions', model: string, messages: ApiMessage[], stream = false): { url: string; body: Record<string, unknown> } {
@@ -468,6 +580,9 @@ export async function callOpenAICompatible(
   let toolProtocolRejected = false;
   // 轮内软降级计数：带 tools 的尝试失败次数（去掉 tools 才成功 → softToolsFallback）。
   let toolsAttemptFailed = 0;
+  let modelAbort: ModelAbortHandle | undefined;
+  const disposeModelAbort = (): void => { modelAbort?.dispose(); modelAbort = undefined; };
+  try {
   attLoop: for (const att of attempts) {
     const streamTries = preferStream ? [true, false] : [false];
     for (const useStream of streamTries) {
@@ -483,16 +598,24 @@ export async function callOpenAICompatible(
       ...(att.tools ? {} : { error: canUseTools ? `tools 降级（att.tools=${att.tools}）` : undefined }),
     });
 
+    disposeModelAbort();
+    modelAbort = openModelAbort(opts.signal);
     let res: Response;
     try {
       res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify(body),
-        signal: requestSignal(opts.signal),
+        signal: modelAbort.signal,
       });
+      modelAbort.touch();
     } catch (err) {
       logModel('error', { provider: provider.name, model, apiMode: mode, url, ms: Date.now() - t0, error: (err as Error).message });
+      // R1-1：abort 原样 rethrow。原来一律包成普通 Error，isAbortError 匹配不到
+      // （message 是 'idle-timeout 300000ms'），用户看到 cryptic 文案而非
+      // modelTimeoutText 的可读提示；且与 Ollama 路径、流式中断路径行为不一致——
+      // openModelAbort 的注释本就承诺「超时原因的 name 固定为 AbortError 便于区分」。
+      if (isAbortError(err)) throw err;
       throw new Error(`请求模型接口失败：${(err as Error).message}`);
     }
 
@@ -516,7 +639,16 @@ export async function callOpenAICompatible(
     }
 
     const detector = createBodyDetector(opts.onDelta);
-    const rawBody = await readStreamingText(res, (piece) => detector.push(piece));
+    let rawBody: string;
+    try {
+      rawBody = await readStreamingText(res, (piece) => {
+        modelAbort?.touch();
+        detector.push(piece);
+      });
+    } catch (err) {
+      logModel('error', { provider: provider.name, model, apiMode: mode, url, ms: Date.now() - t0, error: (err as Error).message });
+      throw err;
+    }
     let data: Record<string, unknown>;
     const sseHit = detector.kind() === 'sse' ? detector.endSse() : (looksLikeSse(rawBody) ? consumeOpenAiSse(rawBody, opts.onDelta) : null);
     if (sseHit) {
@@ -623,6 +755,9 @@ export async function callOpenAICompatible(
     }
   }
   throw new Error(lastErr || '模型调用失败（未知原因）');
+  } finally {
+    disposeModelAbort();
+  }
 }
 
 export type { NativeToolCall };

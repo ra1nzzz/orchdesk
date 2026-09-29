@@ -5,8 +5,7 @@
  * 的 fetch 真的发出去，验证 URL 拼装 / 请求头 / body 形态 / 错误泄漏）；
  * agent-loop-verify.cjs = **逻辑层**（global.fetch 假桩，验证回合消息契约、降级、
  * 持久化，完全跳过 HTTP 层）。两者互不替代。
- * 覆盖范围外：模型调用的 AbortSignal.timeout(120s) 超时路径（本脚本所有 mock 均
- * 即时应答，不会触发超时）。
+ * 覆盖范围外：真实网络上的 300s 空闲超时（mock 即时应答）。空闲计时本身见 U。
  *
  * 验证项：
  *
@@ -870,6 +869,31 @@ function lastAssistant(sessionId) {
   });
 
   // =========================================================================
+  console.log('== U. 空闲超时：有字节就续命，绝对上限仍切断 ==');
+  await check('U1 touch 重置空闲计时，绝对上限不被 touch 推迟', async () => {
+    const mc = require('./dist/model-client.js');
+    const h = mc.openModelAbort(undefined, 80, 400);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(h.signal.aborted, false, '50ms 时不应已空闲超时');
+    h.touch();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(h.signal.aborted, false, 'touch 后续命，不应在原空闲点中止');
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(h.signal.aborted, true, '静默超过 idle 应中止');
+    assert.strictEqual(h.signal.reason && h.signal.reason.name, 'AbortError');
+    h.dispose();
+
+    const h2 = mc.openModelAbort(undefined, 500, 120);
+    const t0 = Date.now();
+    h2.touch();
+    await new Promise((r) => h2.signal.addEventListener('abort', () => r(), { once: true }));
+    const dt = Date.now() - t0;
+    assert.ok(dt < 220, '绝对上限应切断持续 touch，实际 ' + dt);
+    h2.dispose();
+    assert.ok(mc.modelTimeoutText(false).includes('模型调用失败'));
+    assert.ok(!mc.modelTimeoutText(false).includes('120s'));
+  });
+
   const ok = summary();
 
   // 收尾：关服务 + 清临时目录

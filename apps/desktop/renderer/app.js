@@ -1314,7 +1314,9 @@
     const intentCtl = intentCtlState();
     renderTrayHint();
     return `<div class="composer"><div class="box">
-      <textarea id="composer" placeholder="向 ${s.expert} 发消息…${intentCtl.placeholderSuffix}"></textarea>
+      {/* R2-6：expert 名来自编排插件目录（外部数据），直插 placeholder 属性未转义——
+          含 " 会撑破属性、其余内容泄流成杂散属性。同文件另两处消费 s.expert 都走了 esc()。 */}
+      <textarea id="composer" placeholder="向 ${esc(s.expert)} 发消息…${intentCtl.placeholderSuffix}"></textarea>
       <div id="outboundWarn" class="outbound-warn" hidden></div>
       ${composerBarHTML('send')}
     </div></div>`;
@@ -1604,7 +1606,12 @@
       } else {
         stepsHTML = '<div class="faint" style="font-size:12px;padding:8px 2px">这一回合还没有步骤。文件在主区，能力在插件页。</div>';
       }
-      return '<div class="ctx-header"><div class="ctx-title">' + ic('clipboard', 16) + ' 这一回合</div><div class="ctx-subtitle">' + esc(sub) + '</div></div>'
+      // R2-8：关闭钮放进右栏自己的头部。原来只有会话页主区头部那一个 chevron——
+      // 用户在会话里钉住检查器后点到主页/插件/设置页，右栏保持展开而这三个视图都没有
+      // 收起入口，只能先回会话页，浮出状态机存在无出口的死角。
+      return '<div class="ctx-header"><div class="ctx-title">' + ic('clipboard', 16) + ' 这一回合</div>'
+        + '<button class="iconbtn" data-action="toggle-ctx" title="收起检查器" aria-label="收起检查器" style="width:24px;height:24px">' + ic('x', 13) + '</button>'
+        + '<div class="ctx-subtitle">' + esc(sub) + '</div></div>'
         + '<div class="ctx-body"><div id="confirmZone">' + (state.pendingConfirmHtml || '') + '</div>' + stepsHTML + '</div>';
     }
 
@@ -2314,12 +2321,16 @@
           <div class="faint" style="margin-bottom:8px">提示词与技能解耦；分类（角色行为 / 安全边界 / 输出格式 / 技能联动）；支持 <span class="mono">{'{skill:xxx}'}</span> 引用；按 Agent 绑定 + 优先级合并（冲突显式标记）。</div>
           <div class="row" style="margin-bottom:8px"><button class="btn sm primary" data-action="prompt-new">+ 新建提示词</button><span class="faint">共 ${state.promptDocs.length} 条</span></div>
           <div class="prompt-list">
-            ${state.promptDocs.length ? state.promptDocs.map((d) => `<div class="pl-item" data-action="prompt-edit" data-id="${d.id}">
-              <div class="pl-h"><b>${d.title}</b><span class="badge info">${PROMPT_CAT_LABELS[d.category] || d.category}</span>${d.agents.length ? `<span class="faint">· ${d.agents.join(',')}</span>` : '<span class="faint">· 全局</span>'}</div>
+            ${state.promptDocs.length ? state.promptDocs.map((d) => `<div class="pl-item" data-action="prompt-edit" data-id="${esc(d.id)}">
+              // R5-02：title / agents / category 全部过 esc()。title 由 openPromptEditor
+              // 经 doSavePrompt 落盘、listPrompts 读回，是可持久化的**存储型 XSS**：标题里含
+              // img onerror 之类的片段会在渲染设置页时执行。本文件其余同类内容早已走 esc()，
+              // 此处是漏网的那一处。（注释里别写反引号——会提前关闭外层模板字面量。）
+              <div class="pl-h"><b>${esc(d.title)}</b><span class="badge info">${esc(PROMPT_CAT_LABELS[d.category] || d.category)}</span>${d.agents.length ? `<span class="faint">· ${esc(d.agents.join(', '))}</span>` : '<span class="faint">· 全局</span>'}</div>
               <div class="mono faint" style="font-size:11px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d.body.replace(/</g, '&lt;').slice(0, 80)}</div>
             </div>`).join('') : '<div class="faint">暂无提示词（新建后在此列出，可按 Agent 绑定与合并）</div>'}
           </div>
-          ${state.promptConflicts.length ? `<div class="warn-list" style="margin-top:8px"><div class="badge warn">合并冲突 ${state.promptConflicts.length} 处（已显式标记，未静默覆盖）</div>${state.promptConflicts.slice(0, 4).map((c) => `<div style="font-size:11px;margin-top:4px">· ${PROMPT_CAT_LABELS[c.category] || c.category}：${c.docA} ↔ ${c.docB}</div>`).join('')}</div>` : ''}
+          ${state.promptConflicts.length ? `<div class="warn-list" style="margin-top:8px"><div class="badge warn">合并冲突 ${state.promptConflicts.length} 处（已显式标记，未静默覆盖）</div>${state.promptConflicts.slice(0, 4).map((c) => `<div style="font-size:11px;margin-top:4px">· ${esc(PROMPT_CAT_LABELS[c.category] || c.category)}：${esc(c.docA)} ↔ ${esc(c.docB)}</div>`).join('')}</div>` : ''}
         </div>
         <div class="sec-title" id="settings-section-desktop"><span class="ico">${ic('settings', 14)}</span>桌面集成</div>
         <div class="desktop-grid">
@@ -2844,12 +2855,18 @@
       if (r && r.ok && r.path) {
         saveWorkspaceDir(r.path);
         const cur = state.sessions[state.sel];
-        if (cur && (!cur.pid || cur.pid === '__task__' || !projectPathOf(cur.id))) {
+        // R2-7：项目绑定会话的 chip 显示的是 projectPathOf（只读绑定目录），此前
+        // 「更改」对它无效却照样 toast 成功——用户眼见 chip 毫无变化却收到成功提示，
+        // 操作像被静默吞掉。现在按会话类型给不同的成功文案，说清这次改的是什么。
+        const isProjectBound = !!(cur && cur.pid && cur.pid !== '__task__' && projectPathOf(cur.id));
+        if (cur && !isProjectBound) {
           cur.cwd = r.path;
           applySessionCwd(cur.id);
         }
         render();
-        toast(`工作目录已设置：${r.path}`, 'ok');
+        toast(isProjectBound
+          ? `新会话的默认工作目录已设置为：${r.path}（当前会话绑定项目，仍用项目目录）`
+          : `工作目录已设置：${r.path}`, 'ok');
       }
     } catch {
       const selected = prompt('请输入工作目录路径：');
@@ -3127,10 +3144,17 @@
     const s = state.sessions[sid]; if (!s) return;
     const from = findProjectOf(sid);
     if (from) from.sessions = from.sessions.filter((x) => x !== sid);
+    // R5-05：首跑用户从欢迎页发消息会创建 __task__ 会话且不创建任何项目，此时
+    // state.projects 为 []——原来无条件访问 state.projects[0].sessions[0] 必抛
+    // TypeError，归档按钮在该路径上直接坏掉，且 persist 已执行、状态半生效。
+    // 兜底也不能再硬编码找 'p3'（那是种子数据的 id，真实首跑环境不存在）。
     const arc = state.projects.find((p) => p.archived === 1) || state.projects.find((p) => p.id === 'p3');
     if (arc && !arc.sessions.includes(sid)) arc.sessions.unshift(sid);
     s.pid = arc ? arc.id : s.pid; s.archived = 1;
-    if (state.sel === sid) state.sel = state.projects[0].sessions[0] || sid;
+    if (state.sel === sid) {
+      const firstProject = state.projects[0];
+      state.sel = (firstProject && firstProject.sessions[0]) || sid;
+    }
     persist(); render();
     toast(`会话「${s.title}」已归档`, 'warn');
   }
@@ -4078,12 +4102,15 @@
     openModal(`<div class="mh">${ic('at', 18)}<b>${isEdit ? '编辑提示词' : '新建提示词'}</b></div>
       <div class="mb">
         <div class="faint" style="margin-bottom:8px">提示词与技能解耦；可在正文中使用 <span class="mono">{'{skill:xxx}'}</span> 引用技能（运行时展开）。</div>
-        <div class="mb-row"><label>标题</label><input id="pmTitle" class="inp" value="${title.replace(/"/g, '&quot;')}" placeholder="如：默认角色设定"></div>
+        {/* R5-03：三个回显值统一走 esc()。原来 title 只转义 "、body 只转义 <、
+            agents 完全没转义——agents 是用户自由输入，含 " 即打断属性，可注入
+            onfocus 之类事件属性。同一函数里三种口径且都不完整。 */}
+        <div class="mb-row"><label>标题</label><input id="pmTitle" class="inp" value="${esc(title)}" placeholder="如：默认角色设定"></div>
         <div class="mb-row"><label>分类</label><select id="pmCat" class="inp">
           ${PROMPT_CATS.map((c) => `<option value="${c}" ${c === category ? 'selected' : ''}>${PROMPT_CAT_LABELS[c]}</option>`).join('')}
         </select></div>
-        <div class="mb-row"><label>正文</label><textarea id="pmBody" class="inp" rows="5" placeholder="提示词内容…支持 {skill:xxx} 引用">${body.replace(/</g, '&lt;')}</textarea></div>
-        <div class="mb-row"><label>绑定 Agent</label><input id="pmAgents" class="inp" value="${agents}" placeholder="留空=全局默认；多个用逗号分隔"></div>
+        <div class="mb-row"><label>正文</label><textarea id="pmBody" class="inp" rows="5" placeholder="提示词内容…支持 {skill:xxx} 引用">${esc(body)}</textarea></div>
+        <div class="mb-row"><label>绑定 Agent</label><input id="pmAgents" class="inp" value="${esc(agents)}" placeholder="留空=全局默认；多个用逗号分隔"></div>
       </div>
       <div class="mf">
         ${isEdit ? `<button class="btn danger" data-action="prompt-delete" data-id="${doc.id}">删除</button>` : ''}
@@ -4564,6 +4591,15 @@ let outboundTimer = null;
     if (e.target.id === 'mp-type') updateProtocolRow();
     if (e.target.id === 'default-model-pick' && e.target.value !== state.defaultModel) {
       state.defaultModel = e.target.value;
+      // R5-04：autoSelectModels 的第一优先是 localStorage 里的历史选择
+      // （saved.every(has) 即早退）——常见路径下 selectedModels 原样返回，用户选的
+      // 默认模型对实际发送（doSend 传 state.selectedModels）毫无影响，却 toast 成功。
+      // 显式改默认模型时把选中集也切过去，让「默认」真的生效。
+      // 去重后前插默认模型：长度有界（默认项只是被移到最前），不会因反复切换而无限增长
+      state.selectedModels = [state.defaultModel, ...state.selectedModels.filter((n) => n !== state.defaultModel)];
+      // 必须先落盘：autoSelectModels 的第一优先就是读 localStorage 的历史选择，
+      // 不落盘的话它会在早退分支里把我们刚改的 selectedModels 原样覆盖回去。
+      saveModelSelection(state.selectedModels);
       autoSelectModels(state.modelProviders, state.defaultProvider, state.defaultModel);
       render();
       // P4-S3-09：静默保存改为有反馈。原实现 .catch(() => {}) 把失败吞掉，用户无从得知
@@ -4879,15 +4915,18 @@ let outboundTimer = null;
       console.log('[init] rendering...');
       render();
     }
-    // 动态状态栏：显示 OrchDesk Core + 当前 commit
+    // R5-01：状态栏不再向上游仓库要 commit。原实现每次冷启动 fetch
+    // api.github.com/.../commits/main，把**上游 main 的最新 sha** 当作「OrchDesk Core」
+    // 的版本显示——本地构建 / fork / 旧版本运行时，状态栏展示的并不是正在运行的代码；
+    // 且这是模型 API 之外的云端依赖，违反「本地优先、离线可用」。项目自己已因同一模式
+    // （无运行时背书的 commit 展示）修过向导和 statbar 两处，此处复发。
+    // 现在只显示本地已知信息：主进程版本（拿不到就保持 index.html 的初值
+    // 「OrchDesk Core」），不编造任何 commit。
     try {
       const el = $('#statusText');
-      if (el) {
-        const resp = await fetch('https://api.github.com/repos/ra1nzzz/orchdesk/commits/main', { signal: AbortSignal.timeout?.(3000) });
-        if (resp.ok) { const d = await resp.json(); el.textContent = 'OrchDesk Core · ' + d.sha.slice(0, 7); }
-        else el.textContent = 'OrchDesk Core · local';
-      }
-    } catch { const el = $('#statusText'); if (el) el.textContent = 'OrchDesk Core · local'; }
+      const v = typeof bridge.getAppVersion === 'function' ? await bridge.getAppVersion() : null;
+      if (el && v && v.version) el.textContent = 'OrchDesk Core · v' + v.version;
+    } catch { /* 拿不到本地版本就保持初值，不编造 */ }
     console.log('[init] done');
   }
   setInterval(() => { const c = $('#clock'); if (c) c.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }, 1000);

@@ -111,7 +111,10 @@ const F1_LEXEMES: { pattern: RegExp; weight: number; label: string }[] = [
   { pattern: /(drop\s+table|truncate|truncate\s+table|删库)/i, weight: 0.45, label: 'db-destructive' },
   { pattern: /(对外发送|发送邮件|send\s+email|群发|广播)/i, weight: 0.3, label: 'external-send' },
   { pattern: /(凭据|密码|私钥|token|密钥|\.env|secret|api[_-]?key)/i, weight: 0.3, label: 'secret' },
-  { pattern: /(\/etc\/|\/root\/|C:\\\\Windows|C:\\\\Users\\\\.*\\.ssh|~\/)/i, weight: 0.35, label: 'system-path' },
+  // R3-2：原写成 C:\\\\Windows —— 正则里表示「匹配两个连续反斜杠」，真实 Windows 路径只有
+  // 一个反斜杠，该分支在主平台永不命中，system-path 信号（weight 0.35）实际是死规则，
+  // 漏斗朝 fail-open 方向衰减。改为单层转义，并把 .* 收紧为「一段路径片段」。
+  { pattern: /(\/etc\/|\/root\/|C:\\Windows|C:\\Users[\\/][^\\/]+[\\/]\.ssh|~\/)/i, weight: 0.35, label: 'system-path' },
   { pattern: /(格式化磁盘|全盘|所有文件|全部文件|整个系统|系统级)/i, weight: 0.3, label: 'system-wide' },
 ];
 
@@ -190,12 +193,17 @@ async function callLocalModel(text: string, config: IntentConfig, signal: AbortS
     '"target":"目标路径/命令/域名或空串","reversible":true|false,"risk":0到1,"params":{}}。' +
     '不要输出 JSON 以外的任何内容。用户输入：\n' +
     text;
+  // R3-5：本地模型探测必须自带超时。原来只挂 payload.signal——Ollama 端口活着但不
+  // 响应（模型加载中、连接挂起）时 pre-step waterfall 无限期阻塞，整个 Agent 回合楔死，
+  // 而 abort 只在回合取消时触发，回合就卡在这里，等于救不回来。用 AbortSignal.any 把
+  // 调用方 signal 与自身超时合并：任一方触发都能打断。
+  const LOCAL_MODEL_TIMEOUT_MS = 15_000;
   try {
     const res = await fetch(`${config.ollamaBaseUrl}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: config.localModel, prompt, stream: false, format: 'json' }),
-      signal,
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(LOCAL_MODEL_TIMEOUT_MS)]) : AbortSignal.timeout(LOCAL_MODEL_TIMEOUT_MS),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { response?: string };
@@ -282,8 +290,18 @@ function runGates(action: ActionPreview, config: IntentConfig, modelUsed: boolea
   let g4Pass = true;
   let g4Detail = 'params within range';
   if (action.stage === 'network-send') {
-    const host = (action.target || '').toLowerCase();
-    if (!host || !config.externalAllowlist.some((d) => host.includes(d))) {
+    // R3-10：白名单判定从子串包含改为主机名精确/后缀匹配。原来 host.includes(d) 有
+    // 三个洞：白名单 api.openai.com 会放行 api.openai.com.evil.net；条目为空字符串时
+    // 放行一切；条目未 trim/小写化。现在先归一化两侧，再要求「等于条目」或「是条目的
+    // 子域」（即以 .条目 结尾）。
+    const normAllow = config.externalAllowlist.map((d) => String(d || '').trim().toLowerCase()).filter(Boolean);
+    const hostOf = (u: string): string => {
+      const m = String(u || '').trim().toLowerCase().match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/);
+      return m ? (m[1] || '').replace(/:\d+$/, '') : String(u || '').trim().toLowerCase();
+    };
+    const host = hostOf(action.target || '');
+    const allowed = !!host && normAllow.some((d) => host === d || host.endsWith('.' + d));
+    if (!allowed) {
       g4Pass = false;
       g4Detail = `external host "${action.target}" not in allowlist`;
     }

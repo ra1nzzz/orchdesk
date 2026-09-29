@@ -5,6 +5,8 @@
 import * as fs from 'node:fs';
 import { shell, type IpcMain } from 'electron';
 import type { BrowserStateSnapshot } from './browser-tools';
+import { isBlockedHost } from './host-services';
+import { recordSandbox } from './ipc-sandbox';
 import {
   browserShotDir,
   clearBrowserPages,
@@ -59,10 +61,21 @@ export function registerBrowserIpc(ipc: IpcMain, host: BrowserIpcHost): void {
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
       return { ok: false, reason: 'URL 不合法（仅支持 http/https）', state: getBrowserState() };
     }
+    // R4-1：Agent 侧 browser_open 在 tool-exec 里同时过域名白名单 + isBlockedHost
+    // （fail-closed），而这条渲染层可达的通道原来只校验 http(s) 协议——被 XSS/供应链
+    // 攻陷的渲染层可把隐藏内部浏览器导航到内网/云元数据端点，页面标题与截图又经
+    // browser-status 回传，形成「内网读数 → 渲染层」的 SSRF 通道，且不记沙箱日志、
+    // 事后不可追溯。按 Agent 路径同规格补两道：主机黑名单 + 沙箱留痕。
+    if (isBlockedHost(url)) {
+      recordSandbox({ tool: 'browser.goto', kind: 'network', target: url, decision: 'denied', reason: 'SSRF 防护：目标为内网/回环/元数据地址' });
+      return { ok: false, reason: '目标为内网/回环/元数据地址，已被 SSRF 防护拒绝', state: getBrowserState() };
+    }
     try {
       await cdpOpenBrowser(url, { timeoutMs: 20_000 });
+      recordSandbox({ tool: 'browser.goto', kind: 'network', target: url, decision: 'allowed' });
       return { ok: true, state: getBrowserState() };
     } catch (err) {
+      recordSandbox({ tool: 'browser.goto', kind: 'network', target: url, decision: 'error', reason: (err as Error).message });
       return { ok: false, reason: (err as Error).message, state: getBrowserState() };
     }
   });

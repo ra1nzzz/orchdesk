@@ -35,6 +35,11 @@ const DSH_PACKAGES = {
   'dsh-scope': 'packages/core/scope',
   'dsh-timeout': 'packages/util/timeout',
   'dsh-session': 'packages/core/session',
+  // dsh-session / dsh-llm 运行时 import 闭包。缺一则 brain/multi 在打包后加载失败。
+  'dsh-brand': 'packages/util/brand',
+  'dsh-util-values': 'packages/util/values',
+  'dsh-util-crypto': 'packages/util/crypto',
+  'dsh-typert-protocol': 'packages/typert/protocol',
 };
 
 const ORCH_PLUGINS = ['intent', 'trace', 'authz', 'brain', 'multi', 'memory', 'prompt', 'compensation', 'evolution'];

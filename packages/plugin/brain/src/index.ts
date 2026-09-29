@@ -212,9 +212,16 @@ export function apply(ctx: Context, config: BrainConfig): void {
     if (!rec) return;
     const handle = handles.get(id);
     if (handle) {
-      // seam：dispose 停止 loop、await 退出、注销 agent、移除 session、解旋 scoped world
+      // seam：dispose 停止 loop、await 退出、注册 agent、移除 session、解旋 scoped world
       // （即用即走，零残留）。
-      await handle.dispose();
+      // R3-7：dispose 抛错也不能中断收尾。原来 await 直调，一旦抛错 rec.status 停留在
+      // executing、handles/registry 条目不删、dispose 事件不发——渲染层 inline 芯片永久
+      // 显示「执行中」（违反三态诚实），且该 SubAgent 永久占用 maxConcurrentSubagents 配额。
+      try {
+        await handle.dispose();
+      } catch (err) {
+        console.warn('[brain] SubAgent dispose 失败（仍继续收尾）:', (err as Error).message);
+      }
       handles.delete(id);
     }
     rec.status = 'disposed';

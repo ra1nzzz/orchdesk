@@ -239,7 +239,12 @@ export function apply(ctx: Context, config: CompensationConfig): void {
     if (!lastUser) return base;
 
     const { category } = classifyOutbound(extractText(lastUser));
-    const needs = requiresWithhold(category);
+    // R3-8：强制门与 withhold() 同口径。原来这里只问 requiresWithhold(category)，
+    // 而 requiresWithhold 对 'other' 恒为 false——同一段「外发/删除」措辞的文本，
+    // 主进程 outboundGate 会拦（走 failClosedUnknown），插件自己挂在 pre-step 的
+    // 强制门却直接放行，两条路径对同一输入给出相反结论。
+    const needs = requiresWithhold(category)
+      || (config.failClosedUnknown && category === 'other' && /(外发|发送|删除|部署|支付|发布)/i.test(extractText(lastUser)));
     const sessionId = payload.agent?.session?.id;
 
     if (!needs) return base;

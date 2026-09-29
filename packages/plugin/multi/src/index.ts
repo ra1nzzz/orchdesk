@@ -233,8 +233,16 @@ export function apply(ctx: Context, _config: MultiConfig): void {
           if (!node) continue;
           try {
             const r = await subAgentTurn(d.sessionId, cleanTask);
-            node.result = r?.text || '';
-            node.status = 'done';
+            // R3-6：运行器未注入时 subAgentTurn 返回 null。原来照样置 status='done'、
+            // result 空串，委派树把「从没执行」的 Director 显示成成功——文件自己的注释
+            // （「未注入运行器 → 返回明确错误文案而非伪造成功」）说的正是要防这个。
+            if (!r) {
+              node.status = 'failed';
+              node.note = 'SubAgent 运行器未注入，未执行（非成功）';
+            } else {
+              node.result = r.text || '';
+              node.status = 'done';
+            }
           } catch (err) {
             node.status = 'failed';
             node.note = `exec-error:${err instanceof Error ? err.message : String(err)}`;
