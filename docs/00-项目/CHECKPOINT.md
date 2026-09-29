@@ -355,3 +355,27 @@
 - evolution：paranoid 下 `createTempPlugin` → `ok:false`、reason 点明 paranoid（用户看得出是档位所致而非门控故障）、零审批请求
 
 **验证**：全链 `pnpm run verify` CHAIN_EXIT=0；e2e 300/300；verify-plugins **97/0**。改 plugin src 后已重编译 + 重 vendor。
+
+### 遗留项收口（2026-09-29 续三）
+
+上一轮遗留两条，本条处理第一条，第二条核实为不存在。
+
+**① e2e 的 bridge mock 用自制正则（已修）**
+
+`e2e-fix-verify.cjs` 的 `bridge.withhold`  fixture 用 `/删除|发给|发送|curl|http/i` 近似真实规则，而 `CATEGORY_RULES` 有 6 类 + 词边界 + `'other'` 兜底措辞，mock 只覆盖一类且 `category` 恒为 `external-message`。真实规则改严后 mock 不跟着变 → e2e 给出偏乐观的结论（两处判定分叉）。且当时**无任何断言消费它**，纯死重量。
+
+修法：把纯判定提为 compensation 的模块级导出，夹具复用同一份规则。
+- `withholdText(text, failClosedUnknown?)` —— 模块级纯判定，插件内 `withhold()` 与 `needsWithhold()` 都委托它（唯一实现）
+- `withholdRuleSpecs()` —— 可序列化的规则数据（正则 source/flags + 类别表）。夹具跑在浏览器上下文无法 require Node 模块，故注入规则**数据**而非函数体，页内按同样三步重建
+
+配套两处加固：
+- **漂移守卫**：导航后实测比对页内重建器与真实 `withholdText`，15 条语料（6 类高危各一条 + R3-13 误报样本 commitment/rapid/budget/poster/"use the model"/"perform a code review" + 本套件实际发送的文本），分叉即抛错。已做变异验证：把页内 `'other'` 改成 `'other-MUTATED'` → 守卫报错并给出双方判定
+- **新增 2 条 e2e 断言**（300→302）：外发文本 → `#outboundWarn` 可见；普通对话 → 保持隐藏（顺带守 R3-13 无误报）。夹具从此不再是死重量
+
+**② main.ts 注释行号引用（核实为不存在）**
+
+上轮备注「`DEFAULT_MODEL`/`pickModel` 注释行号引用可能漂移」。全仓扫 `文件:行号` 形式的注释共 4 处（`dsh-runtime.ts`→`memory-promotion.ts:21-23`、`ipc-authz.ts`→`main.ts:125`、`tool-exec.ts`→`file-panel.ts:31`、`authz/src`→`main.ts:451-471` + `host-services.ts:345-384`），逐条核对**全部仍准确**，无需修改。
+
+**过程教训（记入流程）**：本轮我曾用 `git checkout -- <file>` 撤销一次变异测试的改动，而该文件尚有**未提交**的 `withholdText`/`withholdRuleSpecs` 工作 → 被一并回滚，只能重做。以后回滚带未提交工作的文件前必须先 `cp` 备份，或先 commit 再动。
+
+**验证**：全链 `pnpm run verify` CHAIN_EXIT=0；e2e **302/302**（原 300 + 新增 2）；verify-plugins 97/0；arch-guard 28/0。

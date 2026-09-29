@@ -33,6 +33,37 @@ async function run() {
   // 审查项④：先注入共享 bridge stub（renderer/bridge-stub.js），下一段 init script
   // 以它为基底叠加种子覆盖——app.js 与 e2e 共用同一份空壳语义。
   await page.addInitScript({ path: require('path').join(__dirname, 'renderer', 'bridge-stub.js') });
+  // withhold 夹具的真值来自**真实补偿层**的规则集（packages/plugin/compensation/lib 的
+  // withholdRuleSpecs），经 addInitScript 参数形态注入页内后按同样的三步判定重建。
+  // 原实现是自制正则 `/删除|发给|发送|curl|http/i`：真实 CATEGORY_RULES 有 6 类 +
+  // 词边界 + 'other' 兜底措辞，mock 只覆盖一类且 category 恒为 external-message——
+  // 真实规则改严后 mock 不跟着变，e2e 会给出偏乐观的结论（两处判定分叉）。
+  // 注入的是规则**数据**而非函数体（函数跨不进浏览器上下文），判定胶水在页内重建，
+  // 与 withholdText 的三步一一对应；下方有 Node 侧漂移守卫实测比对，胶水跑偏即红。
+  {
+    const compLib = require('../../packages/plugin/compensation/lib/index.js');
+    const specs = compLib.withholdRuleSpecs();
+    // 规则数据在导航前注入（addInitScript 只对后续文档生效）；实测比对挪到 goto 之后，
+    // 否则 window.__withhold 还不存在。
+    await page.addInitScript((s) => {
+      const rules = s.rules.map((r) => ({ re: new RegExp(r.source, r.flags), category: r.category }));
+      const hint = new RegExp(s.unknownHint.source, s.unknownHint.flags);
+      window.__withhold = (text) => {
+        const t = String(text || '');
+        let category = 'other';
+        for (const r of rules) { if (r.re.test(t)) { category = r.category; break; } }
+        // 与 withholdText 同样的三步：已知类别直接需确认；'other' 看兜底措辞。
+        const needs = s.withholdCategories.includes(category)
+          || (category === 'other' && hint.test(t));
+        return {
+          needsConfirm: needs,
+          category,
+          reason: needs ? `检测到跨边界/不可逆外发操作（${category}）` : '未检测到跨边界外发操作',
+          warning: needs ? '⚠ 此操作不可撤销：发送前需二次确认' : '',
+        };
+      };
+    }, specs);
+  }
   await page.addInitScript(() => {
     // Fixture 修正：此前 loadSessions/loadProjects 返回空数组 —— 侧栏/消息流断言
     // （.proj-seg / .sess / 用户消息）在空数据下永远不可能通过，套件实际是空转的。
@@ -490,9 +521,10 @@ async function run() {
         window.__grants = [];
         return Promise.resolve({ ok: true, revoked: n, grants: [] });
       },
-      withhold: (text) => Promise.resolve(/删除|发给|发送|curl|http/i.test(String(text || ''))
-        ? { needsConfirm: true, category: 'external-message', reason: 'E2E mock', warning: '⚠' }
-        : { needsConfirm: false, category: 'other', reason: '', warning: '' }),
+      // 真值来自真实补偿层规则（页内 window.__withhold，由 run() 开头注入并漂移守卫）。
+      // 原实现是本地自制正则 `/删除|发给|发送|curl|http/i`——只覆盖一类且 category
+      // 恒为 external-message，真实规则改严后它不跟着变（两处判定分叉）。
+      withhold: (text) => Promise.resolve(window.__withhold(text)),
       compensate: () => Promise.resolve({ id: 'cmp-e2e', ts: Date.now(), text: '', note: '', action: '' }),
       getCompensationAudit: () => Promise.resolve([]),
       createTempPlugin: () => Promise.resolve({ ok: false, reason: '未接入' }),
@@ -621,6 +653,29 @@ async function run() {
   };
 
   await page.goto(url, { waitUntil: 'networkidle' });
+
+  // 漂移守卫（导航后实测）：页内重建的判定器必须与真实 withholdText 在语料上完全一致。
+  // 语料覆盖 6 个高危类别各一条 + R3-13 修掉的误报样本（commitment / rapid /
+  // budget / poster / "use the model" / "perform a code review" / "confirm"），
+  // 再加本套件实际会发送的几条文本——只比对规则数据不够，胶水是页内重写的。
+  {
+    const compLib = require('../../packages/plugin/compensation/lib/index.js');
+    const DRIFT_CORPUS = [
+      '把这份报告发给客户', '删除 /tmp/secret.txt', '调用接口 POST https://x.dev',
+      '上传到共享盘', '部署到生产环境', '今天天气不错',
+      '请确认你的邮箱地址', 'use the model to summarize this', 'perform a code review',
+      'the budget poster is ready', 'a commitment to quality', 'rapid progress on the API',
+      'E2E测试消息', '列出当前项目文件', '分支独立消息',
+    ];
+    const drift = await page.evaluate((corpus) => corpus.map((t) => [t, window.__withhold(t)]), DRIFT_CORPUS);
+    for (const [t, got] of drift) {
+      const want = compLib.withholdText(t);
+      if (got.needsConfirm !== want.needsConfirm || got.category !== want.category) {
+        throw new Error(`withhold 夹具与真实补偿层判定分叉：${JSON.stringify(t)} → 夹具 ${JSON.stringify(got)} / 真实 ${JSON.stringify(want)}`);
+      }
+    }
+    console.log(`   ✓ withhold 夹具与真实补偿层一致（${DRIFT_CORPUS.length} 条语料）`);
+  }
   await page.waitForTimeout(800);
 
   // Dismiss wizard if shown
@@ -671,6 +726,22 @@ async function run() {
   await waitForVisible('.home-screen');
   const homeScreen = page.locator('.home-screen');
   await assert(await homeScreen.count() > 0, 'home-screen 欢迎页存在');
+
+  // ---- 不可逆操作预警（PRD FR-12 / P4-S1-05）----
+  // 这条让 withhold 夹具不再是死重量：此前 mock 用自制正则、无任何断言消费它，
+  // 规则漂移不会被发现。现在真值表来自真实补偿层，这里锁定渲染层两条分支：
+  // 高危文本 → #outboundWarn 显示；阴性文本 → 保持隐藏。
+  // 顺带守住「一 shot 确认」：needsConfirm 时第一次发送被拦下并提示，不静默放行。
+  {
+    const warn = page.locator('#outboundWarn');
+    await page.locator('#homeComposer').fill('把这份报告发给客户');
+    await page.waitForTimeout(450); // updateOutboundWarn 的 300ms 防抖
+    await assert(await warn.isVisible(), '外发文本应显示不可逆操作预警 #outboundWarn');
+    await page.locator('#homeComposer').fill('今天天气不错');
+    await page.waitForTimeout(450);
+    await assert(!(await warn.isVisible()), '普通对话不应显示预警（R3-13 后无误报）');
+    await page.locator('#homeComposer').fill('');
+  }
 
   const homeComposer = page.locator('#homeComposer');
   await assert(await homeComposer.count() > 0, '#homeComposer 输入框存在');

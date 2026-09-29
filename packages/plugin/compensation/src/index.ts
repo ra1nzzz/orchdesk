@@ -86,6 +86,72 @@ export function classifyOutbound(text: string): { category: OutboundCategory; re
 /** 归入 'other' 时的兜底跨边界措辞：fail-closed 保守拦截用（中文，无边界问题）。 */
 const UNKNOWN_OUTBOUND_HINT = /(外发|发送|删除|部署|支付|发布)/i;
 
+/** withhold 判定结果（纯函数版，无 ctx 依赖）。 */
+export interface WithholdVerdict {
+  needsConfirm: boolean;
+  category: OutboundCategory;
+  reason: string;
+  warning: string;
+}
+
+/**
+ * 可序列化的 withhold 规则集（供无 ctx 的消费方复用同一份规则）。
+ *
+ * 存在理由：e2e 的 bridge mock 跑在浏览器上下文，无法 require Node 模块，此前用
+ * 自制正则 `/删除|发给|发送|curl|http/i` 近似——真实 `CATEGORY_RULES` 有 6 类规则
+ * + 词边界 + 'other' 兜底措辞，mock 只覆盖一类且 `category` 恒为 external-message。
+ * 真实规则改严后 mock 不跟着变，e2e 会给出偏乐观的结论（两处判定分叉）。
+ *
+ * 只序列化**规则数据**（正则的 source/flags + 类别表），判定胶水仍由 `withholdText`
+ * 持有；消费方按同样的三步重建。漂移风险在规则而不在这三步，故不追求把函数体搬过去
+ * ——e2e 里有漂移守卫实测比对两者，胶水跑偏即红。
+ */
+export interface WithholdRuleSpec {
+  source: string;
+  flags: string;
+  category: OutboundCategory;
+}
+
+export function withholdRuleSpecs(): {
+  rules: WithholdRuleSpec[];
+  withholdCategories: readonly OutboundCategory[];
+  unknownHint: { source: string; flags: string };
+} {
+  return {
+    rules: CATEGORY_RULES.map((r) => ({ source: r.pattern.source, flags: r.pattern.flags, category: r.category })),
+    withholdCategories: WITHHOLD_CATEGORIES,
+    unknownHint: { source: UNKNOWN_OUTBOUND_HINT.source, flags: UNKNOWN_OUTBOUND_HINT.flags },
+  };
+}
+
+/**
+ * withhold 的**模块级纯判定**（R3-8 同源要求的落地处，也是 e2e 夹具的唯一真值源）。
+ *
+ * 为什么导出：主进程 `outboundGate`、插件自己的 `agent/pre-step` 强制门、渲染层的
+ * `bridge.withhold` 三处都要判「这段文本要不要二次确认」。提为模块级导出后，夹具经
+ * `withholdRuleSpecs()` 复用同一份规则，不再有第二份。改动只此一处，三处消费方与
+ * 夹具同时生效。
+ */
+export function withholdText(text: string, failClosedUnknown = true): WithholdVerdict {
+  const { category } = classifyOutbound(text);
+  let needs: boolean;
+  if (WITHHOLD_CATEGORIES.includes(category)) {
+    needs = true;
+  } else {
+    // 'other'：归不进已知外发类别，但文本里出现跨边界/不可逆措辞 → 按
+    // failClosedUnknown（默认 true）保守拦截。无确认通道时由调用方 reject，不开门。
+    needs = failClosedUnknown && category === 'other' && UNKNOWN_OUTBOUND_HINT.test(text);
+  }
+  return {
+    needsConfirm: needs,
+    category,
+    reason: needs
+      ? `检测到跨边界/不可逆外发操作（${category}）`
+      : '未检测到跨边界外发操作',
+    warning: needs ? '⚠ 此操作不可撤销：发送前需二次确认' : '',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 配置
 // ---------------------------------------------------------------------------
@@ -198,11 +264,7 @@ export function apply(ctx: Context, config: CompensationConfig): void {
    *  agent/pre-step 的强制门若另起一套判定，同一段「外发/删除」文本就会出现「主进程拦、
    *  插件放行」两种相反结论，谁生效取决于调用时序（R3-8）。两处必须同源。 */
   function needsWithhold(text: string): boolean {
-    const { category } = classifyOutbound(text);
-    if (requiresWithhold(category)) return true;
-    // 'other'：归不进已知外发类别，但文本里出现跨边界/不可逆措辞 → 按
-    // failClosedUnknown（默认 true）保守拦截。无确认通道时由调用方 reject，不开门。
-    return config.failClosedUnknown && category === 'other' && UNKNOWN_OUTBOUND_HINT.test(text);
+    return withholdText(text, config.failClosedUnknown).needsConfirm;
   }
 
   /** 当前风控档位（与 authz 插件的 getMode 同源：sandboxPolicy.getAuthMode）。
@@ -221,17 +283,9 @@ export function apply(ctx: Context, config: CompensationConfig): void {
   }
 
   function withhold(text: string): WithholdResult {
-    const { category } = classifyOutbound(text);
-    const needs = needsWithhold(text);
-    const reason = needs
-      ? `检测到跨边界/不可逆外发操作（${category}）`
-      : '未检测到跨边界外发操作';
-    return {
-      needsConfirm: needs,
-      category,
-      reason,
-      warning: needs ? '⚠ 此操作不可撤销：发送前需二次确认' : '',
-    };
+    // 委托模块级纯函数（唯一实现）：pre-step 强制门、主进程 outboundGate、e2e 夹具
+    // 全部经 withholdText 判定，不再有第二份规则副本。
+    return withholdText(text, config.failClosedUnknown);
   }
 
   function compensate(text: string, note?: string): CompensationAction {
